@@ -112,6 +112,23 @@ export interface SymbolMatch {
   market: string
 }
 
+/** One live quote row for the client finance panel. */
+export interface LiveQuote {
+  code: string
+  name?: string
+  market?: string
+  price?: number
+  changePercent?: number
+  error?: string
+}
+
+/** Server→client market snapshot (quotes for watchlist/holdings + source health). */
+export interface LiveSnapshot {
+  at: string
+  quotes: LiveQuote[]
+  health: Array<{ capability: string; ok: boolean; provider?: string }>
+}
+
 /** Richer single-security profile (quote + market-cap fields). */
 export interface StockInfo {
   code: string

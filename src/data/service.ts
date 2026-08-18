@@ -158,6 +158,14 @@ export class FinanceDataService {
     return this.registry.call<SearchResult[]>('web_search', { query }, signal)
   }
 
+  /** Route a bare code to the right market by shape: letters→US, 4-5 digits→HK, else A-share. */
+  async getAutoQuote(code: string, signal?: AbortSignal) {
+    const c = code.trim()
+    if (/[A-Za-z]/.test(c)) return { market: '美股', ...(await this.getUsQuote(c, signal)) }
+    if (/^\d{4,5}$/.test(c)) return { market: '港股', ...(await this.getHkQuote(c, signal)) }
+    return { market: 'A股', ...(await this.getRealtimeQuote(c, signal)) }
+  }
+
   async getFinancials(code: string, signal?: AbortSignal) {
     return this.registry.call('financials', { code }, signal)
   }
