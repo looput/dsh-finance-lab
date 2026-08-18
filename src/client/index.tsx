@@ -132,7 +132,8 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
 function useLive() {
   const [data, setData] = useState<LiveData>(EMPTY)
   const [loading, setLoading] = useState(false)
-  const busy = useRef(false)
+  const inflight = useRef(false)
+  const again = useRef(false)
 
   const loadState = useCallback(async () => {
     try {
@@ -141,16 +142,19 @@ function useLive() {
     } catch { /* keep prior */ }
   }, [])
 
+  // Single-flight: if a refresh is requested while one is running, re-run once it
+  // finishes so a freshly-added item always gets its quote without racing the server.
   const loadLive = useCallback(async () => {
-    if (busy.current) return
-    busy.current = true
+    if (inflight.current) { again.current = true; return }
+    inflight.current = true
     setLoading(true)
     try {
       const s = await apiGet<LiveData>('/live')
       setData({ at: s.at, quotes: s.quotes ?? [], indices: s.indices ?? [], health: s.health ?? [], holdings: s.holdings ?? [], watchlist: s.watchlist ?? [], portfolioPath: s.portfolioPath })
     } catch { /* keep prior */ } finally {
-      busy.current = false
+      inflight.current = false
       setLoading(false)
+      if (again.current) { again.current = false; void loadLive() }
     }
   }, [])
 

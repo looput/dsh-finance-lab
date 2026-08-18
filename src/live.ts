@@ -38,9 +38,10 @@ export async function buildLiveSnapshot(
   try {
     const ov = await finance.getMarketOverview(signal)
     if (ov.ok && Array.isArray(ov.data)) {
-      indices = (ov.data as IndexQuote[])
-        .filter((d) => ['000001', '399001', '399006', '000300', '000688'].includes(String(d.code)))
-        .slice(0, 5)
+      const all = ov.data as IndexQuote[]
+      const preferred = ['000001', '399001', '399006', '000300', '000688']
+      const picked = all.filter((d) => preferred.includes(String(d.code)))
+      indices = (picked.length ? picked : all).slice(0, 5)
     }
   } catch { /* indices are best-effort */ }
 
