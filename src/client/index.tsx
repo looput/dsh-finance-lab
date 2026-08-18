@@ -258,6 +258,20 @@ function HoldingsView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; 
   }, 0)
   const pnl = totalValue - totalCost
   const pnlPct = totalCost ? (pnl / totalCost) * 100 : 0
+  // 配置 / 集中度（借鉴 dsh-finance 的 portfolio_risk 思路）
+  const denom = totalValue > 0 ? totalValue : 1
+  const valOf = (hd: PortfolioHolding) => {
+    const p = quoteBy.get(keyOf(hd.code, hd.type))?.price
+    return (typeof p === 'number' ? p : hd.avgCost) * hd.quantity
+  }
+  const byType = { stock: 0, fund: 0 }
+  const weights = data.holdings.map((hd) => {
+    const w = (valOf(hd) / denom) * 100
+    byType[hd.type] += w
+    return { name: quoteBy.get(keyOf(hd.code, hd.type))?.name || hd.name || hd.code, w }
+  }).sort((a, b) => b.w - a.w)
+  const top1 = weights[0]?.w ?? 0
+  const top3 = weights.slice(0, 3).reduce((s, x) => s + x.w, 0)
   function addHolding() {
     const c = hCode.trim(); const q = Number(hQty); const av = Number(hCost)
     if (!c || !Number.isFinite(q) || !Number.isFinite(av)) return
@@ -283,6 +297,15 @@ function HoldingsView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; 
       h('div', { style: { flex: 1 } }, '合计'),
       h('div', { style: { textAlign: 'right' } }, `市值 ${totalValue.toFixed(0)} · `,
         h('span', { style: { color: colorOf(pnl) } }, `${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)} (${pctStr(pnlPct)})`))) : null,
+    data.holdings.length ? h('div', { style: { ...S.card, marginTop: 2 } },
+      h('div', { style: S.title }, '配置 · 集中度'),
+      h('div', { style: { display: 'flex', height: 8, borderRadius: 999, overflow: 'hidden', background: V('--dsw-alias-bg-module-platform', '#eef0f3') } },
+        byType.stock > 0 ? h('div', { style: { width: `${byType.stock}%`, background: BRAND } }) : null,
+        byType.fund > 0 ? h('div', { style: { width: `${byType.fund}%`, background: '#e0a53f' } }) : null),
+      h('div', { style: { display: 'flex', gap: 12, ...S.muted } },
+        h('span', null, h('span', { style: { color: BRAND } }, '● '), `股票 ${byType.stock.toFixed(0)}%`),
+        h('span', null, h('span', { style: { color: '#e0a53f' } }, '● '), `基金 ${byType.fund.toFixed(0)}%`)),
+      h('div', { style: S.muted }, `集中度：最大 ${top1.toFixed(0)}%（${weights[0]?.name ?? '—'}）· 前三 ${top3.toFixed(0)}%`)) : null,
     h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
       h('input', { style: { ...S.input, flex: 2 }, placeholder: '代码', value: hCode, onChange: (e: any) => setHCode(e.target.value) }),
       h('input', { style: { ...S.input, flex: 1 }, placeholder: '数量', value: hQty, onChange: (e: any) => setHQty(e.target.value) }),

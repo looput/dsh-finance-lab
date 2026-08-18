@@ -256,10 +256,12 @@ export class FinanceDataService {
   async analyzePortfolio(signal?: AbortSignal) {
     const holdings = this.getHoldings()
     const enriched: Holding[] = []
+    const markets: string[] = []
     let quoteOk = false
     for (const h of holdings) {
       const item: Holding = { ...h, type: h.type ?? 'stock' }
       const quote = await this.getAutoQuote(h.code, signal, item.type)
+      markets.push(quote.market ?? (item.type === 'fund' ? '基金' : 'A股'))
       if (quote.ok && quote.data?.price != null) {
         quoteOk = true
         item.currentPrice = quote.data.price
@@ -282,7 +284,40 @@ export class FinanceDataService {
         totalProfit: totalValue - totalCost,
         profitPercent: totalCost ? ((totalValue - totalCost) / totalCost) * 100 : 0,
       },
+      risk: computeRisk(enriched, markets, totalValue),
       holdings: enriched,
     }
+  }
+}
+
+/**
+ * Deterministic exposure/concentration snapshot (adapted from the portfolio-risk idea in
+ * zhang787jun/dsh-finance). Weights are share of market value; concentration uses top-N and HHI.
+ */
+export function computeRisk(holdings: Holding[], markets: string[], totalValue: number) {
+  const val = (h: Holding) => h.marketValue ?? h.avgCost * h.quantity
+  const denom = totalValue > 0 ? totalValue : holdings.reduce((s, h) => s + val(h), 0) || 1
+  const pct = (n: number) => Number(((n / denom) * 100).toFixed(2))
+
+  const byType: Record<string, number> = {}
+  const byMarket: Record<string, number> = {}
+  const weights = holdings.map((h, i) => {
+    const w = pct(val(h))
+    byType[h.type] = (byType[h.type] ?? 0) + w
+    const mkt = markets[i] ?? (h.type === 'fund' ? '基金' : 'A股')
+    byMarket[mkt] = (byMarket[mkt] ?? 0) + w
+    return { code: h.code, name: h.name, type: h.type, weight: w }
+  }).sort((a, b) => b.weight - a.weight)
+
+  const round = (o: Record<string, number>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, Number(v.toFixed(2))]))
+  const hhi = Number(weights.reduce((s, w) => s + (w.weight / 100) ** 2, 0).toFixed(4))
+  return {
+    byType: round(byType),
+    byMarket: round(byMarket),
+    top1: weights[0]?.weight ?? 0,
+    top3: Number(weights.slice(0, 3).reduce((s, w) => s + w.weight, 0).toFixed(2)),
+    hhi, // 0..1; higher = more concentrated (1 = single position)
+    largest: weights[0],
+    weights,
   }
 }
