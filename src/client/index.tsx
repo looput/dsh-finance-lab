@@ -73,29 +73,40 @@ function fmt(n: number | undefined, d = 2): string {
   return typeof n === 'number' && Number.isFinite(n) ? n.toFixed(d) : '—'
 }
 
-function ChangeCell(props: { pct?: number }) {
-  const pct = props.pct
-  if (typeof pct !== 'number' || !Number.isFinite(pct)) return h('span', { style: S.muted }, '—')
-  const color = pct >= 0 ? UP : DOWN
-  const w = Math.min(Math.abs(pct), 10) / 10 * 46
-  return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, color } },
-    h('span', { style: { width: 46, height: 6, background: V('--dsw-alias-bg-module-platform', '#eee'), borderRadius: 3, overflow: 'hidden' } },
-      h('span', { style: { display: 'block', width: w, height: 6, background: color } })),
-    h('span', { style: { minWidth: 52, textAlign: 'right' } }, `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`))
+// Mini K-line: an SVG polyline of recent closes, colored by net direction.
+function Sparkline(props: { data?: number[]; color: string }) {
+  const data = props.data
+  const w = 72
+  const ht = 24
+  const pad = 2
+  if (!data || data.length < 2) return h('span', { style: { width: w, display: 'inline-block', textAlign: 'center', ...S.muted } }, '—')
+  const min = Math.min(...data)
+  const max = Math.max(...data)
+  const range = max - min || 1
+  const step = (w - pad * 2) / (data.length - 1)
+  const pts = data
+    .map((v, i) => `${(pad + i * step).toFixed(1)},${(pad + (ht - pad * 2) * (1 - (v - min) / range)).toFixed(1)}`)
+    .join(' ')
+  return h('svg', { width: w, height: ht, viewBox: `0 0 ${w} ${ht}`, style: { display: 'block', flex: '0 0 auto' } },
+    h('polyline', { points: pts, fill: 'none', stroke: props.color, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }))
 }
 
 function QuoteRow(props: { q: LiveQuote }) {
   const q = props.q
+  const pct = q.changePercent
+  const pctColor = typeof pct === 'number' ? (pct >= 0 ? UP : DOWN) : V('--dsw-alias-label-tertiary', '#999')
+  const sparkColor = q.spark && q.spark.length >= 2 ? (q.spark[q.spark.length - 1]! >= q.spark[0]! ? UP : DOWN) : pctColor
   return h('div', { style: S.row },
     h('div', { style: { flex: 1, minWidth: 0 } },
       h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, q.name || q.code),
       h('div', { style: S.muted }, `${q.market ?? ''} ${q.code}`)),
-    h('div', { style: { width: 66, textAlign: 'right' } }, q.error ? h('span', { style: S.muted }, '限流') : fmt(q.price)),
-    h('div', { style: { width: 120, textAlign: 'right' } }, h(ChangeCell, { pct: q.changePercent })))
+    h(Sparkline, { data: q.spark, color: sparkColor }),
+    h('div', { style: { width: 58, textAlign: 'right' } }, q.error ? h('span', { style: S.muted }, '限流') : fmt(q.price)),
+    h('div', { style: { width: 56, textAlign: 'right', color: pctColor } }, typeof pct === 'number' ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'))
 }
 
-function Drawer(props: { scope: FinanceScope; onClose: () => void }) {
-  const { scope, onClose } = props
+function Drawer(props: { scope: FinanceScope; onClose: () => void; docked: boolean; onToggleDock: () => void }) {
+  const { scope, onClose, docked, onToggleDock } = props
   const { value, writable } = useConfig(scope)
   const holdings = value.holdings ?? []
   const watchlist = value.watchlist ?? []
@@ -118,7 +129,8 @@ function Drawer(props: { scope: FinanceScope; onClose: () => void }) {
     void scope.set('liveRequest', Date.now())
     window.setTimeout(() => setLoading(false), 10_000)
   }
-  useEffect(() => { refresh() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // Auto-refresh once only when there is no cached snapshot; otherwise the user drives updates via 刷新.
+  useEffect(() => { if (!snap) refresh() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const [code, setCode] = useState('')
   const [qty, setQty] = useState('100')
@@ -148,12 +160,13 @@ function Drawer(props: { scope: FinanceScope; onClose: () => void }) {
   const watchQuotes: LiveQuote[] = watchlist.map((c) => quoteBy.get(c) ?? ({ code: c }))
 
   return h('div', null,
-    h('div', { style: S.backdrop, onClick: onClose }),
-    h('div', { style: S.drawer },
+    docked ? null : h('div', { style: S.backdrop, onClick: onClose }),
+    h('div', { style: docked ? { ...S.drawer, boxShadow: 'none' } : S.drawer },
       h('div', { style: S.header },
         h('span', { style: { fontSize: 16 } }, '📈'),
         h('div', { style: { flex: 1, fontWeight: 600 } }, 'DSN 金融面板'),
         h('button', { style: S.btn, onClick: refresh, disabled: loading }, loading ? '刷新中…' : '刷新'),
+        h('button', { style: { ...S.btn, padding: '4px 8px' }, title: docked ? '切换为浮动窗' : '停靠为侧栏页', onClick: onToggleDock }, docked ? '浮动' : '停靠'),
         h('button', { style: { ...S.btn, padding: '4px 8px' }, onClick: onClose }, '×')),
       h('div', { style: S.body },
         h('div', { style: S.section },
@@ -214,17 +227,24 @@ function Drawer(props: { scope: FinanceScope; onClose: () => void }) {
 }
 
 function FootAction(props: { scope: FinanceScope; wide?: boolean }) {
-  const [open, setOpen] = useState(false)
+  // Open/dock state is persisted, so a docked panel behaves like a standing side page across reloads.
+  const { value } = useConfig(props.scope)
+  const open = value.panelOpen === true
+  const docked = value.panelDocked !== false // default: docked (page-like)
+  const setOpen = (v: boolean) => void props.scope.set('panelOpen', v)
+  const setDocked = (v: boolean) => void props.scope.set('panelDocked', v)
   const trigger = h('button', {
-    title: '金融面板', onClick: () => setOpen(true),
+    title: '金融面板', onClick: () => setOpen(!open),
     style: {
       display: 'flex', alignItems: 'center', gap: 8, width: '100%', cursor: 'pointer',
-      background: 'transparent', border: 'none', color: V('--dsw-alias-label-secondary', '#555'),
+      background: 'transparent', border: 'none',
+      color: open ? V('--dsw-alias-brand-primary', '#4b7bec') : V('--dsw-alias-label-secondary', '#555'),
       padding: props.wide ? '6px 8px' : 8, borderRadius: 8, font: 'inherit', fontSize: 13,
       justifyContent: props.wide ? 'flex-start' : 'center',
     } as CSSProperties,
   }, h('span', { style: { fontSize: 16 } }, '📈'), props.wide ? h('span', null, '金融面板') : null)
-  return h('div', null, trigger, open ? h(Drawer, { scope: props.scope, onClose: () => setOpen(false) }) : null)
+  return h('div', null, trigger,
+    open ? h(Drawer, { scope: props.scope, docked, onClose: () => setOpen(false), onToggleDock: () => setDocked(!docked) }) : null)
 }
 
 function SettingsCard(props: { scope: FinanceScope }) {

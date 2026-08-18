@@ -19,6 +19,10 @@ export interface Config {
   liveRequest?: number
   /** Server-written snapshot (quotes + source health) rendered by the finance panel. */
   liveSnapshot?: LiveSnapshot
+  /** Finance panel open state (persisted so a docked page survives reloads). */
+  panelOpen?: boolean
+  /** Finance panel docked (side page) vs floating drawer. */
+  panelDocked?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -35,6 +39,8 @@ export const Config: Schema<Config> = Schema.object({
   probeReportPath: Schema.string().default('data/probe-report.json'),
   liveRequest: Schema.number(),
   liveSnapshot: Schema.any(),
+  panelOpen: Schema.boolean(),
+  panelDocked: Schema.boolean(),
 })
 
 export const name = 'dsn-finance'

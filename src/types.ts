@@ -119,6 +119,8 @@ export interface LiveQuote {
   market?: string
   price?: number
   changePercent?: number
+  /** Recent closing prices for the mini K-line sparkline (oldest→newest). */
+  spark?: number[]
   error?: string
 }
 

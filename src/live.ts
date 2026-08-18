@@ -9,12 +9,21 @@ export async function buildLiveSnapshot(finance: FinanceDataService, codes: stri
   const quotes: LiveQuote[] = []
   for (const code of codes) {
     const r = await finance.getAutoQuote(code, signal)
+    // Mini K-line series (best-effort; a rate-limited kline just omits the sparkline).
+    let spark: number[] | undefined
+    try {
+      const kl = await finance.getAutoKline(code, signal)
+      if (kl.ok && Array.isArray(kl.data) && kl.data.length) {
+        spark = kl.data.map((b) => b.close).filter((n) => Number.isFinite(n)).slice(-40)
+      }
+    } catch { /* omit sparkline on failure */ }
     quotes.push({
       code,
       market: r.market,
       name: r.ok ? r.data?.name : undefined,
       price: r.ok ? r.data?.price : undefined,
       changePercent: r.ok ? r.data?.changePercent : undefined,
+      spark: spark && spark.length >= 2 ? spark : undefined,
       error: r.ok ? undefined : r.error,
     })
   }
