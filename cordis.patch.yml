@@ -1,0 +1,12 @@
+- insert:
+    - id: dsn-finance
+      name: dsn-finance
+      config:
+        cacheTtlSec: 300
+        requestGapMs: 3000
+        httpTimeoutMs: 30000
+        holdings: []
+        watchlist:
+          - '600519'
+          - '000001'
+        probeReportPath: data/probe-report.json
