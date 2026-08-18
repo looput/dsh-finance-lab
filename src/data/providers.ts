@@ -415,11 +415,11 @@ async function ddgHtml(args: Record<string, unknown>, ctx: ProviderContext) {
   )
   const titles = [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
   const snippets = [...html.matchAll(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => stripTags(m[1]!))
-  const results: SearchResult[] = titles.slice(0, 10).map((m, i) => ({
+  const results: SearchResult[] = titles.map((m, i) => ({
     title: stripTags(m[2]!),
     url: decodeDdgHref(m[1]!),
     snippet: snippets[i],
-  })).filter((r) => r.title)
+  })).filter((r) => r.title && !/duckduckgo\.com\/y\.js|ad_domain=/.test(r.url ?? '')).slice(0, 10)
   if (!results.length) throw new Error('ddg html: no results (rate-limited or challenged)')
   return { rows: results, data: results, sampleKeys: Object.keys(results[0]!) }
 }
