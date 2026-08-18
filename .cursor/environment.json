@@ -1,0 +1,17 @@
+{
+  "name": "dsn-finance",
+  "install": "npm install",
+  "terminals": [
+    {
+      "name": "dsh-web",
+      "command": "bash scripts/dev_web.sh",
+      "description": "DeepSeek Harness web UI (http://127.0.0.1:3080) with the local dsn-finance plugin loaded."
+    }
+  ],
+  "ports": [
+    {
+      "name": "dsh-web",
+      "port": 3080
+    }
+  ]
+}
