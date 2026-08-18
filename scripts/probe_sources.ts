@@ -45,10 +45,7 @@ async function main() {
     process.stdout.write(`[probe] ${meta.capability}.${meta.id} ... `)
     const started = Date.now()
     try {
-      const sampleArgs = meta.capability === 'stock_list' || meta.capability === 'indices' || meta.capability === 'sectors'
-        ? {}
-        : { code: '600519', days: 40 }
-      const data = await meta.call(sampleArgs, { timeoutMs: args.timeoutMs })
+      const data = await meta.call(meta.sampleArgs ?? {}, { timeoutMs: args.timeoutMs })
       const rows = data.rows
       const ok = Array.isArray(rows) ? rows.length > 0 : data.data != null
       const result: ProbeResult = {
@@ -58,7 +55,7 @@ async function main() {
         latencyMs: Date.now() - started,
         error: ok ? null : 'empty result',
         sampleKeys: data.sampleKeys,
-        endpointRef: meta.akshareRef,
+        endpointRef: meta.endpointRef,
       }
       results.push(result)
       console.log(ok ? `OK ${result.latencyMs}ms` : `FAIL ${result.error}`)
@@ -69,7 +66,7 @@ async function main() {
         ok: false,
         latencyMs: Date.now() - started,
         error: err instanceof Error ? err.message.slice(0, 500) : String(err),
-        endpointRef: meta.akshareRef,
+        endpointRef: meta.endpointRef,
       }
       results.push(result)
       console.log(`FAIL ${result.error}`)

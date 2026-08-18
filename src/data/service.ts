@@ -1,4 +1,4 @@
-import type { Holding, KlineBar, StockQuote } from '../types.js'
+import type { Holding, KlineBar, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
 import type { ProviderRegistry } from './registry.js'
 import type { HoldingConfig } from '../config.js'
 
@@ -124,6 +124,54 @@ export class FinanceDataService {
 
   async getMarketOverview(signal?: AbortSignal) {
     return this.registry.call('indices', {}, signal)
+  }
+
+  async getUsQuote(code: string, signal?: AbortSignal) {
+    return this.registry.call<StockQuote>('us_quote', { code }, signal)
+  }
+
+  async getUsKline(code: string, period = 'daily', start?: string, end?: string, signal?: AbortSignal) {
+    return this.registry.call<KlineBar[]>('us_kline', { code, period, start, end, days: 120 }, signal)
+  }
+
+  async getHkQuote(code: string, signal?: AbortSignal) {
+    return this.registry.call<StockQuote>('hk_quote', { code }, signal)
+  }
+
+  async getHkKline(code: string, period = 'daily', start?: string, end?: string, signal?: AbortSignal) {
+    return this.registry.call<KlineBar[]>('hk_kline', { code, period, start, end, days: 120 }, signal)
+  }
+
+  async getHkList(signal?: AbortSignal) {
+    return this.registry.call<Array<{ code: string; name: string }>>('hk_list', {}, signal)
+  }
+
+  async searchSymbol(query: string, signal?: AbortSignal) {
+    return this.registry.call<SymbolMatch[]>('symbol_search', { query }, signal)
+  }
+
+  async getStockInfo(code: string, signal?: AbortSignal) {
+    return this.registry.call<StockInfo>('stock_info', { code }, signal)
+  }
+
+  async webSearch(query: string, signal?: AbortSignal) {
+    return this.registry.call<SearchResult[]>('web_search', { query }, signal)
+  }
+
+  /** Route a bare code to the right market by shape: letters→US, 4-5 digits→HK, else A-share. */
+  async getAutoQuote(code: string, signal?: AbortSignal) {
+    const c = code.trim()
+    if (/[A-Za-z]/.test(c)) return { market: '美股', ...(await this.getUsQuote(c, signal)) }
+    if (/^\d{4,5}$/.test(c)) return { market: '港股', ...(await this.getHkQuote(c, signal)) }
+    return { market: 'A股', ...(await this.getRealtimeQuote(c, signal)) }
+  }
+
+  /** Same market routing as getAutoQuote, for daily K-line (sparkline source). */
+  async getAutoKline(code: string, signal?: AbortSignal) {
+    const c = code.trim()
+    if (/[A-Za-z]/.test(c)) return this.getUsKline(c, 'daily', undefined, undefined, signal)
+    if (/^\d{4,5}$/.test(c)) return this.getHkKline(c, 'daily', undefined, undefined, signal)
+    return this.getKline(c, 'daily', undefined, undefined, signal)
   }
 
   async getFinancials(code: string, signal?: AbortSignal) {

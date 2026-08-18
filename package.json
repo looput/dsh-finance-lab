@@ -11,7 +11,7 @@
     },
     "./client": {
       "types": "./lib/client/index.d.ts",
-      "default": "./lib/client/index.js"
+      "default": "./lib/client/wrapped-bundle.js"
     },
     "./package.json": "./package.json"
   },
@@ -22,9 +22,10 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "prepare": "npm run build",
-    "probe": "tsx scripts/probe_sources.ts --out data/probe-report.json"
+    "probe": "tsx scripts/probe_sources.ts --out data/probe-report.json",
+    "test:avail": "tsx scripts/test_availability.ts"
   },
   "dsh": {
     "bundle": {
@@ -62,6 +63,7 @@
     "@deepseek-ai/schemastery": "3.18.1",
     "@types/node": "^22.13.10",
     "@types/react": "^19.0.10",
+    "esbuild": "^0.28.2",
     "react": "^19.0.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"

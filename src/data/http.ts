@@ -1,4 +1,4 @@
-const DEFAULT_UA =
+export const DEFAULT_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 export interface HttpGetOptions {
@@ -6,6 +6,8 @@ export interface HttpGetOptions {
   signal?: AbortSignal
   headers?: Record<string, string>
   referer?: string
+  /** Decode the response body with this charset (e.g. 'gbk' for gtimg). */
+  encoding?: string
 }
 
 export async function httpGetJson<T = unknown>(
@@ -70,6 +72,9 @@ export async function httpGetText(
       },
     })
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+    if (options.encoding && options.encoding.toLowerCase() !== 'utf-8') {
+      return new TextDecoder(options.encoding).decode(await res.arrayBuffer())
+    }
     return await res.text()
   } finally {
     clearTimeout(timer)

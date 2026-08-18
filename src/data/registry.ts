@@ -130,8 +130,7 @@ export class ProviderRegistry {
       const meta = PROVIDERS[i]!
       const started = Date.now()
       try {
-        const sampleArgs = sampleArgsFor(meta.id)
-        const data = await meta.call(sampleArgs, {
+        const data = await meta.call(meta.sampleArgs ?? {}, {
           timeoutMs: this.options.httpTimeoutMs,
           signal,
         })
@@ -144,7 +143,7 @@ export class ProviderRegistry {
           latencyMs: Date.now() - started,
           error: ok ? null : 'empty result',
           sampleKeys: data.sampleKeys,
-          endpointRef: meta.akshareRef,
+          endpointRef: meta.endpointRef,
         })
       } catch (err) {
         results.push({
@@ -153,7 +152,7 @@ export class ProviderRegistry {
           ok: false,
           latencyMs: Date.now() - started,
           error: err instanceof Error ? err.message.slice(0, 500) : String(err),
-          endpointRef: meta.akshareRef,
+          endpointRef: meta.endpointRef,
         })
       }
     }
@@ -170,13 +169,6 @@ export class ProviderRegistry {
     this.applyReport(report)
     return report
   }
-}
-
-function sampleArgsFor(providerId: string): Record<string, unknown> {
-  if (providerId.includes('kline') || providerId.includes('fin') || providerId.includes('stock_get') || providerId.includes('individual')) {
-    return { code: '600519', days: 40 }
-  }
-  return {}
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
