@@ -4,15 +4,19 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import '@deepseek-ai/dsh-system-prompt'
 import '@deepseek-ai/dsh-tools'
-import { Config, type HoldingConfig, name as pluginName } from './config.js'
+import '@deepseek-ai/dsh-web'
+import '@deepseek-ai/dsh-host-webserver'
+import { Config, name as pluginName } from './config.js'
 import { ProviderRegistry } from './data/registry.js'
 import { FinanceDataService } from './data/service.js'
+import { PortfolioStore } from './store.js'
 import { registerTools } from './tools/register.js'
 import { registerSkills } from './skills.js'
-import { buildLiveSnapshot } from './live.js'
+import { registerRoutes } from './server-routes.js'
+import { createDdgSearchProvider } from './web-ddg.js'
 
 export const name = pluginName
-export const inject = ['tools', 'systemPrompt']
+export const inject = ['tools', 'systemPrompt', 'web', 'webServer']
 
 export { Config }
 export const FINANCE_NS = settingsNamespace('dsn-finance')
@@ -22,33 +26,9 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 export function apply(ctx: Context, config: Config) {
   let current = () => config
 
-  let lastLiveRequest = 0
-  let refreshing = false
-  async function refreshLive() {
-    if (refreshing) return
-    refreshing = true
-    try {
-      const cfg = current()
-      const codes = [...new Set([...(cfg.holdings ?? []).map((h) => h.code), ...(cfg.watchlist ?? [])])]
-        .map((c) => String(c).trim())
-        .filter(Boolean)
-      const snapshot = await buildLiveSnapshot(finance, codes)
-      const settings = ctx.get('settings')
-      if (settings?.writable) await settings.update(FINANCE_NS, { liveSnapshot: snapshot })
-    } catch { /* best-effort; panel shows stale/empty */ } finally {
-      refreshing = false
-    }
-  }
-
   installSettingsSection(ctx, FINANCE_NS, Config, config, {
     setSource: (source) => { current = source },
-    onChange: () => {
-      const req = current().liveRequest ?? 0
-      if (req > lastLiveRequest) {
-        lastLiveRequest = req
-        void refreshLive()
-      }
-    },
+    onChange: () => {},
   })
 
   const registry = new ProviderRegistry({
@@ -58,29 +38,37 @@ export function apply(ctx: Context, config: Config) {
     probeReportPath: config.probeReportPath,
     packageRoot,
   })
-
   void registry.loadProbeReport()
+
+  const portfolioPath = path.isAbsolute(config.portfolioPath)
+    ? config.portfolioPath
+    : path.join(packageRoot, config.portfolioPath)
+  const store = new PortfolioStore(portfolioPath)
+  void store.load()
 
   const finance = new FinanceDataService(
     registry,
-    () => current().holdings ?? [],
-    async (holdings: HoldingConfig[]) => {
-      const settings = ctx.get('settings')
-      if (settings?.writable) {
-        await settings.update(FINANCE_NS, { holdings })
-      } else {
-        // fallback: mutate composition snapshot in-memory only
-        ;(config as Config).holdings = holdings
-      }
-    },
+    () => store.get().holdings,
+    async (holdings) => { await store.setHoldings(holdings) },
   )
 
   ctx.provide('financeData', finance)
-  registerTools(ctx, finance)
+  registerTools(ctx, finance, store)
   registerSkills(ctx, packageRoot)
+  registerRoutes(ctx.webServer, finance, store)
 
-  ctx.effect(() => () => {
-    // registrations cleaned by cordis effects
+  // Replace the default (key-gated) web search with DuckDuckGo so `web_search` works key-free.
+  ctx.web.registerSearchProvider(createDdgSearchProvider((q, signal) => finance.webSearch(q, signal)))
+
+  ctx.systemPrompt.section({
+    name: 'dsn-finance:portfolio',
+    order: 121,
+    text: [
+      '## Finance portfolio file',
+      `- Holdings/watchlist live in a local JSON file: ${store.path}`,
+      '- After reading a user-uploaded holdings screenshot, call import_holdings (bulk) or upsert_holding to write it; the "金融面板" sidebar refreshes live.',
+      '- Use type:"fund" for funds (基金, 6-digit code) and type:"stock" for stocks (A股/港股/美股).',
+    ].join('\n'),
   })
 }
 

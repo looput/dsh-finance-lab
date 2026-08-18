@@ -2,6 +2,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import '@deepseek-ai/dsh-tools'
 import type { FinanceDataService } from '../data/service.js'
+import type { PortfolioStore } from '../store.js'
+import type { AssetType } from '../types.js'
 
 function text(lines: string | string[]) {
   const body = Array.isArray(lines) ? lines.join('\n') : lines
@@ -17,7 +19,7 @@ const jsonOut = {
   render: (_args: unknown, value: unknown) => text(JSON.stringify(value, null, 2)),
 }
 
-export function registerTools(ctx: Context, finance: FinanceDataService) {
+export function registerTools(ctx: Context, finance: FinanceDataService, store: PortfolioStore) {
   ctx.tools.register(defineTool({
     name: 'probe_finance_sources',
     description: '逐个探测公开行情 HTTP 端点健康状态（串行、有间隔）。公开源不稳定时应先运行本工具。',
@@ -189,6 +191,63 @@ export function registerTools(ctx: Context, finance: FinanceDataService) {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'get_fund_quote',
+    description: '获取公募基金最新单位净值与日涨跌（东财 pingzhongdata，免费直连）。code 为 6 位基金代码，如 110022。',
+    parameters: {
+      code: { type: 'string', required: true, description: '基金代码，如 110022 / 005827' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getFundQuote(args.code, exec.signal)
+      if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, data: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_fund_kline',
+    description: '获取公募基金历史单位净值走势（东财 pingzhongdata）。',
+    parameters: {
+      code: { type: 'string', required: true, description: '基金代码，如 110022' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getFundKline(args.code, exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, code: args.code, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, code: args.code, count: res.data.length, data: res.data.slice(-60) })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_fund_rank',
+    description: '开放式基金排行（东财，按近6月涨幅；货币基金按近1年收益）。fundType：all/stock/hybrid/bond/index/qdii/money。',
+    parameters: {
+      fundType: { type: 'string', enum: ['all', 'stock', 'hybrid', 'bond', 'index', 'qdii', 'money'], description: '基金分类，默认 all' },
+      size: { type: 'number', description: '返回条数（1-50，默认 20）' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getFundRank(args.fundType ?? 'all', args.size ?? 20, exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, count: res.data.length, rows: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_macro_china',
+    description: '中国宏观经济指标（东财 datacenter，对照 AkShare macro_china_*）。series：cpi/ppi/pmi/gdp/money_supply。返回近 24 期与最新值。',
+    parameters: {
+      series: { type: 'string', required: true, enum: ['cpi', 'ppi', 'pmi', 'gdp', 'money_supply'], description: '指标序列' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getMacro(args.series, exec.signal)
+      if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, data: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'web_search',
     description: '免费网页搜索（DuckDuckGo，无需 API Key）。用于查行情消息、财报、公司资讯。',
     parameters: {
@@ -287,12 +346,13 @@ export function registerTools(ctx: Context, finance: FinanceDataService) {
 
   ctx.tools.register(defineTool({
     name: 'upsert_holding',
-    description: '新增或更新本地持仓（不依赖行情源）。',
+    description: '新增或更新一条本地持仓（写入持仓文件，不依赖行情源）。基金用 type:"fund"，股票用 type:"stock"。',
     parameters: {
       code: { type: 'string', required: true },
       name: { type: 'string' },
       quantity: { type: 'number', required: true },
       avgCost: { type: 'number', required: true },
+      type: { type: 'string', enum: ['stock', 'fund'], description: '资产类型，默认 stock' },
     },
     output: jsonOut,
     async execute(args) {
@@ -301,8 +361,44 @@ export function registerTools(ctx: Context, finance: FinanceDataService) {
         name: args.name,
         quantity: args.quantity,
         avgCost: args.avgCost,
+        type: (args.type as AssetType) ?? 'stock',
       })
-      return asJson({ ok: true, holdings })
+      return asJson({ ok: true, path: store.path, holdings })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'import_holdings',
+    description: '批量导入/覆盖本地持仓（适合识别持仓截图后一次性写入）。整表替换现有持仓。基金 type:"fund"，股票 type:"stock"。',
+    parameters: {
+      holdings: {
+        type: 'array',
+        required: true,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            code: { type: 'string' },
+            name: { type: 'string' },
+            quantity: { type: 'number' },
+            avgCost: { type: 'number' },
+            type: { type: 'string', enum: ['stock', 'fund'] },
+          },
+        },
+      },
+    },
+    output: jsonOut,
+    async execute(args) {
+      const input = (args.holdings as Array<Record<string, unknown>>) ?? []
+      const rows = input.map((row) => ({
+        code: String(row.code ?? '').trim(),
+        name: row.name ? String(row.name) : undefined,
+        quantity: Number(row.quantity) || 0,
+        avgCost: Number(row.avgCost) || 0,
+        type: (row.type === 'fund' ? 'fund' : 'stock') as AssetType,
+      })).filter((row) => row.code)
+      const file = await store.setHoldings(rows)
+      return asJson({ ok: true, path: store.path, count: rows.length, holdings: file.holdings })
     },
   }))
 
@@ -311,11 +407,51 @@ export function registerTools(ctx: Context, finance: FinanceDataService) {
     description: '删除本地持仓。',
     parameters: {
       code: { type: 'string', required: true },
+      type: { type: 'string', enum: ['stock', 'fund'] },
     },
     output: jsonOut,
     async execute(args) {
-      const holdings = await finance.removeHolding(args.code)
-      return asJson({ ok: true, holdings })
+      const file = await store.removeHolding(args.code, args.type as AssetType | undefined)
+      return asJson({ ok: true, path: store.path, holdings: file.holdings })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'add_watchlist',
+    description: '添加自选（写入持仓文件）。基金 type:"fund"，股票 type:"stock"。',
+    parameters: {
+      code: { type: 'string', required: true },
+      name: { type: 'string' },
+      type: { type: 'string', enum: ['stock', 'fund'] },
+    },
+    output: jsonOut,
+    async execute(args) {
+      const file = await store.addWatch({ code: args.code, name: args.name, type: (args.type as AssetType) ?? 'stock' })
+      return asJson({ ok: true, watchlist: file.watchlist })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'remove_watchlist',
+    description: '移除自选。',
+    parameters: {
+      code: { type: 'string', required: true },
+      type: { type: 'string', enum: ['stock', 'fund'] },
+    },
+    output: jsonOut,
+    async execute(args) {
+      const file = await store.removeWatch(args.code, args.type as AssetType | undefined)
+      return asJson({ ok: true, watchlist: file.watchlist })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_portfolio_file',
+    description: '返回本地持仓/自选文件路径与内容（用于定位并编辑该 JSON 文件）。',
+    parameters: {},
+    output: jsonOut,
+    async execute() {
+      return asJson({ ok: true, path: store.path, ...store.get() })
     },
   }))
 

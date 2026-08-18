@@ -596,6 +596,117 @@ async function ddgInstant(args: Record<string, unknown>, ctx: ProviderContext) {
   return { rows: results, data: results, sampleKeys: Object.keys(results[0]!) }
 }
 
+// ---- 基金（东财 pingzhongdata：单位净值走势 + 名称，免费直连）----
+interface FundData { name?: string; navTrend: Array<{ date: string; nav: number }> }
+const fundCache = new Map<string, { at: number; data: FundData }>()
+
+function fundCode(code: string): string {
+  return String(code).replace(/\D/g, '').padStart(6, '0').slice(-6)
+}
+
+// Source: fund.eastmoney.com pingzhongdata (Data_netWorthTrend + fS_name).
+async function emFundData(code: string, ctx: ProviderContext): Promise<FundData> {
+  const c = fundCode(code)
+  const hit = fundCache.get(c)
+  if (hit && Date.now() - hit.at < 60_000) return hit.data
+  const text = await httpGetText(`https://fund.eastmoney.com/pingzhongdata/${c}.js`, {}, opts(ctx, 'https://fund.eastmoney.com/'))
+  const nameM = text.match(/fS_name\s*=\s*"([^"]*)"/)
+  const trendM = text.match(/Data_netWorthTrend\s*=\s*(\[[\s\S]*?\])\s*;/)
+  const navTrend: Array<{ date: string; nav: number }> = []
+  if (trendM) {
+    const arr = JSON.parse(trendM[1]!) as Array<{ x: number; y: number }>
+    for (const p of arr) {
+      const nav = num(p.y)
+      if (nav != null) navTrend.push({ date: new Date(p.x).toISOString().slice(0, 10), nav })
+    }
+  }
+  if (!navTrend.length) throw new Error(`fund ${c}: empty nav trend`)
+  const data: FundData = { name: nameM?.[1] || undefined, navTrend }
+  fundCache.set(c, { at: Date.now(), data })
+  return data
+}
+
+async function emFundQuote(args: Record<string, unknown>, ctx: ProviderContext) {
+  const code = fundCode(String(args.code ?? ''))
+  const fd = await emFundData(code, ctx)
+  const last = fd.navTrend.at(-1)!
+  const prev = fd.navTrend.at(-2)
+  const quote: StockQuote = {
+    code,
+    name: fd.name,
+    price: last.nav,
+    change: prev ? Number((last.nav - prev.nav).toFixed(4)) : undefined,
+    changePercent: prev && prev.nav ? Number((((last.nav - prev.nav) / prev.nav) * 100).toFixed(2)) : undefined,
+    raw: { navDate: last.date },
+  }
+  return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
+}
+
+async function emFundKline(args: Record<string, unknown>, ctx: ProviderContext) {
+  const fd = await emFundData(String(args.code ?? ''), ctx)
+  const bars: KlineBar[] = fd.navTrend.map((p) => ({ date: p.date, open: p.nav, high: p.nav, low: p.nav, close: p.nav, volume: 0 }))
+  return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
+}
+
+// ---- 宏观（东财 datacenter-web，中国月度/季度经济指标）----
+interface MacroSeriesDef { report: string; unit: string; headline: string; label: string }
+const MACRO_SERIES: Record<string, MacroSeriesDef> = {
+  cpi: { report: 'RPT_ECONOMY_CPI', unit: '%', headline: 'NATIONAL_SAME', label: '全国 CPI 同比' },
+  ppi: { report: 'RPT_ECONOMY_PPI', unit: '%', headline: 'BASE_SAME', label: 'PPI 同比' },
+  pmi: { report: 'RPT_ECONOMY_PMI', unit: '', headline: 'MAKE_INDEX', label: '制造业 PMI' },
+  gdp: { report: 'RPT_ECONOMY_GDP', unit: '%', headline: 'SUM_SAME', label: 'GDP 同比' },
+  money_supply: { report: 'RPT_ECONOMY_CURRENCY_SUPPLY', unit: '%', headline: 'BASIC_CURRENCY_SAME', label: 'M2 同比' },
+}
+export const MACRO_SERIES_KEYS = Object.keys(MACRO_SERIES)
+
+// Source: eastmoney datacenter-web api/data/v1/get (akshare macro_china_* 系列同源).
+async function emMacro(args: Record<string, unknown>, ctx: ProviderContext) {
+  const series = String(args.series ?? 'cpi')
+  const def = MACRO_SERIES[series] ?? MACRO_SERIES.cpi!
+  const json = await httpGetJson<{ result?: { data?: Array<Record<string, unknown>> } }>(
+    'https://datacenter-web.eastmoney.com/api/data/v1/get',
+    { columns: 'ALL', pageNumber: '1', pageSize: '24', sortColumns: 'REPORT_DATE', sortTypes: '-1', reportName: def.report },
+    opts(ctx, 'https://data.eastmoney.com/'),
+  )
+  const rows = json.result?.data ?? []
+  if (!rows.length) throw new Error(`macro ${series}: empty`)
+  const points = rows.map((r) => ({ time: String(r.TIME ?? ''), value: num(r[def.headline]) })).reverse()
+  const data = {
+    series,
+    label: def.label,
+    unit: def.unit,
+    latest: points.at(-1),
+    points,
+    rows: rows.slice(0, 6),
+  }
+  return { rows, data, sampleKeys: Object.keys(rows[0]!) }
+}
+
+// ---- 基金排行（东财 rankhandler，akshare fund_open_fund_rank_em 同源）----
+const FUND_RANK_TYPES: Record<string, string> = { all: 'all', stock: 'gp', hybrid: 'hh', bond: 'zq', index: 'zs', qdii: 'qdii', money: 'hb' }
+
+interface FundRankRow { code: string; name: string; date: string; nav?: number; accNav?: number; dayGrowth?: number; w1?: number; m1?: number; m3?: number; m6?: number; y1?: number; ytd?: number }
+
+async function emFundRank(args: Record<string, unknown>, ctx: ProviderContext) {
+  const ft = FUND_RANK_TYPES[String(args.fundType ?? 'all')] ?? 'all'
+  const pn = Math.min(Math.max(Number(args.size ?? 20), 1), 50)
+  const sc = ft === 'hb' ? '1nsyl' : '6yzf' // 货币基金按近1年收益，其余按近6月涨幅
+  const text = await httpGetText(
+    'https://fund.eastmoney.com/data/rankhandler.aspx',
+    { op: 'ph', dt: 'kf', ft, rs: '', gs: '0', sc, st: 'desc', pi: '1', pn: String(pn), dx: '1' },
+    opts(ctx, 'https://fund.eastmoney.com/data/fundranking.html'),
+  )
+  const block = text.match(/datas:\[([\s\S]*?)\]\s*,/)?.[1] ?? text.match(/datas:\[([\s\S]*)\]/)?.[1] ?? ''
+  const items = [...block.matchAll(/"([^"]*)"/g)].map((m) => m[1]!.split(','))
+  const rows: FundRankRow[] = items.filter((f) => f[0]).map((f) => ({
+    code: f[0]!, name: f[1] ?? '', date: f[3] ?? '',
+    nav: num(f[4]), accNav: num(f[5]), dayGrowth: num(f[6]),
+    w1: num(f[7]), m1: num(f[8]), m3: num(f[9]), m6: num(f[10]), y1: num(f[11]), ytd: num(f[14]),
+  }))
+  if (!rows.length) throw new Error('fund rank: empty')
+  return { rows, data: rows, sampleKeys: Object.keys(rows[0]!) }
+}
+
 export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'em_a_clist',
@@ -715,6 +826,34 @@ export const PROVIDERS: ProviderMeta[] = [
     endpointRef: 'stock_us_hist (secid via suggest)',
     sampleArgs: { code: 'AAPL', days: 40 },
     call: emUsKline,
+  },
+  {
+    id: 'em_fund_quote',
+    capability: 'fund_quote',
+    endpointRef: 'fund.eastmoney.com pingzhongdata (Data_netWorthTrend 单位净值)',
+    sampleArgs: { code: '110022' },
+    call: emFundQuote,
+  },
+  {
+    id: 'em_fund_kline',
+    capability: 'fund_kline',
+    endpointRef: 'fund.eastmoney.com pingzhongdata (净值走势序列)',
+    sampleArgs: { code: '110022' },
+    call: emFundKline,
+  },
+  {
+    id: 'em_macro',
+    capability: 'macro',
+    endpointRef: 'eastmoney datacenter-web (中国 CPI/PPI/PMI/GDP/货币供应)',
+    sampleArgs: { series: 'cpi' },
+    call: emMacro,
+  },
+  {
+    id: 'em_fund_rank',
+    capability: 'fund_rank',
+    endpointRef: 'fund.eastmoney rankhandler (开放式基金排行)',
+    sampleArgs: { fundType: 'all', size: 10 },
+    call: emFundRank,
   },
   {
     id: 'em_suggest',

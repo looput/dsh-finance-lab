@@ -17,7 +17,7 @@ const registry = new ProviderRegistry({
 })
 await registry.loadProbeReport()
 
-const holdings = [{ code: '600519', name: '贵州茅台', quantity: 100, avgCost: 1600 }]
+const holdings = [{ code: '600519', name: '贵州茅台', quantity: 100, avgCost: 1600, type: 'stock' as const }]
 const finance = new FinanceDataService(
   registry,
   () => holdings,
@@ -35,7 +35,7 @@ console.log('[smoke] kline', kline.ok ? `${kline.provider} bars=${Array.isArray(
 const indicators = await finance.getTechnicalIndicators('600519', ['MA5', 'MACD', 'RSI'])
 console.log('[smoke] indicators', indicators.ok ? JSON.stringify(indicators.data) : indicators.error)
 
-await finance.upsertHolding({ code: '000001', name: '平安银行', quantity: 1000, avgCost: 12 })
+await finance.upsertHolding({ code: '000001', name: '平安银行', quantity: 1000, avgCost: 12, type: 'stock' })
 const portfolio = await finance.analyzePortfolio()
 console.log('[smoke] portfolio', JSON.stringify(portfolio.summary), 'quoteAvailable=', portfolio.quoteAvailable)
 
@@ -47,6 +47,21 @@ console.log('[smoke] us_quote', usQuote.ok ? `${usQuote.provider} ${usQuote.data
 
 const usKline = await finance.getUsKline('AAPL')
 console.log('[smoke] us_kline', usKline.ok ? `${usKline.provider} bars=${Array.isArray(usKline.data) ? usKline.data.length : 0}` : usKline.error)
+
+const fundQuote = await finance.getFundQuote('110022')
+console.log('[smoke] fund_quote', fundQuote.ok ? `${fundQuote.provider} ${fundQuote.data?.name} nav=${fundQuote.data?.price} chg=${fundQuote.data?.changePercent}%` : fundQuote.error)
+
+const fundKline = await finance.getFundKline('110022')
+console.log('[smoke] fund_kline', fundKline.ok && Array.isArray(fundKline.data) ? `bars=${fundKline.data.length}` : fundKline.error)
+
+const fundRank = await finance.getFundRank('hybrid', 5)
+console.log('[smoke] fund_rank', fundRank.ok && Array.isArray(fundRank.data) ? `n=${fundRank.data.length} top=${(fundRank.data[0] as { name?: string })?.name}` : fundRank.error)
+
+const cpi = await finance.getMacro('cpi')
+console.log('[smoke] macro_cpi', cpi.ok ? JSON.stringify((cpi.data as { latest?: unknown }).latest) : cpi.error)
+
+const m2 = await finance.getMacro('money_supply')
+console.log('[smoke] macro_m2', m2.ok ? JSON.stringify((m2.data as { latest?: unknown }).latest) : m2.error)
 
 const hkQuote = await finance.getHkQuote('00700')
 console.log('[smoke] hk_quote', hkQuote.ok ? `${hkQuote.provider} ${hkQuote.data?.name ?? hkQuote.data?.code} price=${hkQuote.data?.price}` : hkQuote.error)

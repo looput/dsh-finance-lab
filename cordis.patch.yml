@@ -5,8 +5,11 @@
         cacheTtlSec: 300
         requestGapMs: 3000
         httpTimeoutMs: 30000
-        holdings: []
-        watchlist:
-          - '600519'
-          - '000001'
         probeReportPath: data/probe-report.json
+        portfolioPath: data/portfolio.json
+
+# Route the web search seam through this plugin's DuckDuckGo provider; the
+# default `deepseek-official` provider needs an API key and is otherwise unusable.
+- id: web
+  config:
+    searchProvider: dsn-duckduckgo

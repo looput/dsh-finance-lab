@@ -13,6 +13,12 @@ export type Capability =
   // 美股
   | 'us_quote'
   | 'us_kline'
+  // 基金
+  | 'fund_quote'
+  | 'fund_kline'
+  | 'fund_rank'
+  // 宏观
+  | 'macro'
   // 通用 / 搜索
   | 'symbol_search'
   | 'stock_info'
@@ -30,6 +36,10 @@ export const CAPABILITIES: Capability[] = [
   'hk_list',
   'us_quote',
   'us_kline',
+  'fund_quote',
+  'fund_kline',
+  'fund_rank',
+  'macro',
   'symbol_search',
   'stock_info',
   'web_search',
@@ -48,9 +58,32 @@ export const DEFAULT_PROVIDER_ORDER: Record<Capability, string[]> = {
   hk_list: ['em_hk_clist'],
   us_quote: ['yahoo_quote', 'em_us_quote'],
   us_kline: ['yahoo_kline', 'em_us_kline'],
+  fund_quote: ['em_fund_quote'],
+  fund_kline: ['em_fund_kline'],
+  fund_rank: ['em_fund_rank'],
+  macro: ['em_macro'],
   symbol_search: ['em_suggest'],
   stock_info: ['em_stock_info'],
   web_search: ['ddg_html', 'ddg_instant'],
+}
+
+/** Asset kind for a portfolio/watchlist entry. Funds share a 6-digit code shape with A-shares, so the kind is explicit. */
+export type AssetType = 'stock' | 'fund'
+
+/** A holding stored in the local portfolio file (Agent-editable, not persisted in plugin config). */
+export interface PortfolioHolding {
+  code: string
+  name?: string
+  quantity: number
+  avgCost: number
+  type: AssetType
+}
+
+/** A watchlist entry stored in the local portfolio file. */
+export interface WatchItem {
+  code: string
+  name?: string
+  type: AssetType
 }
 
 export interface ProbeResult {
@@ -74,6 +107,7 @@ export interface Holding {
   name?: string
   quantity: number
   avgCost: number
+  type: AssetType
   currentPrice?: number
   marketValue?: number
   profit?: number
@@ -117,6 +151,7 @@ export interface LiveQuote {
   code: string
   name?: string
   market?: string
+  type?: AssetType
   price?: number
   changePercent?: number
   /** Recent closing prices for the mini K-line sparkline (oldest→newest). */
@@ -124,10 +159,19 @@ export interface LiveQuote {
   error?: string
 }
 
-/** Server→client market snapshot (quotes for watchlist/holdings + source health). */
+/** One index overview row for the market header. */
+export interface IndexQuote {
+  code: string
+  name: string
+  price?: number
+  changePercent?: number
+}
+
+/** Server→client market snapshot (quotes for watchlist/holdings + indices + source health). */
 export interface LiveSnapshot {
   at: string
   quotes: LiveQuote[]
+  indices: IndexQuote[]
   health: Array<{ capability: string; ok: boolean; provider?: string }>
 }
 
