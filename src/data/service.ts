@@ -1,4 +1,4 @@
-import type { Holding, KlineBar, StockQuote } from '../types.js'
+import type { Holding, KlineBar, SearchResult, StockQuote } from '../types.js'
 import type { ProviderRegistry } from './registry.js'
 import type { HoldingConfig } from '../config.js'
 
@@ -124,6 +124,18 @@ export class FinanceDataService {
 
   async getMarketOverview(signal?: AbortSignal) {
     return this.registry.call('indices', {}, signal)
+  }
+
+  async getUsQuote(code: string, signal?: AbortSignal) {
+    return this.registry.call<StockQuote>('us_quote', { code }, signal)
+  }
+
+  async getUsKline(code: string, period = 'daily', start?: string, end?: string, signal?: AbortSignal) {
+    return this.registry.call<KlineBar[]>('us_kline', { code, period, start, end, days: 120 }, signal)
+  }
+
+  async webSearch(query: string, signal?: AbortSignal) {
+    return this.registry.call<SearchResult[]>('web_search', { query }, signal)
   }
 
   async getFinancials(code: string, signal?: AbortSignal) {

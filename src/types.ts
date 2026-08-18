@@ -5,6 +5,9 @@ export type Capability =
   | 'indices'
   | 'financials'
   | 'sectors'
+  | 'us_quote'
+  | 'us_kline'
+  | 'web_search'
 
 export const CAPABILITIES: Capability[] = [
   'stock_list',
@@ -13,6 +16,9 @@ export const CAPABILITIES: Capability[] = [
   'indices',
   'financials',
   'sectors',
+  'us_quote',
+  'us_kline',
+  'web_search',
 ]
 
 /** Default fallback order; probe may reorder to put green providers first. */
@@ -23,6 +29,9 @@ export const DEFAULT_PROVIDER_ORDER: Record<Capability, string[]> = {
   indices: ['em_index_main'],
   financials: ['em_main_finadata'],
   sectors: ['em_industry_board'],
+  us_quote: ['yahoo_quote'],
+  us_kline: ['yahoo_kline'],
+  web_search: ['ddg_html', 'ddg_instant'],
 }
 
 export interface ProbeResult {
@@ -68,6 +77,12 @@ export interface KlineBar {
   low: number
   close: number
   volume: number
+}
+
+export interface SearchResult {
+  title: string
+  url?: string
+  snippet?: string
 }
 
 export interface ProviderCallResult<T = unknown> {

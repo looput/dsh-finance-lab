@@ -42,4 +42,15 @@ console.log('[smoke] portfolio', JSON.stringify(portfolio.summary), 'quoteAvaila
 const overview = await finance.getMarketOverview()
 console.log('[smoke] indices', overview.ok ? `n=${(overview.data as unknown[])?.length}` : overview.error)
 
+const usQuote = await finance.getUsQuote('AAPL')
+console.log('[smoke] us_quote', usQuote.ok ? `${usQuote.provider} ${usQuote.data?.code} price=${usQuote.data?.price}` : usQuote.error)
+
+const usKline = await finance.getUsKline('AAPL')
+console.log('[smoke] us_kline', usKline.ok ? `${usKline.provider} bars=${Array.isArray(usKline.data) ? usKline.data.length : 0}` : usKline.error)
+
+const search = await finance.webSearch('nvidia earnings')
+console.log('[smoke] web_search', search.ok
+  ? `${search.provider} n=${Array.isArray(search.data) ? search.data.length : 0} top="${Array.isArray(search.data) ? search.data[0]?.title?.slice(0, 60) : ''}"`
+  : search.error)
+
 console.log('[smoke] done')

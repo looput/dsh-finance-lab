@@ -42,11 +42,25 @@ npx @deepseek-ai/dsh web --patch ./cordis.dev.yml
 | 工具 | 说明 |
 |------|------|
 | `probe_finance_sources` | 串行探测各 HTTP 端点 |
-| `get_stock_kline` / `get_realtime_quote` | K 线 / 单票行情 |
+| `get_stock_kline` / `get_realtime_quote` | A 股 K 线 / 单票行情 |
+| `get_us_kline` / `get_us_quote` | 美股 K 线 / 行情（Yahoo Finance 免费直连） |
+| `web_search` | 免费网页搜索（DuckDuckGo，无需 Key） |
 | `calculate_technical_indicators` | MA/MACD/RSI/KDJ |
 | `search_stock` / `get_stock_list` | 列表样本搜索 |
 | `get_market_overview` / `get_financial_indicators` | 指数 / 财务 |
 | `get_portfolio` / `upsert_holding` / `remove_holding` / `analyze_portfolio` | 持仓（无行情也可 CRUD） |
+
+美股行情走 Yahoo Finance（对照 [yfinance](https://github.com/ranaroussi/yfinance) 的 cookie+crumb 会话），公开源遇到风控/限流时自动降级或放弃。
+
+## 可用性测试集
+
+多类 Query（A 股 / 美股 / 搜索）串行探测各能力可用性：
+
+```bash
+npm run test:avail
+# 或只测一组
+npx tsx scripts/test_availability.ts --group us
+```
 
 ## 持仓面板
 

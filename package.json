@@ -24,7 +24,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepare": "npm run build",
-    "probe": "tsx scripts/probe_sources.ts --out data/probe-report.json"
+    "probe": "tsx scripts/probe_sources.ts --out data/probe-report.json",
+    "test:avail": "tsx scripts/test_availability.ts"
   },
   "dsh": {
     "bundle": {

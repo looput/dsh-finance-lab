@@ -82,6 +82,53 @@ export function registerTools(ctx: Context, finance: FinanceDataService) {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'get_us_quote',
+    description: '获取美股实时行情（Yahoo Finance 免费直连）。代码如 AAPL、TSLA、NVDA。',
+    parameters: {
+      code: { type: 'string', required: true, description: '美股代码，如 AAPL' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getUsQuote(args.code, exec.signal)
+      if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, data: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_us_kline',
+    description: '获取美股 K 线（开高低收成交量，Yahoo Finance 免费直连）。',
+    parameters: {
+      code: { type: 'string', required: true, description: '美股代码，如 AAPL' },
+      period: { type: 'string', description: 'daily|weekly|monthly', enum: ['daily', 'weekly', 'monthly'] },
+      start_date: { type: 'string', description: 'YYYY-MM-DD' },
+      end_date: { type: 'string', description: 'YYYY-MM-DD' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getUsKline(args.code, args.period ?? 'daily', args.start_date, args.end_date, exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) {
+        return asJson({ ok: false, code: args.code, error: res.error ?? 'unavailable' })
+      }
+      return asJson({ ok: true, provider: res.provider, code: args.code, count: res.data.length, data: res.data.slice(-30) })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'web_search',
+    description: '免费网页搜索（DuckDuckGo，无需 API Key）。用于查行情消息、财报、公司资讯。',
+    parameters: {
+      query: { type: 'string', required: true, description: '搜索关键词' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.webSearch(args.query, exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, count: res.data.length, results: res.data.slice(0, 8) })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'calculate_technical_indicators',
     description: '基于 K 线计算 MA/MACD/RSI/KDJ（本地计算，行情源依赖 kline 能力）。',
     parameters: {
