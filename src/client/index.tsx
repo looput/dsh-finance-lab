@@ -17,10 +17,15 @@ const DATA_INTERFACES: Array<{ group: string; items: InterfaceItem[] }> = [
     { cap: 'kline', label: 'A股K线', tool: 'get_stock_kline', source: '东财 / 腾讯' },
     { cap: 'hk_quote', label: '港股行情', tool: 'get_hk_quote', source: '东财 / 腾讯' },
     { cap: 'us_quote', label: '美股行情', tool: 'get_us_quote', source: 'Yahoo / 东财' },
+    { cap: 'sectors', label: '板块涨跌', tool: 'get_sector_board', source: '东财' },
   ] },
   { group: '基金', items: [
     { cap: 'fund_quote', label: '基金净值', tool: 'get_fund_quote', source: '东财' },
     { cap: 'fund_rank', label: '基金排行', tool: 'get_fund_rank', source: '东财' },
+  ] },
+  { group: '快讯 / 新闻', items: [
+    { cap: 'news_flash', label: '市场电报', tool: 'get_market_news', source: '东财全球快讯' },
+    { cap: 'stock_news', label: '个股新闻', tool: 'get_stock_news', source: '东财搜索' },
   ] },
   { group: '宏观 / 通用', items: [
     { cap: 'macro', label: '宏观经济', tool: 'get_macro_china', source: '东财 datacenter' },
@@ -378,6 +383,68 @@ function FundsView(props: { active: boolean; mutate: (a: string, p: Record<strin
     h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财基金排行（对照 AkShare fund_open_fund_rank_em）'))
 }
 
+// ---- 市场 tab（股票侧：板块涨跌热度 → “今天风险在哪”）----
+interface Sector { code: string; name: string; price?: number; changePercent?: number }
+function MarketView(props: { active: boolean }) {
+  const [d, setD] = useState<{ indices: IndexQuote[]; gainers: Sector[]; losers: Sector[] }>({ indices: [], gainers: [], losers: [] })
+  const [loading, setLoading] = useState(false)
+  const load = useCallback(async () => {
+    setLoading(true)
+    try { const r = await apiGet<{ indices: IndexQuote[]; gainers: Sector[]; losers: Sector[] }>('/market'); setD({ indices: r.indices ?? [], gainers: r.gainers ?? [], losers: r.losers ?? [] }) } catch { /* */ } finally { setLoading(false) }
+  }, [])
+  useEffect(() => { if (props.active && !d.gainers.length) void load() }, [props.active]) // eslint-disable-line react-hooks/exhaustive-deps
+  const sectorRow = (s: Sector) => h('div', { key: s.code, style: S.row },
+    h('div', { style: { flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, s.name),
+    h('div', { style: { width: 70, textAlign: 'right', color: colorOf(s.changePercent) } }, pctStr(s.changePercent)))
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
+    h('div', { style: S.section },
+      h('div', { style: S.title }, '市场总览', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
+      d.indices.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无指数') : h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
+        d.indices.map((ix) => h('div', { key: ix.code, style: { ...S.chip, flexDirection: 'column', alignItems: 'flex-start', gap: 0, padding: '4px 8px' } },
+          h('span', { style: { fontSize: 11 } }, ix.name),
+          h('span', { style: { color: colorOf(ix.changePercent), fontWeight: 600 } }, `${fmt(ix.price)} ${pctStr(ix.changePercent)}`))))),
+    h('div', { style: S.section }, h('div', { style: S.title }, h('span', { style: { color: UP } }, '● '), '领涨板块'),
+      d.gainers.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无') : d.gainers.map(sectorRow)),
+    h('div', { style: S.section }, h('div', { style: S.title }, h('span', { style: { color: DOWN } }, '● '), '领跌板块 · 今日风险'),
+      d.losers.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无') : d.losers.map(sectorRow)),
+    h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财行业板块（对照 AkShare stock_board_industry_name_em）'))
+}
+
+// ---- 快讯 tab（市场电报 + 按持仓/自选的个股新闻）----
+interface Flash { title: string; summary?: string; time?: string; url?: string }
+interface SNews { title: string; date?: string; source?: string; url?: string; summary?: string }
+function NewsView(props: { active: boolean; data: LiveData }) {
+  const [flash, setFlash] = useState<Flash[]>([])
+  const [loading, setLoading] = useState(false)
+  const [code, setCode] = useState('')
+  const [snews, setSnews] = useState<SNews[]>([])
+  const [sloading, setSloading] = useState(false)
+  const load = useCallback(async () => {
+    setLoading(true)
+    try { const r = await apiGet<{ news: Flash[] }>('/news'); setFlash(r.news ?? []) } catch { /* */ } finally { setLoading(false) }
+  }, [])
+  useEffect(() => { if (props.active && !flash.length) void load() }, [props.active]) // eslint-disable-line react-hooks/exhaustive-deps
+  const codes = [...new Set([...props.data.watchlist.map((w) => w.code), ...props.data.holdings.map((hh) => hh.code)])]
+  const open = (u?: string) => { if (u) window.open(u, '_blank', 'noopener') }
+  async function loadCode(c: string) {
+    setCode(c); setSloading(true)
+    try { const r = await apiGet<{ news: SNews[] }>(`/news?code=${encodeURIComponent(c)}`); setSnews(r.news ?? []) } catch { setSnews([]) } finally { setSloading(false) }
+  }
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
+    h('div', { style: S.section },
+      h('div', { style: S.title }, '个股新闻 · 按持仓/自选'),
+      codes.length === 0 ? h('div', { style: S.muted }, '暂无自选/持仓') : h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
+        codes.map((c) => h('button', { key: c, onClick: () => void loadCode(c), style: { ...S.btn, padding: '2px 8px', background: code === c ? BRAND : S.btn.background, color: code === c ? '#fff' : S.btn.color } }, c))),
+      sloading ? h('div', { style: S.muted }, '加载中…') : snews.map((n, i) => h('div', { key: i, style: { ...S.row, cursor: n.url ? 'pointer' : 'default' }, onClick: () => open(n.url) },
+        h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { style: { fontWeight: 500 } }, n.title), h('div', { style: S.muted }, `${n.date ?? ''} · ${n.source ?? ''}`))))),
+    h('div', { style: S.section },
+      h('div', { style: S.title }, '市场电报', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
+      flash.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无') : flash.map((n, i) => h('div', { key: i, style: { ...S.row, cursor: n.url ? 'pointer' : 'default', alignItems: 'flex-start' }, onClick: () => open(n.url) },
+        h('div', { style: { ...S.muted, width: 44, flex: '0 0 auto' } }, (n.time || '').slice(11, 16) || (n.time || '').slice(5, 10)),
+        h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { style: { fontWeight: 500 } }, n.title), n.summary && n.summary !== n.title ? h('div', { style: { ...S.muted, fontSize: 11 } }, n.summary.slice(0, 80)) : null))),
+      h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财全球财经快讯（对照 AkShare stock_info_global_em）')))
+}
+
 // ---- 接口 tab ----
 function HealthView(props: { health: LiveData['health'] }) {
   const healthBy = new Map(props.health.map((x) => [x.capability, x]))
@@ -396,8 +463,8 @@ function HealthView(props: { health: LiveData['health'] }) {
 }
 
 const TABS: Array<{ id: string; label: string }> = [
-  { id: 'quotes', label: '行情' }, { id: 'holdings', label: '持仓' },
-  { id: 'macro', label: '宏观' }, { id: 'funds', label: '基金' }, { id: 'health', label: '接口' },
+  { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
+  { id: 'funds', label: '基金' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' }, { id: 'health', label: '接口' },
 ]
 
 function Drawer(props: { onClose: () => void; docked: boolean; onToggleDock: () => void }) {
@@ -423,9 +490,11 @@ function Drawer(props: { onClose: () => void; docked: boolean; onToggleDock: () 
       h('div', { style: S.tabs }, TABS.map((t) => h('button', { key: t.id, style: S.tab(tab === t.id), onClick: () => selectTab(t.id) }, t.label))),
       h('div', { style: S.body },
         tab === 'quotes' ? h(QuotesView, { data, quoteBy, mutate }) : null,
+        tab === 'market' ? h(MarketView, { active: tab === 'market' }) : null,
         tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate }) : null,
-        tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
         tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
+        tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
+        tab === 'news' ? h(NewsView, { active: tab === 'news', data }) : null,
         tab === 'health' ? h(HealthView, { health: data.health }) : null)))
 }
 
