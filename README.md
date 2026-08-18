@@ -2,6 +2,8 @@
 
 DeepSeek Harness 金融插件：公开行情 HTTP **直连** + 本地持仓面板。运行时 **不依赖 akshare**；端点从 [AkShare](https://github.com/akfamily/akshare) 源码对照而来，注释里标注了函数名。
 
+<img width="1331" height="804" alt="Clipboard_Screenshot_1787035689" src="https://github.com/user-attachments/assets/3fa063b1-22ef-404b-8fb9-1d230b7e66c0" />
+
 ## 准备
 
 ```bash
