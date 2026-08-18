@@ -329,6 +329,7 @@ function FundsView(props: { active: boolean; mutate: (a: string, p: Record<strin
   const [type, setType] = useState('all')
   const [rows, setRows] = useState<FundRankRow[]>([])
   const [loading, setLoading] = useState(false)
+  const [added, setAdded] = useState<Record<string, boolean>>({})
   const load = useCallback(async (t: string) => {
     setLoading(true)
     try { const r = await apiGet<{ ok: boolean; rows: FundRankRow[] }>(`/fundrank?type=${t}&size=20`); setRows(r.ok ? r.rows : []) } catch { setRows([]) } finally { setLoading(false) }
@@ -346,7 +347,11 @@ function FundsView(props: { active: boolean; mutate: (a: string, p: Record<strin
       h('div', { style: { width: 66, textAlign: 'right' } },
         h('div', { style: { color: colorOf(r.m6) } }, pctStr(r.m6)),
         h('div', { style: { ...S.muted, fontSize: 11 } }, `近1年 ${pctStr(r.y1)}`)),
-      h('button', { style: { ...S.btn, padding: '2px 6px' }, title: '加入自选（基金）', onClick: () => props.mutate('addWatch', { code: r.code, type: 'fund', name: r.name }) }, '＋'))),
+      h('button', {
+        style: { ...S.btn, padding: '2px 6px', color: added[r.code] ? DOWN : S.btn.color },
+        title: '加入自选（基金）',
+        onClick: () => { props.mutate('addWatch', { code: r.code, type: 'fund', name: r.name }); setAdded((a) => ({ ...a, [r.code]: true })) },
+      }, added[r.code] ? '✓' : '＋'))),
     h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财基金排行（对照 AkShare fund_open_fund_rank_em）'))
 }
 
