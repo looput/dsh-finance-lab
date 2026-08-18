@@ -19,22 +19,12 @@ fi
 [ -x "$NODE_BIN" ] || NODE_BIN="$(command -v node)"
 export PATH="$(dirname "$NODE_BIN"):$PATH"
 
-PATCH="${TMPDIR:-/tmp}/dsn-finance.web.yml"
-cat > "$PATCH" <<YAML
-- insert:
-    - id: dsn-finance
-      name: $PWD/lib/index.js
-      config:
-        cacheTtlSec: 300
-        requestGapMs: 3000
-        httpTimeoutMs: 30000
-        holdings: []
-        watchlist: ['600519', '000001']
-        probeReportPath: $PWD/data/probe-report.json
-YAML
-
 DSH_BIN="$(readlink -f ./node_modules/.bin/dsh)"
+
+# Register the local plugin into the web profile so both its server tools and
+# its client UI bundle load. Idempotent: re-linking an already-linked path is a no-op.
+"$NODE_BIN" "$DSH_BIN" plugin --profile web add "$PWD" >/dev/null
+
 exec "$NODE_BIN" "$DSH_BIN" web \
-  --patch "$PATCH" \
   --host "${DSH_HOST:-127.0.0.1}" \
   --port "${DSH_PORT:-3080}"
