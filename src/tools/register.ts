@@ -219,6 +219,35 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
   }))
 
   ctx.tools.register(defineTool({
+    name: 'get_fund_rank',
+    description: '开放式基金排行（东财，按近6月涨幅；货币基金按近1年收益）。fundType：all/stock/hybrid/bond/index/qdii/money。',
+    parameters: {
+      fundType: { type: 'string', enum: ['all', 'stock', 'hybrid', 'bond', 'index', 'qdii', 'money'], description: '基金分类，默认 all' },
+      size: { type: 'number', description: '返回条数（1-50，默认 20）' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getFundRank(args.fundType ?? 'all', args.size ?? 20, exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, count: res.data.length, rows: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_macro_china',
+    description: '中国宏观经济指标（东财 datacenter，对照 AkShare macro_china_*）。series：cpi/ppi/pmi/gdp/money_supply。返回近 24 期与最新值。',
+    parameters: {
+      series: { type: 'string', required: true, enum: ['cpi', 'ppi', 'pmi', 'gdp', 'money_supply'], description: '指标序列' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getMacro(args.series, exec.signal)
+      if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, data: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'web_search',
     description: '免费网页搜索（DuckDuckGo，无需 API Key）。用于查行情消息、财报、公司资讯。',
     parameters: {

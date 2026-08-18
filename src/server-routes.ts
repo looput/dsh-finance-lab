@@ -78,6 +78,20 @@ export function registerRoutes(webServer: WebServerLike, finance: FinanceDataSer
           const r = await finance.searchSymbol(q)
           return sendJson(res, 200, { ok: r.ok, matches: r.ok && Array.isArray(r.data) ? r.data.slice(0, 8) : [] })
         }
+        if (req.method === 'GET' && sub === '/macro') {
+          const series = ['cpi', 'ppi', 'pmi', 'gdp', 'money_supply']
+          const out = await Promise.all(series.map(async (s) => {
+            const r = await finance.getMacro(s)
+            return r.ok ? r.data : { series: s, error: r.error }
+          }))
+          return sendJson(res, 200, { at: new Date().toISOString(), series: out })
+        }
+        if (req.method === 'GET' && sub === '/fundrank') {
+          const fundType = url.searchParams.get('type') ?? 'all'
+          const size = Number(url.searchParams.get('size') ?? 20)
+          const r = await finance.getFundRank(fundType, size)
+          return sendJson(res, 200, { ok: r.ok, rows: r.ok && Array.isArray(r.data) ? r.data : [], error: r.ok ? undefined : r.error })
+        }
         if (req.method === 'POST' && sub === '/mutate') {
           const body = await readBody(req)
           const action = String(body.action ?? '')

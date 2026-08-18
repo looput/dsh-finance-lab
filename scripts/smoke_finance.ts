@@ -54,6 +54,15 @@ console.log('[smoke] fund_quote', fundQuote.ok ? `${fundQuote.provider} ${fundQu
 const fundKline = await finance.getFundKline('110022')
 console.log('[smoke] fund_kline', fundKline.ok && Array.isArray(fundKline.data) ? `bars=${fundKline.data.length}` : fundKline.error)
 
+const fundRank = await finance.getFundRank('hybrid', 5)
+console.log('[smoke] fund_rank', fundRank.ok && Array.isArray(fundRank.data) ? `n=${fundRank.data.length} top=${(fundRank.data[0] as { name?: string })?.name}` : fundRank.error)
+
+const cpi = await finance.getMacro('cpi')
+console.log('[smoke] macro_cpi', cpi.ok ? JSON.stringify((cpi.data as { latest?: unknown }).latest) : cpi.error)
+
+const m2 = await finance.getMacro('money_supply')
+console.log('[smoke] macro_m2', m2.ok ? JSON.stringify((m2.data as { latest?: unknown }).latest) : m2.error)
+
 const hkQuote = await finance.getHkQuote('00700')
 console.log('[smoke] hk_quote', hkQuote.ok ? `${hkQuote.provider} ${hkQuote.data?.name ?? hkQuote.data?.code} price=${hkQuote.data?.price}` : hkQuote.error)
 

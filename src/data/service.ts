@@ -153,6 +153,14 @@ export class FinanceDataService {
     return this.registry.call<KlineBar[]>('fund_kline', { code, days: 120 }, signal)
   }
 
+  async getFundRank(fundType = 'all', size = 20, signal?: AbortSignal) {
+    return this.registry.call('fund_rank', { fundType, size }, signal)
+  }
+
+  async getMacro(series: string, signal?: AbortSignal) {
+    return this.registry.call('macro', { series }, signal)
+  }
+
   async searchSymbol(query: string, signal?: AbortSignal) {
     return this.registry.call<SymbolMatch[]>('symbol_search', { query }, signal)
   }
