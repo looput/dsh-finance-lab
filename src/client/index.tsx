@@ -280,7 +280,7 @@ export function apply(ctx: ClientCtx): void {
   })
 
   ctx.slots.inject('sidebar.footer.action', function* () {
-    yield ctx.slots.register({ name: 'sidebar.footer.action', key: 'dsn-finance' },
+    yield ctx.slots.register({ name: 'sidebar.footer.action', id: 'dsn-finance' },
       (p: { wide?: boolean }) => h(FootAction, { ...p, scope }))
   })
 }
