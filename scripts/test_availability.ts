@@ -34,10 +34,22 @@ const CASES: TestCase[] = [
     },
   },
 
-  // 美股（Yahoo Finance 免费直连）
+  // 港股（东财免费直连）
+  { group: 'hk', label: 'hk_quote 00700 腾讯', run: (f) => q(f.getHkQuote('00700'), (d: any) => `price=${d?.price}`) },
+  { group: 'hk', label: 'hk_quote 09988 阿里', run: (f) => q(f.getHkQuote('09988'), (d: any) => `price=${d?.price}`) },
+  { group: 'hk', label: 'hk_kline 00700 daily', run: (f) => q(f.getHkKline('00700'), (d: any) => `bars=${d?.length}`) },
+  { group: 'hk', label: 'hk_list', run: (f) => q(f.getHkList(), (d: any) => `n=${d?.length}`) },
+
+  // 美股（Yahoo 优先，东财兜底）
   { group: 'us', label: 'us_quote AAPL', run: (f) => q(f.getUsQuote('AAPL'), (d: any) => `${d?.code} price=${d?.price}`) },
   { group: 'us', label: 'us_quote TSLA', run: (f) => q(f.getUsQuote('TSLA'), (d: any) => `${d?.code} price=${d?.price}`) },
   { group: 'us', label: 'us_kline MSFT', run: (f) => q(f.getUsKline('MSFT'), (d: any) => `bars=${d?.length}`) },
+
+  // 通用：跨市场解析 + 个股档案
+  { group: 'tools', label: 'search_symbol 腾讯', run: (f) => q(f.searchSymbol('腾讯'), (d: any) => `n=${d?.length} top=${d?.[0]?.secid} ${d?.[0]?.market}`) },
+  { group: 'tools', label: 'search_symbol AAPL', run: (f) => q(f.searchSymbol('AAPL'), (d: any) => `n=${d?.length} top=${d?.[0]?.secid} ${d?.[0]?.market}`) },
+  { group: 'tools', label: 'stock_info 600519', run: (f) => q(f.getStockInfo('600519'), (d: any) => `mcap=${d?.marketCap}`) },
+  { group: 'tools', label: 'stock_info 00700', run: (f) => q(f.getStockInfo('00700'), (d: any) => `${d?.market} mcap=${d?.marketCap}`) },
 
   // 免费网页搜索（DuckDuckGo）—— 多类 Query
   { group: 'search', label: 'entity "Apple Inc"', run: (f) => q(f.webSearch('Apple Inc'), topTitle) },

@@ -1,12 +1,21 @@
 export type Capability =
+  // A 股
   | 'stock_list'
   | 'quote'
   | 'kline'
   | 'indices'
   | 'financials'
   | 'sectors'
+  // 港股
+  | 'hk_quote'
+  | 'hk_kline'
+  | 'hk_list'
+  // 美股
   | 'us_quote'
   | 'us_kline'
+  // 通用 / 搜索
+  | 'symbol_search'
+  | 'stock_info'
   | 'web_search'
 
 export const CAPABILITIES: Capability[] = [
@@ -16,8 +25,13 @@ export const CAPABILITIES: Capability[] = [
   'indices',
   'financials',
   'sectors',
+  'hk_quote',
+  'hk_kline',
+  'hk_list',
   'us_quote',
   'us_kline',
+  'symbol_search',
+  'stock_info',
   'web_search',
 ]
 
@@ -29,8 +43,13 @@ export const DEFAULT_PROVIDER_ORDER: Record<Capability, string[]> = {
   indices: ['em_index_main'],
   financials: ['em_main_finadata'],
   sectors: ['em_industry_board'],
-  us_quote: ['yahoo_quote'],
-  us_kline: ['yahoo_kline'],
+  hk_quote: ['em_hk_quote', 'tx_hk_quote'],
+  hk_kline: ['em_hk_kline', 'tx_hk_kline'],
+  hk_list: ['em_hk_clist'],
+  us_quote: ['yahoo_quote', 'em_us_quote'],
+  us_kline: ['yahoo_kline', 'em_us_kline'],
+  symbol_search: ['em_suggest'],
+  stock_info: ['em_stock_info'],
   web_search: ['ddg_html', 'ddg_instant'],
 }
 
@@ -83,6 +102,34 @@ export interface SearchResult {
   title: string
   url?: string
   snippet?: string
+}
+
+/** A resolved security (via eastmoney suggest), across A-share / HK / US. */
+export interface SymbolMatch {
+  code: string
+  name: string
+  secid: string
+  market: string
+}
+
+/** Richer single-security profile (quote + market-cap fields). */
+export interface StockInfo {
+  code: string
+  name?: string
+  market?: string
+  price?: number
+  change?: number
+  changePercent?: number
+  prevClose?: number
+  open?: number
+  high?: number
+  low?: number
+  volume?: number
+  turnover?: number
+  marketCap?: number
+  floatMarketCap?: number
+  totalShares?: number
+  floatShares?: number
 }
 
 export interface ProviderCallResult<T = unknown> {

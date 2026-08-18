@@ -115,6 +115,80 @@ export function registerTools(ctx: Context, finance: FinanceDataService) {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'get_hk_quote',
+    description: '获取港股实时行情（东财免费直连）。代码如 00700、09988。',
+    parameters: {
+      code: { type: 'string', required: true, description: '港股代码，如 00700' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getHkQuote(args.code, exec.signal)
+      if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, data: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_hk_kline',
+    description: '获取港股 K 线（开高低收成交量，东财免费直连）。端点对照 AkShare stock_hk_hist。',
+    parameters: {
+      code: { type: 'string', required: true, description: '港股代码，如 00700' },
+      period: { type: 'string', description: 'daily|weekly|monthly', enum: ['daily', 'weekly', 'monthly'] },
+      start_date: { type: 'string', description: 'YYYY-MM-DD' },
+      end_date: { type: 'string', description: 'YYYY-MM-DD' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getHkKline(args.code, args.period ?? 'daily', args.start_date, args.end_date, exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) {
+        return asJson({ ok: false, code: args.code, error: res.error ?? 'unavailable' })
+      }
+      return asJson({ ok: true, provider: res.provider, code: args.code, count: res.data.length, data: res.data.slice(-30) })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_hk_list',
+    description: '获取港股列表样本（东财 clist 首页，非全市场）。端点对照 AkShare stock_hk_spot_em。',
+    parameters: {},
+    output: jsonOut,
+    async execute(_args, exec) {
+      const res = await finance.getHkList(exec.signal)
+      if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      const stocks = (res.data as object[]) ?? []
+      return asJson({ ok: true, count: stocks.length, stocks })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'search_symbol',
+    description: '按代码或名称跨市场解析证券（A股/港股/美股），返回市场与东财 secid。端点：东财 suggest。',
+    parameters: {
+      query: { type: 'string', required: true, description: '代码或名称，如 腾讯 / 00700 / AAPL' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.searchSymbol(args.query, exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, count: res.data.length, matches: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_stock_info',
+    description: '获取个股档案（现价、涨跌、总市值/流通市值、总股本/流通股）。跨市场，代码或名称。端点对照 AkShare stock_individual_info_em。',
+    parameters: {
+      code: { type: 'string', required: true, description: '代码或名称，如 600519 / 00700 / AAPL' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getStockInfo(args.code, exec.signal)
+      if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, data: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'web_search',
     description: '免费网页搜索（DuckDuckGo，无需 API Key）。用于查行情消息、财报、公司资讯。',
     parameters: {

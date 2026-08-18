@@ -13,7 +13,7 @@ import {
   toTxSymbol,
   type HttpGetOptions,
 } from './http.js'
-import type { Capability, KlineBar, ProviderContext, ProviderFn, SearchResult, StockQuote } from '../types.js'
+import type { Capability, KlineBar, ProviderContext, ProviderFn, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
 
 export interface ProviderMeta {
   id: string
@@ -132,32 +132,33 @@ async function emAClist(_args: Record<string, unknown>, ctx: ProviderContext) {
   return { rows, sampleKeys: rows[0] ? Object.keys(rows[0]) : [] }
 }
 
-/**
- * Source: akshare.stock.stock_ask_bid_em.stock_bid_ask_em
- * + stock_info_em.stock_individual_info_em (same /qt/stock/get)
- */
-async function emStockGet(args: Record<string, unknown>, ctx: ProviderContext) {
-  const code = normalizeCode(String(args.code ?? '600519'))
+// Shared eastmoney /qt/stock/get quote — works for any market once given a
+// secid (`{market}.{code}`, e.g. 1.600519 沪A, 0.000001 深A, 116.00700 港股,
+// 105.AAPL 美股). Source: stock_bid_ask_em / stock_individual_info_em.
+const EM_QUOTE_FIELDS = 'f43,f57,f58,f169,f170,f46,f44,f45,f60,f47,f48'
+
+async function emQuoteBySecid(secid: string, ctx: ProviderContext, referer?: string): Promise<StockQuote> {
   const json = await httpGetJson<{ data?: Record<string, unknown> }>(
     'https://push2.eastmoney.com/api/qt/stock/get',
-    {
-      fltt: '2',
-      invt: '2',
-      fields: 'f43,f57,f58,f169,f170,f46,f44,f45,f60,f47,f48',
-      secid: `${marketCode(code)}.${code}`,
-    },
-    opts(ctx, `https://quote.eastmoney.com/${code.startsWith('6') ? 'sh' : 'sz'}${code}.html`),
+    { fltt: '2', invt: '2', fields: EM_QUOTE_FIELDS, secid },
+    opts(ctx, referer ?? 'https://quote.eastmoney.com/'),
   )
   const d = json.data
   if (!d) throw new Error('empty stock/get data')
-  const quote: StockQuote = {
-    code: String(d.f57 ?? code),
+  return {
+    code: String(d.f57 ?? secid),
     name: d.f58 != null ? String(d.f58) : undefined,
     price: num(d.f43),
     change: num(d.f169),
     changePercent: num(d.f170),
     raw: d,
   }
+}
+
+async function emStockGet(args: Record<string, unknown>, ctx: ProviderContext) {
+  const code = normalizeCode(String(args.code ?? '600519'))
+  const referer = `https://quote.eastmoney.com/${code.startsWith('6') ? 'sh' : 'sz'}${code}.html`
+  const quote = await emQuoteBySecid(`${marketCode(code)}.${code}`, ctx, referer)
   return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
 }
 
@@ -166,20 +167,16 @@ async function emIndividualInfo(args: Record<string, unknown>, ctx: ProviderCont
   return emStockGet(args, ctx)
 }
 
-/**
- * Source: akshare.stock_feature.stock_hist_em.stock_zh_a_hist
- * URL: https://push2his.eastmoney.com/api/qt/stock/kline/get
- */
-async function emKline(args: Record<string, unknown>, ctx: ProviderContext) {
-  const code = normalizeCode(String(args.code ?? '600519'))
+// Shared eastmoney push2his kline — works for any market via secid.
+// Source: stock_zh_a_hist / stock_hk_hist / stock_us_hist (same endpoint).
+async function emKlineBySecid(secid: string, args: Record<string, unknown>, ctx: ProviderContext): Promise<KlineBar[]> {
   const period = String(args.period ?? 'daily')
   const periodMap: Record<string, string> = { daily: '101', week: '102', weekly: '102', month: '103', monthly: '103' }
   const adjust = String(args.adjust ?? 'qfq')
   const adjustMap: Record<string, string> = { qfq: '1', hfq: '2', '': '0' }
   const end = String(args.end ?? new Date().toISOString().slice(0, 10)).replace(/-/g, '')
   const start = String(
-    args.start
-      ?? new Date(Date.now() - Number(args.days ?? 60) * 86400000).toISOString().slice(0, 10),
+    args.start ?? new Date(Date.now() - Number(args.days ?? 60) * 86400000).toISOString().slice(0, 10),
   ).replace(/-/g, '')
 
   const json = await httpGetJson<{ data?: { klines?: string[] } }>(
@@ -190,43 +187,32 @@ async function emKline(args: Record<string, unknown>, ctx: ProviderContext) {
       ut: '7eea3edcaed734bea9cbfc24409ed989',
       klt: periodMap[period] ?? '101',
       fqt: adjustMap[adjust] ?? '1',
-      secid: `${marketCode(code)}.${code}`,
+      secid,
       beg: start,
       end,
     },
     opts(ctx, 'https://quote.eastmoney.com/'),
   )
-  const klines = json.data?.klines ?? []
-  const bars: KlineBar[] = klines.map((line) => {
+  return (json.data?.klines ?? []).map((line) => {
     const [date, open, close, high, low, volume] = line.split(',')
-    return {
-      date,
-      open: Number(open),
-      close: Number(close),
-      high: Number(high),
-      low: Number(low),
-      volume: Number(volume),
-    }
+    return { date: date!, open: Number(open), close: Number(close), high: Number(high), low: Number(low), volume: Number(volume) }
   })
+}
+
+async function emKline(args: Record<string, unknown>, ctx: ProviderContext) {
+  const code = normalizeCode(String(args.code ?? '600519'))
+  const bars = await emKlineBySecid(`${marketCode(code)}.${code}`, args, ctx)
   return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
 }
 
-/**
- * Source: akshare.stock_feature.stock_hist_tx.stock_zh_a_hist_tx
- * URL: https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get
- */
-async function txKline(args: Record<string, unknown>, ctx: ProviderContext) {
-  const code = normalizeCode(String(args.code ?? '600519'))
-  const symbol = toTxSymbol(code)
+// Shared tencent kline — symbol is `sh600519`/`sz000001` (A) or `hk00700` (HK).
+// Source: akshare stock_zh_a_hist_tx (same endpoint serves HK via hk-prefix).
+async function txKlineBySymbol(symbol: string, args: Record<string, unknown>, ctx: ProviderContext): Promise<KlineBar[]> {
   const year = new Date().getFullYear()
   const adjust = String(args.adjust ?? 'qfq')
   const text = await httpGetText(
     'https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get',
-    {
-      _var: `kline_day${adjust}${year}`,
-      param: `${symbol},day,${year}-01-01,${year}-12-31,640,${adjust}`,
-      r: '0.82',
-    },
+    { _var: `kline_day${adjust}${year}`, param: `${symbol},day,${year}-01-01,${year}-12-31,640,${adjust}`, r: '0.82' },
     opts(ctx, 'https://gu.qq.com/'),
   )
   const jsonStart = text.indexOf('={')
@@ -237,7 +223,7 @@ async function txKline(args: Record<string, unknown>, ctx: ProviderContext) {
   const block = payload.data?.[symbol]
   const day = block?.day ?? block?.qfqday ?? block?.hfqday
   if (!day?.length) throw new Error('tencent kline: empty day series')
-  const bars: KlineBar[] = day.map((row) => ({
+  return day.map((row) => ({
     date: String(row[0]),
     open: Number(row[1]),
     close: Number(row[2]),
@@ -245,6 +231,10 @@ async function txKline(args: Record<string, unknown>, ctx: ProviderContext) {
     low: Number(row[4]),
     volume: Number(row[5]),
   }))
+}
+
+async function txKline(args: Record<string, unknown>, ctx: ProviderContext) {
+  const bars = await txKlineBySymbol(toTxSymbol(normalizeCode(String(args.code ?? '600519'))), args, ctx)
   return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
 }
 
@@ -339,6 +329,166 @@ async function emIndustryBoard(_args: Record<string, unknown>, ctx: ProviderCont
   }))
   if (!rows.length) throw new Error('empty industry board')
   return { rows, sampleKeys: Object.keys(rows[0]!) }
+}
+
+// ---- 通用：证券代码解析（东财 suggest，跨 A股/港股/美股/名称）----
+// Source: eastmoney searchapi suggest (used internally by many akshare fns).
+const secidCache = new Map<string, SymbolMatch | null>()
+
+async function emSuggestMatches(keyword: string, ctx: ProviderContext): Promise<SymbolMatch[]> {
+  const json = await httpGetJson<{ QuotationCodeTable?: { Data?: Array<Record<string, unknown>> } }>(
+    'https://searchapi.eastmoney.com/api/suggest/get',
+    { input: keyword, type: '14', count: '8', token: 'D43BF722C8E33BDC906FB84D85E326E8' },
+    opts(ctx),
+  )
+  return (json.QuotationCodeTable?.Data ?? [])
+    .filter((d) => d.QuoteID)
+    .map((d) => ({ code: String(d.Code ?? ''), name: String(d.Name ?? ''), secid: String(d.QuoteID), market: String(d.SecurityTypeName ?? '') }))
+}
+
+async function emResolveSecid(keyword: string, ctx: ProviderContext, filter?: (m: SymbolMatch) => boolean): Promise<SymbolMatch | undefined> {
+  const key = `${keyword.trim()}|${filter ? 'f' : ''}`
+  if (secidCache.has(key)) return secidCache.get(key) ?? undefined
+  const matches = await emSuggestMatches(keyword.trim(), ctx)
+  const pick = filter ? matches.find(filter) : matches[0]
+  secidCache.set(key, pick ?? null)
+  return pick
+}
+
+async function emSuggest(args: Record<string, unknown>, ctx: ProviderContext) {
+  const kw = String(args.query ?? args.code ?? '').trim()
+  if (!kw) throw new Error('empty search query')
+  const matches = await emSuggestMatches(kw, ctx)
+  if (!matches.length) throw new Error(`no symbol match for ${kw}`)
+  return { rows: matches, data: matches, sampleKeys: Object.keys(matches[0]!) }
+}
+
+// ---- 港股（东财，secid 市场号 116）----
+function hkCode(code: string): string {
+  return String(code).trim().replace(/\D/g, '').padStart(5, '0').slice(-5)
+}
+
+/** Source: akshare stock_bid_ask_em (HK secid 116). */
+async function emHkQuote(args: Record<string, unknown>, ctx: ProviderContext) {
+  const code = hkCode(String(args.code ?? '00700'))
+  const quote = await emQuoteBySecid(`116.${code}`, ctx, `https://quote.eastmoney.com/hk/${code}.html`)
+  return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
+}
+
+/** Source: akshare stock_hk_hist (HK secid 116). */
+async function emHkKline(args: Record<string, unknown>, ctx: ProviderContext) {
+  const code = hkCode(String(args.code ?? '00700'))
+  const bars = await emKlineBySecid(`116.${code}`, args, ctx)
+  return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
+}
+
+// 港股腾讯兜底：gtimg 实时行情（GBK）+ qq 日 K（hk 前缀）。
+async function txHkQuote(args: Record<string, unknown>, ctx: ProviderContext) {
+  const code = hkCode(String(args.code ?? '00700'))
+  const text = await httpGetText('https://qt.gtimg.cn/q=hk' + code, {}, { ...opts(ctx, 'https://gu.qq.com/'), encoding: 'gbk' })
+  const m = text.match(/="([^"]*)"/)
+  if (!m) throw new Error('tencent hk quote: unexpected payload')
+  const f = m[1]!.split('~')
+  const price = num(f[3])
+  if (price == null) throw new Error('tencent hk quote: no price')
+  const quote: StockQuote = {
+    code: String(f[2] || code),
+    name: f[1] || undefined,
+    price,
+    change: num(f[31]),
+    changePercent: num(f[32]),
+    raw: { fields: f },
+  }
+  return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
+}
+
+async function txHkKline(args: Record<string, unknown>, ctx: ProviderContext) {
+  const bars = await txKlineBySymbol('hk' + hkCode(String(args.code ?? '00700')), args, ctx)
+  return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
+}
+
+/** Source: akshare stock_hk_spot_em (港股实时行情列表，clist m:128 首页). */
+async function emHkClist(_args: Record<string, unknown>, ctx: ProviderContext) {
+  const json = await httpGetJson<{ data?: { diff?: Array<Record<string, unknown>> } }>(
+    'https://push2.eastmoney.com/api/qt/clist/get',
+    {
+      pn: '1',
+      pz: '50',
+      po: '1',
+      np: '1',
+      ut: 'bd1d9ddb04089700cf9c27f6f7426281',
+      fltt: '2',
+      invt: '2',
+      fid: 'f3',
+      fs: 'm:128 t:3,m:128 t:4,m:128 t:1,m:128 t:2',
+      fields: 'f12,f14,f2,f3,f4',
+    },
+    opts(ctx, 'https://quote.eastmoney.com/center/gridlist.html#hk_stocks'),
+  )
+  const rows = (json.data?.diff ?? []).map((d) => ({
+    code: String(d.f12 ?? ''),
+    name: String(d.f14 ?? ''),
+    price: num(d.f2),
+    changePercent: num(d.f3),
+    change: num(d.f4),
+  }))
+  if (!rows.length) throw new Error('empty hk list')
+  return { rows, sampleKeys: Object.keys(rows[0]!) }
+}
+
+// ---- 美股（东财 fallback；Yahoo 限流时经此路）----
+/** Source: akshare stock_us_spot_em/stock_us_hist — ticker resolved to secid. */
+async function emUsQuote(args: Record<string, unknown>, ctx: ProviderContext) {
+  const kw = String(args.code ?? 'AAPL').trim()
+  const m = await emResolveSecid(kw, ctx, (x) => x.market === '美股')
+  if (!m) throw new Error(`us symbol not resolved: ${kw}`)
+  const quote = await emQuoteBySecid(m.secid, ctx, `https://quote.eastmoney.com/us/${m.code}.html`)
+  quote.name ??= m.name
+  return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
+}
+
+async function emUsKline(args: Record<string, unknown>, ctx: ProviderContext) {
+  const kw = String(args.code ?? 'AAPL').trim()
+  const m = await emResolveSecid(kw, ctx, (x) => x.market === '美股')
+  if (!m) throw new Error(`us symbol not resolved: ${kw}`)
+  const bars = await emKlineBySecid(m.secid, args, ctx)
+  return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
+}
+
+// ---- 个股档案（东财，行情 + 市值字段；跨市场经 suggest 解析）----
+const EM_INFO_FIELDS = 'f43,f57,f58,f60,f46,f44,f45,f47,f48,f116,f117,f84,f85,f169,f170'
+
+/** Source: akshare stock_individual_info_em (基本面字段: 市值/股本等). */
+async function emStockInfo(args: Record<string, unknown>, ctx: ProviderContext) {
+  const kw = String(args.code ?? args.query ?? '600519').trim()
+  const m = await emResolveSecid(kw, ctx)
+  const secid = m?.secid ?? `${marketCode(normalizeCode(kw))}.${normalizeCode(kw)}`
+  const json = await httpGetJson<{ data?: Record<string, unknown> }>(
+    'https://push2.eastmoney.com/api/qt/stock/get',
+    { fltt: '2', invt: '2', fields: EM_INFO_FIELDS, secid },
+    opts(ctx),
+  )
+  const d = json.data
+  if (!d) throw new Error('empty stock info')
+  const info: StockInfo = {
+    code: String(d.f57 ?? m?.code ?? kw),
+    name: d.f58 != null ? String(d.f58) : m?.name,
+    market: m?.market,
+    price: num(d.f43),
+    change: num(d.f169),
+    changePercent: num(d.f170),
+    prevClose: num(d.f60),
+    open: num(d.f46),
+    high: num(d.f44),
+    low: num(d.f45),
+    volume: num(d.f47),
+    turnover: num(d.f48),
+    marketCap: num(d.f116),
+    floatMarketCap: num(d.f117),
+    totalShares: num(d.f84),
+    floatShares: num(d.f85),
+  }
+  return { rows: [info], data: info, sampleKeys: Object.keys(info) }
 }
 
 /**
@@ -504,6 +654,41 @@ export const PROVIDERS: ProviderMeta[] = [
     call: emIndustryBoard,
   },
   {
+    id: 'em_hk_quote',
+    capability: 'hk_quote',
+    endpointRef: 'stock_bid_ask_em (HK secid 116)',
+    sampleArgs: { code: '00700' },
+    call: emHkQuote,
+  },
+  {
+    id: 'tx_hk_quote',
+    capability: 'hk_quote',
+    endpointRef: 'tencent gtimg q=hk{code}',
+    sampleArgs: { code: '00700' },
+    call: txHkQuote,
+  },
+  {
+    id: 'em_hk_kline',
+    capability: 'hk_kline',
+    endpointRef: 'stock_hk_hist (stock_hist_em.py, HK secid 116)',
+    sampleArgs: { code: '00700', days: 40 },
+    call: emHkKline,
+  },
+  {
+    id: 'tx_hk_kline',
+    capability: 'hk_kline',
+    endpointRef: 'stock_zh_a_hist_tx (hk 前缀)',
+    sampleArgs: { code: '00700', days: 40 },
+    call: txHkKline,
+  },
+  {
+    id: 'em_hk_clist',
+    capability: 'hk_list',
+    endpointRef: 'stock_hk_spot_em (clist m:128 page1)',
+    sampleArgs: {},
+    call: emHkClist,
+  },
+  {
     id: 'yahoo_quote',
     capability: 'us_quote',
     endpointRef: 'Yahoo Finance chart v8 (regularMarketPrice)',
@@ -511,11 +696,39 @@ export const PROVIDERS: ProviderMeta[] = [
     call: yahooQuote,
   },
   {
+    id: 'em_us_quote',
+    capability: 'us_quote',
+    endpointRef: 'stock_us_spot_em (secid via suggest)',
+    sampleArgs: { code: 'AAPL' },
+    call: emUsQuote,
+  },
+  {
     id: 'yahoo_kline',
     capability: 'us_kline',
     endpointRef: 'Yahoo Finance chart v8 (OHLCV series)',
     sampleArgs: { code: 'AAPL', days: 40 },
     call: yahooKline,
+  },
+  {
+    id: 'em_us_kline',
+    capability: 'us_kline',
+    endpointRef: 'stock_us_hist (secid via suggest)',
+    sampleArgs: { code: 'AAPL', days: 40 },
+    call: emUsKline,
+  },
+  {
+    id: 'em_suggest',
+    capability: 'symbol_search',
+    endpointRef: 'eastmoney searchapi suggest (跨市场代码/名称解析)',
+    sampleArgs: { query: '腾讯' },
+    call: emSuggest,
+  },
+  {
+    id: 'em_stock_info',
+    capability: 'stock_info',
+    endpointRef: 'stock_individual_info_em (行情+市值字段)',
+    sampleArgs: { code: '600519' },
+    call: emStockInfo,
   },
   {
     id: 'ddg_html',

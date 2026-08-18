@@ -39,18 +39,21 @@ npx @deepseek-ai/dsh web --patch ./cordis.dev.yml
 
 ## 模型工具
 
-| 工具 | 说明 |
-|------|------|
-| `probe_finance_sources` | 串行探测各 HTTP 端点 |
-| `get_stock_kline` / `get_realtime_quote` | A 股 K 线 / 单票行情 |
-| `get_us_kline` / `get_us_quote` | 美股 K 线 / 行情（Yahoo Finance 免费直连） |
-| `web_search` | 免费网页搜索（DuckDuckGo，无需 Key） |
-| `calculate_technical_indicators` | MA/MACD/RSI/KDJ |
-| `search_stock` / `get_stock_list` | 列表样本搜索 |
-| `get_market_overview` / `get_financial_indicators` | 指数 / 财务 |
-| `get_portfolio` / `upsert_holding` / `remove_holding` / `analyze_portfolio` | 持仓（无行情也可 CRUD） |
+| 分类 | 工具 | 说明 |
+|------|------|------|
+| A 股 | `get_stock_kline` / `get_realtime_quote` | K 线 / 单票行情（东财 + 腾讯） |
+| A 股 | `search_stock` / `get_stock_list` | 列表样本搜索 |
+| A 股 | `get_market_overview` / `get_financial_indicators` | 沪深指数 / 财务 |
+| 港股 | `get_hk_quote` / `get_hk_kline` / `get_hk_list` | 港股行情 / K 线 / 列表（东财，secid 116/128） |
+| 美股 | `get_us_quote` / `get_us_kline` | 美股行情 / K 线（Yahoo 优先，东财兜底） |
+| 通用 | `search_symbol` | 跨市场代码/名称解析（东财 suggest） |
+| 通用 | `get_stock_info` | 个股档案：现价/涨跌/总市值/流通市值/股本 |
+| 通用 | `calculate_technical_indicators` | MA/MACD/RSI/KDJ（本地计算） |
+| 搜索 | `web_search` | 免费网页搜索（DuckDuckGo，无需 Key） |
+| 持仓 | `get_portfolio` / `upsert_holding` / `remove_holding` / `analyze_portfolio` | 持仓（无行情也可 CRUD） |
+| 运维 | `probe_finance_sources` | 串行探测各 HTTP 端点健康 |
 
-美股行情走 Yahoo Finance（对照 [yfinance](https://github.com/ranaroussi/yfinance) 的 cookie+crumb 会话），公开源遇到风控/限流时自动降级或放弃。
+端点对照 [AkShare](https://github.com/akfamily/akshare)（`stock_hk_hist` / `stock_hk_spot_em` / `stock_us_hist` / `stock_individual_info_em` 等）；美股同时走 [yfinance](https://github.com/ranaroussi/yfinance) 式 Yahoo 会话。东财 push2 用统一 secid（`1.`沪 / `0.`深 / `116.`港 / `105|106|107.`美），跨市场经 suggest 解析。公开源遇风控/限流时自动降级或放弃。
 
 ## 可用性测试集
 

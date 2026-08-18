@@ -48,6 +48,15 @@ console.log('[smoke] us_quote', usQuote.ok ? `${usQuote.provider} ${usQuote.data
 const usKline = await finance.getUsKline('AAPL')
 console.log('[smoke] us_kline', usKline.ok ? `${usKline.provider} bars=${Array.isArray(usKline.data) ? usKline.data.length : 0}` : usKline.error)
 
+const hkQuote = await finance.getHkQuote('00700')
+console.log('[smoke] hk_quote', hkQuote.ok ? `${hkQuote.provider} ${hkQuote.data?.name ?? hkQuote.data?.code} price=${hkQuote.data?.price}` : hkQuote.error)
+
+const hkKline = await finance.getHkKline('00700')
+console.log('[smoke] hk_kline', hkKline.ok ? `${hkKline.provider} bars=${Array.isArray(hkKline.data) ? hkKline.data.length : 0}` : hkKline.error)
+
+const symbol = await finance.searchSymbol('腾讯')
+console.log('[smoke] symbol', symbol.ok && Array.isArray(symbol.data) ? `${symbol.provider} ${symbol.data[0]?.secid} ${symbol.data[0]?.market}` : symbol.error)
+
 const search = await finance.webSearch('nvidia earnings')
 console.log('[smoke] web_search', search.ok
   ? `${search.provider} n=${Array.isArray(search.data) ? search.data.length : 0} top="${Array.isArray(search.data) ? search.data[0]?.title?.slice(0, 60) : ''}"`
