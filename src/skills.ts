@@ -8,6 +8,7 @@ const SKILL_FILES = [
   'portfolio-management.md',
   'investment-strategy.md',
   'risk-management.md',
+  'research-team.md',
 ]
 
 export function registerSkills(ctx: Context, packageRoot: string) {
@@ -16,6 +17,7 @@ export function registerSkills(ctx: Context, packageRoot: string) {
     '- Market data uses direct HTTP endpoints (Eastmoney / Tencent), not the akshare Python package.',
     '- Public sources are unstable; if a market tool fails, call probe_finance_sources first.',
     '- Holdings CRUD works without quotes; P&L enrichment needs a healthy quote provider.',
+    '- For multi-angle deep research, follow research-team.md: split roles (行情/基本面/宏观/基金/消息/风险) mapped to these tools and orchestrate them with DSH subagents (or dsh-agent-teams if installed). This plugin provides the finance playbook, not a scheduler.',
     '',
   ]
 
