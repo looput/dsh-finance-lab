@@ -1,6 +1,8 @@
 node_modules/
 lib/
 data/probe-report.json
+data/portfolio.json
+*.tmp
 *.tgz
 .DS_Store
 package-lock.json

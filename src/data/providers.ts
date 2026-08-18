@@ -596,6 +596,58 @@ async function ddgInstant(args: Record<string, unknown>, ctx: ProviderContext) {
   return { rows: results, data: results, sampleKeys: Object.keys(results[0]!) }
 }
 
+// ---- 基金（东财 pingzhongdata：单位净值走势 + 名称，免费直连）----
+interface FundData { name?: string; navTrend: Array<{ date: string; nav: number }> }
+const fundCache = new Map<string, { at: number; data: FundData }>()
+
+function fundCode(code: string): string {
+  return String(code).replace(/\D/g, '').padStart(6, '0').slice(-6)
+}
+
+// Source: fund.eastmoney.com pingzhongdata (Data_netWorthTrend + fS_name).
+async function emFundData(code: string, ctx: ProviderContext): Promise<FundData> {
+  const c = fundCode(code)
+  const hit = fundCache.get(c)
+  if (hit && Date.now() - hit.at < 60_000) return hit.data
+  const text = await httpGetText(`https://fund.eastmoney.com/pingzhongdata/${c}.js`, {}, opts(ctx, 'https://fund.eastmoney.com/'))
+  const nameM = text.match(/fS_name\s*=\s*"([^"]*)"/)
+  const trendM = text.match(/Data_netWorthTrend\s*=\s*(\[[\s\S]*?\])\s*;/)
+  const navTrend: Array<{ date: string; nav: number }> = []
+  if (trendM) {
+    const arr = JSON.parse(trendM[1]!) as Array<{ x: number; y: number }>
+    for (const p of arr) {
+      const nav = num(p.y)
+      if (nav != null) navTrend.push({ date: new Date(p.x).toISOString().slice(0, 10), nav })
+    }
+  }
+  if (!navTrend.length) throw new Error(`fund ${c}: empty nav trend`)
+  const data: FundData = { name: nameM?.[1] || undefined, navTrend }
+  fundCache.set(c, { at: Date.now(), data })
+  return data
+}
+
+async function emFundQuote(args: Record<string, unknown>, ctx: ProviderContext) {
+  const code = fundCode(String(args.code ?? ''))
+  const fd = await emFundData(code, ctx)
+  const last = fd.navTrend.at(-1)!
+  const prev = fd.navTrend.at(-2)
+  const quote: StockQuote = {
+    code,
+    name: fd.name,
+    price: last.nav,
+    change: prev ? Number((last.nav - prev.nav).toFixed(4)) : undefined,
+    changePercent: prev && prev.nav ? Number((((last.nav - prev.nav) / prev.nav) * 100).toFixed(2)) : undefined,
+    raw: { navDate: last.date },
+  }
+  return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
+}
+
+async function emFundKline(args: Record<string, unknown>, ctx: ProviderContext) {
+  const fd = await emFundData(String(args.code ?? ''), ctx)
+  const bars: KlineBar[] = fd.navTrend.map((p) => ({ date: p.date, open: p.nav, high: p.nav, low: p.nav, close: p.nav, volume: 0 }))
+  return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
+}
+
 export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'em_a_clist',
@@ -715,6 +767,20 @@ export const PROVIDERS: ProviderMeta[] = [
     endpointRef: 'stock_us_hist (secid via suggest)',
     sampleArgs: { code: 'AAPL', days: 40 },
     call: emUsKline,
+  },
+  {
+    id: 'em_fund_quote',
+    capability: 'fund_quote',
+    endpointRef: 'fund.eastmoney.com pingzhongdata (Data_netWorthTrend 单位净值)',
+    sampleArgs: { code: '110022' },
+    call: emFundQuote,
+  },
+  {
+    id: 'em_fund_kline',
+    capability: 'fund_kline',
+    endpointRef: 'fund.eastmoney.com pingzhongdata (净值走势序列)',
+    sampleArgs: { code: '110022' },
+    call: emFundKline,
   },
   {
     id: 'em_suggest',

@@ -1,5 +1,7 @@
 # Local overlay for `npx @deepseek-ai/dsh web --patch ./cordis.dev.yml`
-# Replace ROOT with this package absolute path if needed.
+# Replace the path below with this package's absolute lib/index.js if needed.
+# Note: scripts/dev_web.sh registers the plugin into the web profile instead,
+# which also loads the client UI bundle — prefer that for local development.
 - insert:
     - id: dsn-finance
       name: /Users/lupu/workspace/harness/dsn-finance-lab/lib/index.js
@@ -7,8 +9,9 @@
         cacheTtlSec: 300
         requestGapMs: 3000
         httpTimeoutMs: 30000
-        holdings: []
-        watchlist:
-          - '600519'
-          - '000001'
         probeReportPath: /Users/lupu/workspace/harness/dsn-finance-lab/data/probe-report.json
+        portfolioPath: /Users/lupu/workspace/harness/dsn-finance-lab/data/portfolio.json
+
+- id: web
+  config:
+    searchProvider: dsn-duckduckgo

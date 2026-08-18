@@ -1,6 +1,5 @@
-import type { Holding, KlineBar, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
+import type { AssetType, Holding, KlineBar, PortfolioHolding, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
 import type { ProviderRegistry } from './registry.js'
-import type { HoldingConfig } from '../config.js'
 
 export function calculateMA(closes: number[], period: number): number[] {
   return closes.map((_, i) => {
@@ -84,8 +83,8 @@ export function calculateKDJ(bars: KlineBar[]) {
 export class FinanceDataService {
   constructor(
     private readonly registry: ProviderRegistry,
-    private getHoldings: () => HoldingConfig[],
-    private setHoldings: (next: HoldingConfig[]) => Promise<void>,
+    private getHoldings: () => PortfolioHolding[],
+    private setHoldings: (next: PortfolioHolding[]) => Promise<void>,
   ) {}
 
   getHealth() {
@@ -146,6 +145,14 @@ export class FinanceDataService {
     return this.registry.call<Array<{ code: string; name: string }>>('hk_list', {}, signal)
   }
 
+  async getFundQuote(code: string, signal?: AbortSignal) {
+    return this.registry.call<StockQuote>('fund_quote', { code }, signal)
+  }
+
+  async getFundKline(code: string, signal?: AbortSignal) {
+    return this.registry.call<KlineBar[]>('fund_kline', { code, days: 120 }, signal)
+  }
+
   async searchSymbol(query: string, signal?: AbortSignal) {
     return this.registry.call<SymbolMatch[]>('symbol_search', { query }, signal)
   }
@@ -158,17 +165,22 @@ export class FinanceDataService {
     return this.registry.call<SearchResult[]>('web_search', { query }, signal)
   }
 
-  /** Route a bare code to the right market by shape: letters→US, 4-5 digits→HK, else A-share. */
-  async getAutoQuote(code: string, signal?: AbortSignal) {
+  /**
+   * Route a code to the right market. Funds are explicit (`type: 'fund'`) since they share the
+   * 6-digit shape with A-shares; stocks route by shape: letters→US, 4-5 digits→HK, else A-share.
+   */
+  async getAutoQuote(code: string, signal?: AbortSignal, type: AssetType = 'stock') {
     const c = code.trim()
+    if (type === 'fund') return { market: '基金', ...(await this.getFundQuote(c, signal)) }
     if (/[A-Za-z]/.test(c)) return { market: '美股', ...(await this.getUsQuote(c, signal)) }
     if (/^\d{4,5}$/.test(c)) return { market: '港股', ...(await this.getHkQuote(c, signal)) }
     return { market: 'A股', ...(await this.getRealtimeQuote(c, signal)) }
   }
 
   /** Same market routing as getAutoQuote, for daily K-line (sparkline source). */
-  async getAutoKline(code: string, signal?: AbortSignal) {
+  async getAutoKline(code: string, signal?: AbortSignal, type: AssetType = 'stock') {
     const c = code.trim()
+    if (type === 'fund') return this.getFundKline(c, signal)
     if (/[A-Za-z]/.test(c)) return this.getUsKline(c, 'daily', undefined, undefined, signal)
     if (/^\d{4,5}$/.test(c)) return this.getHkKline(c, 'daily', undefined, undefined, signal)
     return this.getKline(c, 'daily', undefined, undefined, signal)
@@ -214,19 +226,20 @@ export class FinanceDataService {
     return { ok: true as const, capability: 'kline' as const, provider: kline.provider, data: out }
   }
 
-  listHoldings(): HoldingConfig[] {
+  listHoldings(): PortfolioHolding[] {
     return this.getHoldings()
   }
 
-  async upsertHolding(holding: HoldingConfig): Promise<HoldingConfig[]> {
+  async upsertHolding(holding: PortfolioHolding): Promise<PortfolioHolding[]> {
     const code = holding.code.trim()
-    const next = this.getHoldings().filter((h) => h.code !== code)
-    next.push({ ...holding, code })
+    const type = holding.type ?? 'stock'
+    const next = this.getHoldings().filter((h) => !(h.code === code && h.type === type))
+    next.push({ ...holding, code, type })
     await this.setHoldings(next)
     return next
   }
 
-  async removeHolding(code: string): Promise<HoldingConfig[]> {
+  async removeHolding(code: string): Promise<PortfolioHolding[]> {
     const next = this.getHoldings().filter((h) => h.code !== code.trim())
     await this.setHoldings(next)
     return next
@@ -237,8 +250,8 @@ export class FinanceDataService {
     const enriched: Holding[] = []
     let quoteOk = false
     for (const h of holdings) {
-      const item: Holding = { ...h }
-      const quote = await this.getRealtimeQuote(h.code, signal)
+      const item: Holding = { ...h, type: h.type ?? 'stock' }
+      const quote = await this.getAutoQuote(h.code, signal, item.type)
       if (quote.ok && quote.data?.price != null) {
         quoteOk = true
         item.currentPrice = quote.data.price
