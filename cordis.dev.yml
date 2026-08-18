@@ -2,7 +2,7 @@
 # Replace ROOT with this package absolute path if needed.
 - insert:
     - id: dsn-finance
-      name: /workspace/lib/index.js
+      name: /Users/lupu/workspace/harness/dsn-finance-lab/lib/index.js
       config:
         cacheTtlSec: 300
         requestGapMs: 3000
@@ -11,4 +11,4 @@
         watchlist:
           - '600519'
           - '000001'
-        probeReportPath: /workspace/data/probe-report.json
+        probeReportPath: /Users/lupu/workspace/harness/dsn-finance-lab/data/probe-report.json

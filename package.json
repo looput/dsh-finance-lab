@@ -11,7 +11,7 @@
     },
     "./client": {
       "types": "./lib/client/index.d.ts",
-      "default": "./lib/client/wrapped-bundle.js"
+      "default": "./lib/client/index.js"
     },
     "./package.json": "./package.json"
   },
