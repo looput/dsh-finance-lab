@@ -13,6 +13,7 @@ import { PortfolioStore } from './store.js'
 import { registerTools } from './tools/register.js'
 import { registerSkills } from './skills.js'
 import { registerRoutes } from './server-routes.js'
+import { registerMcpSources } from './mcp/manager.js'
 import { createDdgSearchProvider } from './web-ddg.js'
 
 export const name = pluginName
@@ -55,7 +56,8 @@ export function apply(ctx: Context, config: Config) {
   ctx.provide('financeData', finance)
   registerTools(ctx, finance, store)
   registerSkills(ctx, packageRoot)
-  registerRoutes(ctx.webServer, finance, store)
+  const mcp = registerMcpSources(ctx, current().mcpSources ?? [], packageRoot)
+  registerRoutes(ctx.webServer, finance, store, mcp)
 
   // Replace the default (key-gated) web search with DuckDuckGo so `web_search` works key-free.
   ctx.web.registerSearchProvider(createDdgSearchProvider((q, signal) => finance.webSearch(q, signal)))

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
+import type { McpManager } from './mcp/manager.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
 import type { AssetType } from './types.js'
 
@@ -56,7 +57,7 @@ function snapshotItems(store: PortfolioStore): SnapshotItem[] {
  * Register the finance panel's HTTP API on ctx.webServer. Live quotes are computed on demand
  * and returned to the client (held in React state) — never written to plugin config.
  */
-export function registerRoutes(webServer: WebServerLike, finance: FinanceDataService, store: PortfolioStore): () => void {
+export function registerRoutes(webServer: WebServerLike, finance: FinanceDataService, store: PortfolioStore, mcp?: McpManager): () => void {
   return webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -67,6 +68,9 @@ export function registerRoutes(webServer: WebServerLike, finance: FinanceDataSer
         if (req.method === 'GET' && (sub === '/state' || sub === '/')) {
           const { holdings, watchlist } = store.get()
           return sendJson(res, 200, { holdings, watchlist, portfolioPath: store.path })
+        }
+        if (req.method === 'GET' && sub === '/mcp') {
+          return sendJson(res, 200, { sources: mcp?.status() ?? [] })
         }
         if (req.method === 'GET' && sub === '/live') {
           const snapshot = await buildLiveSnapshot(finance, snapshotItems(store))

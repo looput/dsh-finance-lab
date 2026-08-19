@@ -561,6 +561,31 @@ function NewsView(props: { active: boolean; data: LiveData; quoteBy: Map<string,
 }
 
 // ---- 接口 tab ----
+interface McpSource { name: string; kind: string; label: string; enabled: boolean; tokenPresent: boolean; state: string; detail?: string; toolCount?: number }
+const MCP_STATE_LABEL: Record<string, string> = { ready: '已接入', 'no-token': '缺少 token', disabled: '已停用', error: '错误' }
+
+function McpSourcesView() {
+  const [sources, setSources] = useState<McpSource[]>([])
+  useEffect(() => {
+    let alive = true
+    const load = () => { void apiGet<{ sources: McpSource[] }>('/mcp').then((r) => { if (alive) setSources(r.sources ?? []) }).catch(() => { /* */ }) }
+    load()
+    const t = window.setInterval(load, 15_000)
+    return () => { alive = false; window.clearInterval(t) }
+  }, [])
+  if (!sources.length) return null
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, '外部数据源 (MCP)'),
+    sources.map((s) => {
+      const good = s.state === 'ready'
+      return h('div', { key: s.name, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' }, title: s.detail || '' },
+        h('span', { style: { width: 8, height: 8, borderRadius: 999, background: good ? DOWN : (s.state === 'disabled' ? '#bbb' : UP), flex: '0 0 auto' } }),
+        h('span', { style: { flex: 1 } }, s.label, ' ', h('code', { style: { ...S.muted, fontSize: 11 } }, s.name)),
+        h('span', { style: S.muted }, (MCP_STATE_LABEL[s.state] ?? s.state) + (s.toolCount ? ` · ${s.toolCount} 工具` : '')))
+    }),
+    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, 'token 通过环境变量、data/mcp-secrets.json 或设置面板配置；改动后重启生效'))
+}
+
 function HealthView(props: { health: LiveData['health'] }) {
   const healthBy = new Map(props.health.map((x) => [x.capability, x]))
   return h('div', { style: S.section },
@@ -574,7 +599,9 @@ function HealthView(props: { health: LiveData['health'] }) {
           h('span', { style: { width: 8, height: 8, borderRadius: 999, background: ok ? DOWN : UP, flex: '0 0 auto' } }),
           h('span', { style: { flex: 1 } }, it.label, ' ', h('code', { style: { ...S.muted, fontSize: 11 } }, it.tool)),
           h('span', { style: S.muted }, it.source))
-      }))))
+      })),
+    ),
+    h(McpSourcesView, null))
 }
 
 const TABS: Array<{ id: string; label: string }> = [

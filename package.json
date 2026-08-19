@@ -84,6 +84,7 @@
     "@deepseek-ai/dsh-compaction": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-fs": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-invariants": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-mcp-client": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-output-retention": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-sandbox": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-scope": "^0.1.0-rc.7",

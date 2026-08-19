@@ -2,6 +2,7 @@ node_modules/
 lib/
 data/probe-report.json
 data/portfolio.json
+data/mcp-secrets.json
 *.tmp
 *.tgz
 .DS_Store
