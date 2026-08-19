@@ -636,6 +636,46 @@ function KlineView(props: { data: LiveData }) {
         h('span', { style: { flex: 1 } }, e.label)))) : null)
 }
 
+// ---- 技能 tab (local playbooks + 盈米 remote skills) ----
+interface SkillEntry { name: string; description: string; enabled: boolean; source: string }
+interface SkillCatalog { local: SkillEntry[]; yingmi: SkillEntry[]; yingmiAvailable?: boolean }
+
+function SkillsView() {
+  const [cat, setCat] = useState<SkillCatalog>({ local: [], yingmi: [] })
+  const [localSel, setLocalSel] = useState<string[]>([])
+  const [ymSel, setYmSel] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState('')
+  const apply = (c: SkillCatalog) => {
+    setCat(c)
+    setLocalSel(c.local.filter((s) => s.enabled).map((s) => s.name))
+    setYmSel(c.yingmi.filter((s) => s.enabled).map((s) => s.name))
+  }
+  useEffect(() => { void apiGet<SkillCatalog>('/skills').then(apply).catch(() => { /* */ }) }, [])
+  const save = async () => {
+    setBusy(true); setHint('')
+    try { const r = await apiPost<{ ok: boolean } & SkillCatalog>('/skills', { local: localSel, yingmi: ymSel }); if (r.ok) { apply(r); setHint('已保存并即时生效') } }
+    catch { setHint('保存失败') } finally { setBusy(false) }
+  }
+  const toggle = (sel: string[], set: (v: string[]) => void, name: string) => set(sel.includes(name) ? sel.filter((n) => n !== name) : [...sel, name])
+  const row = (sel: string[], set: (v: string[]) => void, s: SkillEntry) => {
+    const on = sel.includes(s.name)
+    return h('div', { key: s.name, style: { display: 'flex', gap: 8, alignItems: 'flex-start', padding: '3px 0' } },
+      h('button', { onClick: () => toggle(sel, set, s.name), style: { ...S.btn, padding: '2px 8px', flex: '0 0 auto', background: on ? BRAND : S.btn.background, color: on ? '#fff' : S.btn.color } }, on ? '启用' : '停用'),
+      h('div', { style: { flex: 1, minWidth: 0 } },
+        h('div', { style: { fontWeight: 500 } }, s.name),
+        h('div', { style: { ...S.muted, fontSize: 11 } }, s.description.slice(0, 60))))
+  }
+  return h('div', { style: S.section },
+    h('div', { style: S.title }, '技能', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, disabled: busy, onClick: () => void save() }, busy ? '…' : '保存')),
+    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, '本插件技能（进入系统提示）'),
+    cat.local.map((s) => row(localSel, setLocalSel, s)),
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, cat.yingmiAvailable ? '盈米金融场景 skill（标准 SKILL.md · scope 可见范围）' : '盈米 skill（需全局安装并接入 yingmi-skill-cli）'),
+    cat.yingmi.length ? cat.yingmi.map((s) => row(ymSel, setYmSel, s)) : h('div', { style: S.muted }, '—'),
+    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6 } }, '盈米全部停用=清除 scope（默认全部可见）；启用项写入 remote-skill scope。'))
+}
+
 // ---- 数据源 tab (per-capability provider selection) ----
 const CAP_LABEL: Record<string, string> = {
   stock_list: 'A股列表', quote: 'A股行情', kline: 'A股K线', indices: '指数概览', financials: '财务指标', sectors: '行业板块',
@@ -758,7 +798,7 @@ function HealthView(props: { health: LiveData['health'] }) {
 const TABS: Array<{ id: string; label: string }> = [
   { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
   { id: 'funds', label: '基金' }, { id: 'kline', label: 'K线' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
-  { id: 'sources', label: '数据源' }, { id: 'health', label: '接口' },
+  { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
 ]
 
 function findShellFrame(): HTMLElement | null {
@@ -830,6 +870,7 @@ function PanelBody(props: { onClose: () => void; docked: boolean; onToggleDock: 
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
       tab === 'kline' ? h(KlineView, { data }) : null,
       tab === 'sources' ? h(SourcesView, null) : null,
+      tab === 'skills' ? h(SkillsView, null) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))
 }
 

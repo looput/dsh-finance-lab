@@ -61,9 +61,10 @@ export function apply(ctx: Context, config: Config) {
   ctx.provide('financeData', finance)
   registerTools(ctx, finance, store)
   registerHistoryTools(ctx, finance, history)
-  registerSkills(ctx, packageRoot)
+  const yingmiCommand = (current().mcpSources ?? []).find((s) => s.kind === 'cli' && s.enabled)?.command || undefined
+  const skills = registerSkills(ctx, packageRoot, yingmiCommand)
   const mcp = registerMcpSources(ctx, current().mcpSources ?? [], packageRoot)
-  registerRoutes(ctx.webServer, finance, store, mcp, history)
+  registerRoutes(ctx.webServer, finance, store, mcp, history, skills)
 
   // Replace the default (key-gated) web search with DuckDuckGo so `web_search` works key-free.
   ctx.web.registerSearchProvider(createDdgSearchProvider((q, signal) => finance.webSearch(q, signal)))

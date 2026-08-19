@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
 import type { McpManager } from './mcp/manager.js'
+import type { SkillManager } from './skills.js'
 import type { HistoryStore } from './history/store.js'
 import { syncHistory, type SymbolKind } from './history/sync.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
@@ -61,7 +62,7 @@ function snapshotItems(store: PortfolioStore): SnapshotItem[] {
  * Register the finance panel's HTTP API on ctx.webServer. Live quotes are computed on demand
  * and returned to the client (held in React state) — never written to plugin config.
  */
-export function registerRoutes(webServer: WebServerLike, finance: FinanceDataService, store: PortfolioStore, mcp?: McpManager, history?: HistoryStore): () => void {
+export function registerRoutes(webServer: WebServerLike, finance: FinanceDataService, store: PortfolioStore, mcp?: McpManager, history?: HistoryStore, skills?: SkillManager): () => void {
   return webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -78,6 +79,15 @@ export function registerRoutes(webServer: WebServerLike, finance: FinanceDataSer
         }
         if (req.method === 'GET' && sub === '/providers') {
           return sendJson(res, 200, { catalog: finance.getProviderCatalog() })
+        }
+        if (skills && req.method === 'GET' && sub === '/skills') {
+          return sendJson(res, 200, skills.catalog())
+        }
+        if (skills && req.method === 'POST' && sub === '/skills') {
+          const body = await readBody(req)
+          const local = Array.isArray(body.local) ? (body.local as string[]) : undefined
+          const yingmi = Array.isArray(body.yingmi) ? (body.yingmi as string[]) : undefined
+          return sendJson(res, 200, { ok: true, ...(await skills.setEnabled(local, yingmi)) })
         }
         if (history && req.method === 'GET' && sub === '/history/list') {
           return sendJson(res, 200, { symbols: await history.list() })
