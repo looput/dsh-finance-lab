@@ -31,8 +31,7 @@ Open **📈 Finance Panel** from the sidebar:
 | Macro | CPI, PPI, PMI, GDP, money supply, and trend lines |
 | News | Global market flashes and stock news for holdings/watchlist symbols |
 | Interfaces | Provider health and the currently selected data source |
-
-You can also give the Agent a holdings screenshot and let it write the recognized positions through `import_holdings`; the panel refreshes afterward. The plugin only changes local portfolio data. It does not place trades.
+You can also give the Agent a holdings screenshot and let it write the recognized positions through `import_holdings`; the panel refreshes afterward. Click any stock or fund in your holdings/watchlist to open a full AI analysis. Generation starts only after that explicit click, the report is cached locally, and you can regenerate it on demand. The plugin only changes local portfolio data. It does not place trades.
 
 ### Finance tools for models
 
@@ -46,7 +45,7 @@ You can also give the Agent a holdings screenshot and let it write the recognize
 | General | `search_symbol` · `get_stock_info` | Cross-market symbol resolution, profiles, and market caps |
 | Research | `calculate_technical_indicators` · `get_macro_china` | MA/MACD/RSI/KDJ and China macro series |
 | News | `get_market_news` · `get_stock_news` · `web_search` | Market flashes, stock news, and free web search |
-| Portfolio | `get_portfolio` · `analyze_portfolio` · `upsert_holding` · `import_holdings` · `remove_holding` | CRUD, bulk import, P&L, and risk analysis |
+| Portfolio | `get_portfolio` · `analyze_portfolio` · `upsert_holding` · `import_holdings` · `remove_holding` · `save_position_analysis` | CRUD, bulk import, P&L, risk analysis, and analysis caching |
 | Watchlist | `add_watchlist` · `remove_watchlist` · `get_portfolio_file` | Local stock/fund watchlists and file access |
 | Operations | `probe_finance_sources` | Serial endpoint checks and provider fallback ordering |
 

@@ -32,7 +32,7 @@ DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 | 快讯 | 全球财经电报，以及按持仓/自选筛选的个股新闻 |
 | 接口 | 数据源健康状态与当前 provider |
 
-持仓截图也可以交给 Agent 识别，再通过 `import_holdings` 批量写入本地文件；面板会自动刷新。插件只修改本地持仓数据，不执行真实交易。
+持仓截图也可以交给 Agent 识别，再通过 `import_holdings` 批量写入本地文件；面板会自动刷新。点击持仓或自选中的股票/基金即可打开完整 AI 解读，首次主动点击后才生成，报告会缓存到本地并支持重新生成。插件只修改本地持仓数据，不执行真实交易。
 
 ### 面向模型的金融工具
 
@@ -46,7 +46,7 @@ DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 | 通用 | `search_symbol` · `get_stock_info` | 跨市场代码解析、个股档案与市值 |
 | 研究 | `calculate_technical_indicators` · `get_macro_china` | MA/MACD/RSI/KDJ 与中国宏观序列 |
 | 新闻 | `get_market_news` · `get_stock_news` · `web_search` | 市场快讯、个股新闻、免费网页搜索 |
-| 组合 | `get_portfolio` · `analyze_portfolio` · `upsert_holding` · `import_holdings` · `remove_holding` | 持仓 CRUD、批量导入、盈亏与风险分析 |
+| 组合 | `get_portfolio` · `analyze_portfolio` · `upsert_holding` · `import_holdings` · `remove_holding` · `save_position_analysis` | 持仓 CRUD、批量导入、盈亏、风险分析和解读缓存 |
 | 自选 | `add_watchlist` · `remove_watchlist` · `get_portfolio_file` | 自选股/基金和本地文件管理 |
 | 运维 | `probe_finance_sources` | 串行探测端点并生成 provider 降级顺序 |
 
