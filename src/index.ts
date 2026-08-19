@@ -14,6 +14,9 @@ import { PortfolioStore } from './store.js'
 import { registerTools } from './tools/register.js'
 import { registerSkills } from './skills.js'
 import { registerRoutes } from './server-routes.js'
+import { registerMcpSources } from './mcp/manager.js'
+import { HistoryStore } from './history/store.js'
+import { registerHistoryTools } from './history/tools.js'
 import { createDdgSearchProvider } from './web-ddg.js'
 
 export const name = pluginName
@@ -40,6 +43,7 @@ export function apply(ctx: Context, config: Config) {
     packageRoot,
   })
   void registry.loadProbeReport()
+  void registry.loadPolicy()
 
   const portfolioPath = path.isAbsolute(config.portfolioPath)
     ? config.portfolioPath
@@ -55,10 +59,15 @@ export function apply(ctx: Context, config: Config) {
     async (holdings) => { await store.setHoldings(holdings) },
   )
 
+  const history = new HistoryStore(path.join(packageRoot, 'data/history'))
+
   ctx.provide('financeData', finance)
   registerTools(ctx, finance, store, analyses)
-  registerSkills(ctx, packageRoot)
-  registerRoutes(ctx.webServer, finance, store, analyses, ctx)
+  registerHistoryTools(ctx, finance, history)
+  const yingmiCommand = (current().mcpSources ?? []).find((s) => s.kind === 'cli' && s.enabled)?.command || undefined
+  const skills = registerSkills(ctx, packageRoot, yingmiCommand)
+  const mcp = registerMcpSources(ctx, current().mcpSources ?? [], packageRoot)
+  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, ctx)
 
   // Replace the default (key-gated) web search with DuckDuckGo so `web_search` works key-free.
   ctx.web.registerSearchProvider(createDdgSearchProvider((q, signal) => finance.webSearch(q, signal)))

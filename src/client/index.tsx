@@ -630,7 +630,223 @@ function NewsView(props: { active: boolean; data: LiveData; quoteBy: Map<string,
       h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财全球财经快讯（对照 AkShare stock_info_global_em）')))
 }
 
+// ---- K线 tab (local history + event markers) ----
+interface HistBar { date: string; open: number; high: number; low: number; close: number; volume: number }
+interface HistEvent { date: string; type: string; label: string; value?: number }
+const EVENT_COLOR = (t: string) => (t === '财报' ? BRAND : t === '分红' ? DOWN : '#e6a23c')
+
+function KlineChart(props: { kline: HistBar[]; events: HistEvent[] }) {
+  const { kline, events } = props
+  const W = 372, H = 168, padTop = 16, padBot = 18
+  if (kline.length < 2) return h('div', { style: S.muted }, '暂无K线，先点「同步」')
+  const closes = kline.map((b) => b.close)
+  const min = Math.min(...closes), max = Math.max(...closes)
+  const span = max - min || 1
+  const x = (i: number) => (i / (kline.length - 1)) * (W - 8) + 4
+  const y = (v: number) => padTop + (1 - (v - min) / span) * (H - padTop - padBot)
+  const points = closes.map((c, i) => `${x(i).toFixed(1)},${y(c).toFixed(1)}`).join(' ')
+  const idxByDate = (d: string) => {
+    let idx = kline.findIndex((b) => b.date >= d)
+    if (idx < 0) idx = kline.length - 1
+    return idx
+  }
+  const marks = events.filter((e) => e.date >= kline[0]!.date).map((e) => ({ e, xi: x(idxByDate(e.date)) }))
+  return h('svg', { width: '100%', viewBox: `0 0 ${W} ${H}`, style: { display: 'block' } },
+    h('polyline', { points, fill: 'none', stroke: BRAND, strokeWidth: 1.5 }),
+    ...marks.map((m, i) => h('g', { key: i },
+      h('line', { x1: m.xi, y1: padTop, x2: m.xi, y2: H - padBot, stroke: EVENT_COLOR(m.e.type), strokeWidth: 1, strokeDasharray: '3 3', opacity: 0.7 }),
+      h('circle', { cx: m.xi, cy: padTop, r: 3, fill: EVENT_COLOR(m.e.type) }))),
+    h('text', { x: 4, y: 11, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${max.toFixed(2)}`),
+    h('text', { x: 4, y: H - 4, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${min.toFixed(2)} · ${kline[0]!.date}→${kline[kline.length - 1]!.date}`))
+}
+
+function KlineView(props: { data: LiveData }) {
+  const [code, setCode] = useState('')
+  const [kind, setKind] = useState('a')
+  const [hist, setHist] = useState<{ kline: HistBar[]; events: HistEvent[]; updatedAt?: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState('')
+  const picks = [...props.data.holdings, ...props.data.watchlist].slice(0, 8)
+  const load = async (c: string) => {
+    if (!c) return
+    try {
+      const r = await apiGet<{ ok: boolean; kline?: HistBar[]; events?: HistEvent[]; updatedAt?: string }>(`/history?code=${encodeURIComponent(c)}`)
+      setHist(r.ok ? { kline: r.kline ?? [], events: r.events ?? [], updatedAt: r.updatedAt } : { kline: [], events: [] })
+    } catch { setHist({ kline: [], events: [] }) }
+  }
+  const sync = async () => {
+    const c = code.trim(); if (!c) { setHint('请输入代码'); return }
+    setBusy(true); setHint('')
+    try {
+      const r = await apiPost<{ ok: boolean; bars: number; addedBars: number; addedEvents: number; provider?: string; klineError?: string }>('/history/sync', { code: c, kind })
+      setHint(r.ok ? `同步完成：${r.bars} 根K线（新增 ${r.addedBars}），事件 +${r.addedEvents}｜${r.provider ?? ''}` : `同步失败：${r.klineError ?? ''}`)
+      await load(c)
+    } catch { setHint('同步失败') } finally { setBusy(false) }
+  }
+  useEffect(() => { if (code) void load(code) }, [])
+  return h('div', { style: S.section },
+    h('div', { style: S.title }, 'K线与事件'),
+    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+      h('input', { style: { ...S.input, flex: 1, minWidth: 90 }, placeholder: '代码 600519', value: code, onChange: (e: { target: { value: string } }) => setCode(e.target.value) }),
+      h('select', { style: { ...S.input, width: 70 }, value: kind, onChange: (e: { target: { value: string } }) => setKind(e.target.value) },
+        h('option', { value: 'a' }, 'A股'), h('option', { value: 'hk' }, '港股'), h('option', { value: 'us' }, '美股'), h('option', { value: 'fund' }, '基金')),
+      h('button', { style: S.btn, disabled: busy, onClick: () => void sync() }, busy ? '同步中…' : '同步'),
+      h('button', { style: S.btn, onClick: () => void load(code.trim()) }, '查看')),
+    picks.length ? h('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } }, picks.map((p) => h('button', {
+      key: keyOf(p.code, p.type ?? 'stock'), style: { ...S.btn, padding: '2px 6px', fontSize: 11 },
+      onClick: () => { setCode(p.code); setKind(p.type === 'fund' ? 'fund' : 'a'); void load(p.code) },
+    }, p.name || p.code))) : null,
+    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
+    hist ? h(KlineChart, { kline: hist.kline, events: hist.events }) : h('div', { style: S.muted }, '输入代码后「同步」拉取并本地保存历史'),
+    hist && hist.events.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 } },
+      h('div', { style: { ...S.muted, fontWeight: 600 } }, `事件标记 (${hist.events.length})`),
+      hist.events.slice(-12).reverse().map((e, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center' } },
+        h('span', { style: { width: 8, height: 8, borderRadius: 999, background: EVENT_COLOR(e.type), flex: '0 0 auto' } }),
+        h('span', { style: { ...S.muted, width: 82, flex: '0 0 auto' } }, e.date),
+        h('span', { style: { flex: 1 } }, e.label)))) : null)
+}
+
+// ---- 技能 tab (local playbooks + 盈米 remote skills) ----
+interface SkillEntry { name: string; description: string; enabled: boolean; source: string }
+interface SkillCatalog { local: SkillEntry[]; yingmi: SkillEntry[]; yingmiAvailable?: boolean }
+
+function SkillsView() {
+  const [cat, setCat] = useState<SkillCatalog>({ local: [], yingmi: [] })
+  const [localSel, setLocalSel] = useState<string[]>([])
+  const [ymSel, setYmSel] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState('')
+  const apply = (c: SkillCatalog) => {
+    setCat(c)
+    setLocalSel(c.local.filter((s) => s.enabled).map((s) => s.name))
+    setYmSel(c.yingmi.filter((s) => s.enabled).map((s) => s.name))
+  }
+  useEffect(() => { void apiGet<SkillCatalog>('/skills').then(apply).catch(() => { /* */ }) }, [])
+  const save = async () => {
+    setBusy(true); setHint('')
+    try { const r = await apiPost<{ ok: boolean } & SkillCatalog>('/skills', { local: localSel, yingmi: ymSel }); if (r.ok) { apply(r); setHint('已保存并即时生效') } }
+    catch { setHint('保存失败') } finally { setBusy(false) }
+  }
+  const toggle = (sel: string[], set: (v: string[]) => void, name: string) => set(sel.includes(name) ? sel.filter((n) => n !== name) : [...sel, name])
+  const row = (sel: string[], set: (v: string[]) => void, s: SkillEntry) => {
+    const on = sel.includes(s.name)
+    return h('div', { key: s.name, style: { display: 'flex', gap: 8, alignItems: 'flex-start', padding: '3px 0' } },
+      h('button', { onClick: () => toggle(sel, set, s.name), style: { ...S.btn, padding: '2px 8px', flex: '0 0 auto', background: on ? BRAND : S.btn.background, color: on ? '#fff' : S.btn.color } }, on ? '启用' : '停用'),
+      h('div', { style: { flex: 1, minWidth: 0 } },
+        h('div', { style: { fontWeight: 500 } }, s.name),
+        h('div', { style: { ...S.muted, fontSize: 11 } }, s.description.slice(0, 60))))
+  }
+  return h('div', { style: S.section },
+    h('div', { style: S.title }, '技能', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, disabled: busy, onClick: () => void save() }, busy ? '…' : '保存')),
+    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, '本插件技能（进入系统提示）'),
+    cat.local.map((s) => row(localSel, setLocalSel, s)),
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, cat.yingmiAvailable ? '盈米金融场景 skill（标准 SKILL.md · scope 可见范围）' : '盈米 skill（需全局安装并接入 yingmi-skill-cli）'),
+    cat.yingmi.length ? cat.yingmi.map((s) => row(ymSel, setYmSel, s)) : h('div', { style: S.muted }, '—'),
+    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6 } }, '盈米全部停用=清除 scope（默认全部可见）；启用项写入 remote-skill scope。'))
+}
+
+// ---- 数据源 tab (per-capability provider selection) ----
+const CAP_LABEL: Record<string, string> = {
+  stock_list: 'A股列表', quote: 'A股行情', kline: 'A股K线', indices: '指数概览', financials: '财务指标', sectors: '行业板块',
+  hk_quote: '港股行情', hk_kline: '港股K线', hk_list: '港股列表', us_quote: '美股行情', us_kline: '美股K线',
+  fund_quote: '基金净值', fund_kline: '基金走势', fund_rank: '基金排行', macro: '宏观', news_flash: '市场快讯',
+  stock_news: '个股新闻', symbol_search: '代码解析', stock_info: '个股档案', web_search: '网页搜索',
+}
+interface CapProvider { id: string; source: string; endpointRef: string; ok?: boolean; selected: boolean }
+interface CapCatalog { capability: string; selected: string[]; hasPolicy: boolean; providers: CapProvider[] }
+
+function SourcesView() {
+  const [catalog, setCatalog] = useState<CapCatalog[]>([])
+  const [sel, setSel] = useState<Record<string, string[]>>({})
+  const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState('')
+  const apply = (cat: CapCatalog[]) => {
+    setCatalog(cat)
+    const s: Record<string, string[]> = {}
+    for (const c of cat) s[c.capability] = c.providers.filter((p) => p.selected).map((p) => p.id)
+    setSel(s)
+  }
+  useEffect(() => { void apiGet<{ catalog: CapCatalog[] }>('/providers').then((r) => apply(r.catalog ?? [])).catch(() => { /* */ }) }, [])
+  const toggle = (cap: string, id: string) => setSel((s) => {
+    const cur = new Set(s[cap] ?? [])
+    if (cur.has(id)) cur.delete(id); else cur.add(id)
+    const ordered = (catalog.find((c) => c.capability === cap)?.providers ?? []).filter((p) => cur.has(p.id)).map((p) => p.id)
+    return { ...s, [cap]: ordered }
+  })
+  const save = async (policy: Record<string, string[]>) => {
+    setBusy(true); setHint('')
+    try { const r = await apiPost<{ ok: boolean; catalog: CapCatalog[] }>('/providers', { policy }); if (r.ok) { apply(r.catalog ?? []); setHint('已保存并即时生效') } }
+    catch { setHint('保存失败') } finally { setBusy(false) }
+  }
+  const multi = catalog.filter((c) => c.providers.length > 1)
+  const single = catalog.filter((c) => c.providers.length <= 1)
+  const chip = (cap: string, p: CapProvider) => {
+    const on = (sel[cap] ?? []).includes(p.id)
+    return h('button', {
+      key: p.id, title: p.endpointRef, onClick: () => toggle(cap, p.id),
+      style: { ...S.btn, padding: '2px 8px', display: 'inline-flex', alignItems: 'center', gap: 5, background: on ? BRAND : S.btn.background, color: on ? '#fff' : S.btn.color },
+    }, p.ok === false ? h('span', { style: { width: 6, height: 6, borderRadius: 999, background: UP } }) : (p.ok ? h('span', { style: { width: 6, height: 6, borderRadius: 999, background: DOWN } }) : null), p.source)
+  }
+  const capRow = (c: CapCatalog) => h('div', { key: c.capability, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' } },
+    h('span', { style: { width: 76, flex: '0 0 auto', fontWeight: 500 } }, CAP_LABEL[c.capability] ?? c.capability),
+    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 } }, c.providers.map((p) => chip(c.capability, p))))
+  return h('div', { style: S.section },
+    h('div', { style: S.title }, '数据源选择',
+      h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, disabled: busy, onClick: () => void save(sel) }, busy ? '…' : '保存'),
+      h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: busy, title: '清空自定义，回到探测顺序', onClick: () => void save({}) }, '重置')),
+    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, '多来源能力（可多选/切换优先级）'),
+    multi.map(capRow),
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, '单一来源能力（可启用/停用）'),
+    single.map(capRow),
+    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6 } }, '绿点=探测可用，红点=探测失败；选择按钮顺序即调用优先级。妙想/盈米在「接口」页作为整体数据源开关。'))
+}
+
 // ---- 接口 tab ----
+interface McpSource { name: string; kind: string; label: string; enabled: boolean; tokenPresent: boolean; state: string; detail?: string; toolCount?: number }
+const MCP_STATE_LABEL: Record<string, string> = { ready: '已接入', 'no-token': '缺少 token', disabled: '已停用', error: '错误' }
+
+function McpSourceRow(props: { s: McpSource; onSaved: (sources: McpSource[]) => void }) {
+  const { s } = props
+  const [editing, setEditing] = useState(false)
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const good = s.state === 'ready'
+  const save = async () => {
+    setBusy(true)
+    try {
+      const r = await apiPost<{ ok: boolean; sources: McpSource[] }>('/mcp/token', { name: s.name, token })
+      if (r.ok) { props.onSaved(r.sources ?? []); setEditing(false); setToken('') }
+    } catch { /* */ } finally { setBusy(false) }
+  }
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, padding: '3px 0' } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 }, title: s.detail || '' },
+      h('span', { style: { width: 8, height: 8, borderRadius: 999, background: good ? DOWN : (s.state === 'disabled' ? '#bbb' : UP), flex: '0 0 auto' } }),
+      h('span', { style: { flex: 1 } }, s.label, ' ', h('code', { style: { ...S.muted, fontSize: 11 } }, s.name)),
+      h('span', { style: S.muted }, (MCP_STATE_LABEL[s.state] ?? s.state) + (s.toolCount ? ` · ${s.toolCount} 工具` : '')),
+      h('button', { style: { ...S.btn, padding: '2px 6px' }, title: s.tokenPresent ? '更新 token' : '配置 token', onClick: () => setEditing(!editing) }, s.tokenPresent ? '🔑' : '设置')),
+    editing ? h('div', { style: { display: 'flex', gap: 6 } },
+      h('input', { type: 'password', style: { ...S.input, flex: 1 }, placeholder: `${s.name} token`, value: token, onChange: (e: { target: { value: string } }) => setToken(e.target.value) }),
+      h('button', { style: S.btn, disabled: busy, onClick: () => void save() }, busy ? '重载中…' : '保存')) : null)
+}
+
+function McpSourcesView() {
+  const [sources, setSources] = useState<McpSource[]>([])
+  useEffect(() => {
+    let alive = true
+    const load = () => { void apiGet<{ sources: McpSource[] }>('/mcp').then((r) => { if (alive) setSources(r.sources ?? []) }).catch(() => { /* */ }) }
+    load()
+    const t = window.setInterval(load, 15_000)
+    return () => { alive = false; window.clearInterval(t) }
+  }, [])
+  if (!sources.length) return null
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, '外部数据源 (MCP)'),
+    sources.map((s) => h(McpSourceRow, { key: s.name, s, onSaved: setSources })),
+    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, 'token 保存到 data/mcp-secrets.json（也支持环境变量）；保存后即时热重载'))
+}
+
 function HealthView(props: { health: LiveData['health'] }) {
   const healthBy = new Map(props.health.map((x) => [x.capability, x]))
   return h('div', { style: S.section },
@@ -644,7 +860,9 @@ function HealthView(props: { health: LiveData['health'] }) {
           h('span', { style: { width: 8, height: 8, borderRadius: 999, background: ok ? DOWN : UP, flex: '0 0 auto' } }),
           h('span', { style: { flex: 1 } }, it.label, ' ', h('code', { style: { ...S.muted, fontSize: 11 } }, it.tool)),
           h('span', { style: S.muted }, it.source))
-      }))))
+      })),
+    ),
+    h(McpSourcesView, null))
 }
 
 function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }) {
@@ -732,7 +950,8 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
 
 const TABS: Array<{ id: string; label: string }> = [
   { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
-  { id: 'funds', label: '基金' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' }, { id: 'health', label: '接口' },
+  { id: 'funds', label: '基金' }, { id: 'kline', label: 'K线' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
+  { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
 ]
 
 function findShellFrame(): HTMLElement | null {
@@ -807,6 +1026,9 @@ function PanelBody(props: {
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
+      tab === 'kline' ? h(KlineView, { data }) : null,
+      tab === 'sources' ? h(SourcesView, null) : null,
+      tab === 'skills' ? h(SkillsView, null) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))
 }
 

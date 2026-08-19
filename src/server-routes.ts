@@ -3,8 +3,14 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AnalysisStore } from './analysis-store.js'
 import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
+import type { McpManager } from './mcp/manager.js'
+import type { SkillManager } from './skills.js'
+import type { HistoryStore } from './history/store.js'
+import { syncHistory, type SymbolKind } from './history/sync.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
 import type { AssetType } from './types.js'
+
+const HISTORY_KINDS: SymbolKind[] = ['a', 'hk', 'us', 'fund']
 
 export const API_PREFIX = '/plugins/dsn-finance/api'
 
@@ -113,6 +119,9 @@ export function registerRoutes(
   webServer: WebServerLike,
   finance: FinanceDataService,
   store: PortfolioStore,
+  mcp: McpManager | undefined,
+  history: HistoryStore | undefined,
+  skills: SkillManager | undefined,
   analyses: AnalysisStore,
   modelContext: ModelContextLike,
 ): () => void {
@@ -127,6 +136,60 @@ export function registerRoutes(
         if (req.method === 'GET' && (sub === '/state' || sub === '/')) {
           const { holdings, watchlist } = store.get()
           return sendJson(res, 200, { holdings, watchlist, portfolioPath: store.path })
+        }
+        if (req.method === 'GET' && sub === '/mcp') {
+          return sendJson(res, 200, { sources: mcp?.status() ?? [] })
+        }
+        if (req.method === 'GET' && sub === '/providers') {
+          return sendJson(res, 200, { catalog: finance.getProviderCatalog() })
+        }
+        if (skills && req.method === 'GET' && sub === '/skills') {
+          return sendJson(res, 200, skills.catalog())
+        }
+        if (skills && req.method === 'POST' && sub === '/skills') {
+          const body = await readBody(req)
+          const local = Array.isArray(body.local) ? (body.local as string[]) : undefined
+          const yingmi = Array.isArray(body.yingmi) ? (body.yingmi as string[]) : undefined
+          return sendJson(res, 200, { ok: true, ...(await skills.setEnabled(local, yingmi)) })
+        }
+        if (history && req.method === 'GET' && sub === '/history/list') {
+          return sendJson(res, 200, { symbols: await history.list() })
+        }
+        if (history && req.method === 'GET' && sub === '/history') {
+          const code = url.searchParams.get('code') ?? ''
+          const h = await history.read(code)
+          if (!h) return sendJson(res, 200, { ok: false, code, error: 'no local history' })
+          return sendJson(res, 200, { ok: true, ...h })
+        }
+        if (history && req.method === 'POST' && sub === '/history/sync') {
+          const body = await readBody(req)
+          const code = String(body.code ?? '').trim()
+          if (!code) return sendJson(res, 400, { ok: false, error: 'missing code' })
+          const kind = (HISTORY_KINDS.includes(body.kind as SymbolKind) ? body.kind : 'a') as SymbolKind
+          const result = await syncHistory(finance, history, code, kind)
+          return sendJson(res, 200, result)
+        }
+        if (history && req.method === 'POST' && sub === '/history/event') {
+          const body = await readBody(req)
+          const code = String(body.code ?? '').trim()
+          const date = String(body.date ?? '').trim()
+          if (!code || !date) return sendJson(res, 400, { ok: false, error: 'missing code/date' })
+          const added = await history.mergeEvents(code, 'a', [{ date, type: String(body.type ?? '自定义'), label: String(body.label ?? ''), value: typeof body.value === 'number' ? body.value : undefined }])
+          return sendJson(res, 200, { ok: true, added })
+        }
+        if (req.method === 'POST' && sub === '/providers') {
+          const body = await readBody(req)
+          const policy = (body.policy ?? {}) as Record<string, string[]>
+          const catalog = await finance.setProviderPolicy(policy)
+          return sendJson(res, 200, { ok: true, catalog })
+        }
+        if (req.method === 'POST' && sub === '/mcp/token') {
+          if (!mcp) return sendJson(res, 400, { ok: false, error: 'mcp disabled' })
+          const body = await readBody(req)
+          const name = String(body.name ?? '').trim()
+          if (!name) return sendJson(res, 400, { ok: false, error: 'missing name' })
+          await mcp.setToken(name, String(body.token ?? ''))
+          return sendJson(res, 200, { ok: true, sources: mcp.status() })
         }
         if (req.method === 'GET' && sub === '/live') {
           const snapshot = await buildLiveSnapshot(finance, snapshotItems(store))
