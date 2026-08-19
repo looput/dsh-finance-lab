@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { stripMarketSuffix } from './data/http.js'
 import type { AssetType, PortfolioHolding, WatchItem } from './types.js'
 
 export interface PortfolioFile {
@@ -16,6 +17,23 @@ const DEFAULT_WATCHLIST: WatchItem[] = [
 
 function normType(v: unknown): AssetType {
   return v === 'fund' ? 'fund' : 'stock'
+}
+
+function canonCode(code: string, type: AssetType): string {
+  const raw = String(code).trim()
+  return type === 'fund' ? raw : stripMarketSuffix(raw)
+}
+
+function dedupeWatch(items: WatchItem[]): WatchItem[] {
+  const seen = new Set<string>()
+  const out: WatchItem[] = []
+  for (const w of items) {
+    const key = `${w.type}:${w.code}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(w)
+  }
+  return out
 }
 
 /**
@@ -37,18 +55,20 @@ export class PortfolioStore {
       const raw = await readFile(this.file, 'utf8')
       const parsed = JSON.parse(raw) as Partial<PortfolioFile>
       this.data = {
-        holdings: (parsed.holdings ?? []).map((h) => ({
-          code: String(h.code).trim(),
-          name: h.name,
-          quantity: Number(h.quantity) || 0,
-          avgCost: Number(h.avgCost) || 0,
-          type: normType(h.type),
-        })).filter((h) => h.code),
-        watchlist: (parsed.watchlist ?? DEFAULT_WATCHLIST).map((w) => ({
-          code: String(w.code).trim(),
-          name: w.name,
-          type: normType(w.type),
-        })).filter((w) => w.code),
+        holdings: (parsed.holdings ?? []).map((h) => {
+          const type = normType(h.type)
+          return {
+            code: canonCode(String(h.code), type),
+            name: h.name,
+            quantity: Number(h.quantity) || 0,
+            avgCost: Number(h.avgCost) || 0,
+            type,
+          }
+        }).filter((h) => h.code),
+        watchlist: dedupeWatch((parsed.watchlist ?? DEFAULT_WATCHLIST).map((w) => {
+          const type = normType(w.type)
+          return { code: canonCode(String(w.code), type), name: w.name, type }
+        }).filter((w) => w.code)),
         updatedAt: parsed.updatedAt ?? new Date().toISOString(),
       }
     } catch {
@@ -72,29 +92,35 @@ export class PortfolioStore {
   }
 
   async setHoldings(holdings: PortfolioHolding[]): Promise<PortfolioFile> {
-    this.data.holdings = holdings.map((h) => ({ ...h, code: String(h.code).trim(), type: normType(h.type) }))
+    this.data.holdings = holdings.map((h) => {
+      const type = normType(h.type)
+      return { ...h, code: canonCode(h.code, type), type }
+    })
     await this.persist()
     return this.data
   }
 
   async upsertHolding(holding: PortfolioHolding): Promise<PortfolioFile> {
-    const code = String(holding.code).trim()
     const type = normType(holding.type)
+    const code = canonCode(holding.code, type)
     const next = this.data.holdings.filter((h) => !(h.code === code && h.type === type))
     next.push({ ...holding, code, type })
     return this.setHoldings(next)
   }
 
   async removeHolding(code: string, type?: AssetType): Promise<PortfolioFile> {
-    const c = String(code).trim()
-    this.data.holdings = this.data.holdings.filter((h) => (type ? !(h.code === c && h.type === type) : h.code !== c))
+    this.data.holdings = this.data.holdings.filter((h) => {
+      if (type && h.type !== normType(type)) return true
+      return h.code !== canonCode(code, h.type)
+    })
     await this.persist()
     return this.data
   }
 
   async addWatch(item: WatchItem): Promise<PortfolioFile> {
-    const code = String(item.code).trim()
     const type = normType(item.type)
+    const code = canonCode(item.code, type)
+    if (!code) return this.data
     if (!this.data.watchlist.some((w) => w.code === code && w.type === type)) {
       this.data.watchlist.push({ code, name: item.name, type })
       await this.persist()
@@ -103,8 +129,10 @@ export class PortfolioStore {
   }
 
   async removeWatch(code: string, type?: AssetType): Promise<PortfolioFile> {
-    const c = String(code).trim()
-    this.data.watchlist = this.data.watchlist.filter((w) => (type ? !(w.code === c && w.type === type) : w.code !== c))
+    this.data.watchlist = this.data.watchlist.filter((w) => {
+      if (type && w.type !== normType(type)) return true
+      return w.code !== canonCode(code, w.type)
+    })
     await this.persist()
     return this.data
   }
