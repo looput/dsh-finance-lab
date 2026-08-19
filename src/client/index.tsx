@@ -90,6 +90,13 @@ const S = {
   muted: { color: V('--dsw-alias-label-tertiary', '#999'), fontSize: 12 } as CSSProperties,
   row: { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderTop: `1px solid ${V('--dsw-alias-border-l2', '#eee')}` } as CSSProperties,
   card: { border: `1px solid ${V('--dsw-alias-border-l2', '#eee')}`, borderRadius: 10, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 4 } as CSSProperties,
+  analysisBackdrop: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 2147483100 } as CSSProperties,
+  analysisPanel: {
+    position: 'fixed', inset: '4vh 5vw', zIndex: 2147483101, display: 'flex', flexDirection: 'column',
+    background: V('--dsw-alias-bg-layer-3', '#fff'), color: V('--dsw-alias-label-primary', '#111'),
+    border: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`, borderRadius: 12,
+    boxShadow: '0 12px 40px rgba(0,0,0,0.2)', overflow: 'hidden',
+  } as CSSProperties,
 }
 function fmt(n: number | undefined, d = 2): string {
   return typeof n === 'number' && Number.isFinite(n) ? n.toFixed(d) : '—'
@@ -170,7 +177,7 @@ function Sparkline(props: { data?: number[]; color: string; w?: number }) {
     h('polyline', { points: pts, fill: 'none', stroke: props.color, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }))
 }
 
-function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => void }) {
+function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => void; onClick?: () => void }) {
   const q = props.q
   const pct = q.changePercent
   const sparkColor = q.spark && q.spark.length >= 2 ? (q.spark[q.spark.length - 1]! >= q.spark[0]! ? UP : DOWN) : colorOf(pct)
@@ -183,7 +190,7 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
     const limited = /429|限流|rate.?limit|timeout|超时/i.test(err)
     return h('span', { style: S.muted, title: err || '暂无行情' }, limited ? '限流' : '获取失败')
   })()
-  return h('div', { style: S.row },
+  return h('div', { style: { ...S.row, cursor: props.onClick ? 'pointer' : 'default' }, onClick: props.onClick },
     h('div', { style: { flex: 1, minWidth: 0 } },
       h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, q.name || q.code),
       h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center' } },
@@ -191,7 +198,11 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
     h(Sparkline, { data: q.spark, color: sparkColor }),
     h('div', { style: { width: 62, textAlign: 'right' } }, priceNode),
     h('div', { style: { width: 54, textAlign: 'right', color: colorOf(pct) } }, hasPrice ? pctStr(pct) : '—'),
-    props.onRemove ? h('button', { style: { ...S.btn, padding: '2px 6px' }, title: '移除', onClick: props.onRemove }, '×') : null)
+    props.onRemove ? h('button', {
+      style: { ...S.btn, padding: '2px 6px' },
+      title: '移除',
+      onClick: (e: any) => { e.stopPropagation(); props.onRemove?.() },
+    }, '×') : null)
 }
 
 // ---- data hooks over the plugin HTTP API (React state; never written to config) ----
@@ -205,6 +216,21 @@ interface LiveData {
   portfolioPath?: string
 }
 const EMPTY: LiveData = { quotes: [], indices: [], health: [], holdings: [], watchlist: [] }
+
+interface PositionAnalysis {
+  code: string
+  type: AssetType
+  report: string
+  generatedAt: string
+  dataAsOf?: string
+  promptVersion: string
+}
+
+interface AnalysisItem {
+  code: string
+  type: AssetType
+  name?: string
+}
 
 async function apiGet<T>(path: string): Promise<T> {
   const r = await fetch(API + path, { headers: { Accept: 'application/json' } })
@@ -320,7 +346,13 @@ function SearchAdd(props: { onAdd: (code: string, type: AssetType) => void }) {
 }
 
 // ---- 行情 tab ----
-function QuotesView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; loading: boolean; mutate: (a: string, p: Record<string, unknown>) => void }) {
+function QuotesView(props: {
+  data: LiveData
+  quoteBy: Map<string, LiveQuote>
+  loading: boolean
+  mutate: (a: string, p: Record<string, unknown>) => void
+  onOpen: (item: AnalysisItem) => void
+}) {
   const { data, quoteBy, loading, mutate } = props
   const [wCode, setWCode] = useState('')
   const [wType, setWType] = useState<AssetType>('stock')
@@ -340,7 +372,13 @@ function QuotesView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; lo
             h('span', { style: { color: colorOf(ix.changePercent), fontWeight: 600 } }, `${fmt(ix.price)} ${pctStr(ix.changePercent)}`))))),
     h('div', { style: S.section },
       h('div', { style: S.title }, '自选 · 行情走势'),
-      watchQuotes.length === 0 ? h('div', { style: S.muted }, '暂无自选，在下方添加') : watchQuotes.map((q) => h(QuoteRow, { key: `w-${q.type}-${q.code}`, q, loading, onRemove: () => mutate('removeWatch', { code: q.code, type: q.type }) })),
+      watchQuotes.length === 0 ? h('div', { style: S.muted }, '暂无自选，在下方添加') : watchQuotes.map((q) => h(QuoteRow, {
+        key: `w-${q.type}-${q.code}`,
+        q,
+        loading,
+        onClick: () => props.onOpen({ code: q.code, type: q.type ?? 'stock', name: q.name }),
+        onRemove: () => mutate('removeWatch', { code: q.code, type: q.type }),
+      })),
       data.at ? h('div', { style: S.muted }, `更新于 ${new Date(data.at).toLocaleTimeString()}`) : null,
       h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
         h('input', { style: { ...S.input, flex: 1 }, placeholder: '代码，如 600519 / 00700 / AAPL / 110022', value: wCode, onChange: (e: any) => setWCode(e.target.value), onKeyDown: onEnterCommit(addWatch) }),
@@ -350,7 +388,12 @@ function QuotesView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; lo
 }
 
 // ---- 持仓 tab ----
-function HoldingsView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; mutate: (a: string, p: Record<string, unknown>) => void }) {
+function HoldingsView(props: {
+  data: LiveData
+  quoteBy: Map<string, LiveQuote>
+  mutate: (a: string, p: Record<string, unknown>) => void
+  onOpen: (item: AnalysisItem) => void
+}) {
   const { data, quoteBy, mutate } = props
   const [hCode, setHCode] = useState('')
   const [hQty, setHQty] = useState('100')
@@ -388,7 +431,11 @@ function HoldingsView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; 
       const q = quoteBy.get(keyOf(hd.code, hd.type))
       const price = q?.price
       const hpnl = typeof price === 'number' ? (price - hd.avgCost) * hd.quantity : undefined
-      return h('div', { key: `h-${hd.type}-${hd.code}`, style: S.row },
+      return h('div', {
+        key: `h-${hd.type}-${hd.code}`,
+        style: { ...S.row, cursor: 'pointer' },
+        onClick: () => props.onOpen({ code: hd.code, type: hd.type, name: q?.name || hd.name }),
+      },
         h('div', { style: { flex: 1, minWidth: 0 } },
           h('div', { style: { fontWeight: 500 } }, h('span', { style: S.tag }, hd.type === 'fund' ? '基' : '股'), ' ', q?.name || hd.name || hd.code),
           h('div', { style: S.muted }, `${hd.code} · ${hd.quantity} @ ${fmt(hd.avgCost, hd.type === 'fund' ? 4 : 2)}`)),
@@ -396,7 +443,10 @@ function HoldingsView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; 
           typeof hpnl === 'number'
             ? h('span', { style: { color: colorOf(hpnl) } }, `${hpnl >= 0 ? '+' : ''}${hpnl.toFixed(0)}`)
             : h('span', { style: S.muted }, `现价 ${fmt(price, hd.type === 'fund' ? 4 : 2)}`)),
-        h('button', { style: { ...S.btn, padding: '2px 6px' }, onClick: () => mutate('removeHolding', { code: hd.code, type: hd.type }) }, '删'))
+        h('button', {
+          style: { ...S.btn, padding: '2px 6px' },
+          onClick: (e: any) => { e.stopPropagation(); mutate('removeHolding', { code: hd.code, type: hd.type }) },
+        }, '删'))
     }),
     data.holdings.length ? h('div', { style: { ...S.row, fontWeight: 600 } },
       h('div', { style: { flex: 1 } }, '合计'),
@@ -577,6 +627,93 @@ function HealthView(props: { health: LiveData['health'] }) {
       }))))
 }
 
+function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }) {
+  const { item } = props
+  const [analysis, setAnalysis] = useState<PositionAnalysis>()
+  const [status, setStatus] = useState<'loading' | 'empty' | 'generating' | 'ready' | 'error'>('loading')
+  const [error, setError] = useState('')
+  const poll = useRef<number | undefined>(undefined)
+  const title = item.name || item.code
+
+  const refresh = useCallback(async () => {
+    try {
+      const result = await apiGet<{ ok: boolean; found: boolean; analysis?: PositionAnalysis }>(
+        `/analysis?code=${encodeURIComponent(item.code)}&type=${item.type}`,
+      )
+      if (result.analysis) {
+        setAnalysis(result.analysis)
+        setStatus('ready')
+        if (poll.current) { window.clearInterval(poll.current); poll.current = undefined }
+      } else if (status !== 'generating') {
+        setStatus('empty')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setStatus('error')
+    }
+  }, [item.code, item.type, status])
+
+  useEffect(() => {
+    void refresh()
+    return () => {
+      if (poll.current) window.clearInterval(poll.current)
+    }
+  }, [refresh])
+
+  async function generate(force: boolean) {
+    setError('')
+    setStatus('generating')
+    try {
+      const result = await apiPost<{ ok: boolean; status?: string; analysis?: PositionAnalysis; error?: string }>(
+        '/analysis',
+        { code: item.code, type: item.type, force },
+      )
+      if (result.analysis) {
+        setAnalysis(result.analysis)
+        setStatus('ready')
+        return
+      }
+      if (!poll.current) poll.current = window.setInterval(() => void refresh(), 2000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setStatus('error')
+    }
+  }
+
+  const typeLabel = item.type === 'fund' ? '基金' : '股票'
+  return h('div', null,
+    h('div', { style: S.analysisBackdrop, onClick: props.onClose }),
+    h('div', { style: S.analysisPanel, onClick: (e: any) => e.stopPropagation() },
+      h('div', { style: S.header },
+        h('button', { style: S.btn, onClick: props.onClose }, '← 返回'),
+        h('div', { style: { flex: 1, minWidth: 0 } },
+          h('div', { style: { fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, `${title} · ${typeLabel}`),
+          h('div', { style: S.muted }, item.code)),
+        analysis ? h('button', { style: S.btn, onClick: () => void generate(true), disabled: status === 'generating' }, '重新生成') : null),
+      h('div', { style: { overflowY: 'auto', padding: '18px 22px', flex: 1 } },
+        status === 'loading' ? h('div', { style: S.muted }, '读取缓存…') : null,
+        status === 'generating' ? h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600 } }, '正在生成 AI 解读'),
+          h('div', { style: S.muted }, '模型正在当前 Harness 会话中收集行情、基本面、新闻和风险数据。完成后本页会自动刷新。')) : null,
+        status === 'empty' ? h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600 } }, '还没有解读缓存'),
+          h('div', { style: S.muted }, '只有你主动点击后才会调用当前会话模型生成报告。'),
+          h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6 }, onClick: () => void generate(false) }, '生成 AI 解读')) : null,
+        status === 'error' ? h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600 } }, '解读请求失败'),
+          h('div', { style: S.muted }, error || '请稍后重试'),
+          h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6 }, onClick: () => void generate(false) }, '重试')) : null,
+        analysis ? h('div', null,
+          h('div', { style: { ...S.muted, marginBottom: 12 } },
+            `生成于 ${new Date(analysis.generatedAt).toLocaleString()}${analysis.dataAsOf ? ` · 数据截至 ${analysis.dataAsOf}` : ''}`),
+          h('pre', {
+            style: {
+              margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', font: 'inherit',
+              lineHeight: 1.65,
+            },
+          }, analysis.report)) : null)))
+}
+
 const TABS: Array<{ id: string; label: string }> = [
   { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
   { id: 'funds', label: '基金' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' }, { id: 'health', label: '接口' },
@@ -624,7 +761,12 @@ function useComposerImeFix() {
   }, [])
 }
 
-function PanelBody(props: { onClose: () => void; docked: boolean; onToggleDock: () => void }) {
+function PanelBody(props: {
+  onClose: () => void
+  docked: boolean
+  onToggleDock: () => void
+  onOpenAnalysis: (item: AnalysisItem) => void
+}) {
   const { onClose, docked, onToggleDock } = props
   const { data, loading, loadLive, mutate } = useLive()
   const [tab, setTab] = useState<string>(() => {
@@ -643,16 +785,16 @@ function PanelBody(props: { onClose: () => void; docked: boolean; onToggleDock: 
       h('button', { style: { ...S.btn, padding: '4px 8px' }, onClick: onClose }, '×')),
     h('div', { style: S.tabs }, TABS.map((t) => h('button', { key: t.id, style: S.tab(tab === t.id), onClick: () => selectTab(t.id) }, t.label))),
     h('div', { style: S.body },
-      tab === 'quotes' ? h(QuotesView, { data, quoteBy, loading, mutate }) : null,
+      tab === 'quotes' ? h(QuotesView, { data, quoteBy, loading, mutate, onOpen: props.onOpenAnalysis }) : null,
       tab === 'market' ? h(MarketView, { active: tab === 'market' }) : null,
-      tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate }) : null,
+      tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate, onOpen: props.onOpenAnalysis }) : null,
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))
 }
 
-function FloatingDrawer(props: { onClose: () => void; onToggleDock: () => void }) {
+function FloatingDrawer(props: { onClose: () => void; onToggleDock: () => void; onOpenAnalysis: (item: AnalysisItem) => void }) {
   return createPortal(
     h('div', null,
       h('div', { style: S.backdrop, onClick: props.onClose }),
@@ -660,7 +802,7 @@ function FloatingDrawer(props: { onClose: () => void; onToggleDock: () => void }
     portalHost())
 }
 
-function DockedPanel(props: { onClose: () => void; onToggleDock: () => void }) {
+function DockedPanel(props: { onClose: () => void; onToggleDock: () => void; onOpenAnalysis: (item: AnalysisItem) => void }) {
   useCenterReserve(true)
   return createPortal(h('div', { style: S.docked }, h(PanelBody, { ...props, docked: true })), portalHost())
 }
@@ -670,6 +812,7 @@ function FootAction(props: { scope: FinanceScope; wide?: boolean }) {
   const { value } = useConfig(props.scope)
   const open = value.panelOpen === true
   const docked = value.panelDocked !== false // default: docked (page-like)
+  const [analysisItem, setAnalysisItem] = useState<AnalysisItem>()
   const setOpen = (v: boolean) => void props.scope.set('panelOpen', v)
   const setDocked = (v: boolean) => void props.scope.set('panelDocked', v)
   const wide = props.wide === true
@@ -686,14 +829,15 @@ function FootAction(props: { scope: FinanceScope; wide?: boolean }) {
     } as CSSProperties,
   }, h(IconChart, { size: wide ? 16 : 18 }), wide ? h('span', { style: { overflow: 'hidden', whiteSpace: 'nowrap' } }, '金融面板') : null)
   return h('div', null, trigger,
-    open && docked ? h(DockedPanel, { onClose: () => setOpen(false), onToggleDock: () => setDocked(false) }) : null,
-    open && !docked ? h(FloatingDrawer, { onClose: () => setOpen(false), onToggleDock: () => setDocked(true) }) : null)
+    open && docked ? h(DockedPanel, { onClose: () => setOpen(false), onToggleDock: () => setDocked(false), onOpenAnalysis: setAnalysisItem }) : null,
+    open && !docked ? h(FloatingDrawer, { onClose: () => setOpen(false), onToggleDock: () => setDocked(true), onOpenAnalysis: setAnalysisItem }) : null,
+    analysisItem ? h(PositionAnalysisView, { item: analysisItem, onClose: () => setAnalysisItem(undefined) }) : null)
 }
 
 function SettingsCard() {
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 8, fontSize: 13 } },
     h('h3', { style: { margin: 0 } }, 'DSN Finance'),
-    h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '左下角「金融面板」提供行情 / 持仓 / 宏观 / 基金 / 接口五个标签页，实时数据，含基金净值与中国宏观指标。'),
+    h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '左下角「金融面板」提供行情 / 市场 / 持仓 / 基金 / 宏观 / 快讯 / 接口七个标签页；点击持仓或自选可生成 AI 解读。'),
     h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '持仓与自选保存在本地 JSON 文件中；可上传持仓截图让 Agent 解析并写入，面板会实时刷新。'))
 }
 

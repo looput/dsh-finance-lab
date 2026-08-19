@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
+import { AnalysisStore } from './analysis-store.js'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import '@deepseek-ai/dsh-system-prompt'
 import '@deepseek-ai/dsh-tools'
@@ -45,6 +46,8 @@ export function apply(ctx: Context, config: Config) {
     : path.join(packageRoot, config.portfolioPath)
   const store = new PortfolioStore(portfolioPath)
   void store.load()
+  const analyses = new AnalysisStore(path.join(packageRoot, 'data/analysis-cache.json'))
+  void analyses.load()
 
   const finance = new FinanceDataService(
     registry,
@@ -53,9 +56,9 @@ export function apply(ctx: Context, config: Config) {
   )
 
   ctx.provide('financeData', finance)
-  registerTools(ctx, finance, store)
+  registerTools(ctx, finance, store, analyses)
   registerSkills(ctx, packageRoot)
-  registerRoutes(ctx.webServer, finance, store)
+  registerRoutes(ctx.webServer, finance, store, analyses, ctx)
 
   // Replace the default (key-gated) web search with DuckDuckGo so `web_search` works key-free.
   ctx.web.registerSearchProvider(createDdgSearchProvider((q, signal) => finance.webSearch(q, signal)))
@@ -68,6 +71,7 @@ export function apply(ctx: Context, config: Config) {
       `- Holdings/watchlist live in a local JSON file: ${store.path}`,
       '- After reading a user-uploaded holdings screenshot, call import_holdings (bulk) or upsert_holding to write it; the "金融面板" sidebar refreshes live.',
       '- Use type:"fund" for funds (基金, 6-digit code) and type:"stock" for stocks (A股/港股/美股).',
+      '- When the panel sends an active position-analysis request, gather the requested data with finance tools and finish by calling save_position_analysis with the complete Markdown report.',
     ].join('\n'),
   })
 }
