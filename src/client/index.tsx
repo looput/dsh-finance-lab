@@ -13,6 +13,7 @@ const PANEL_W = 410
 
 const API = '/plugins/dsn-finance/api'
 const TAB_KEY = 'dsn-finance:tab'
+const NAME_CACHE_KEY = 'dsn-finance:nameByCode'
 
 // ---- 可用接口 catalog (cap matches server capability keys for health dots) ----
 interface InterfaceItem { cap: string; label: string; tool: string; source: string }
@@ -98,6 +99,36 @@ function pctStr(n: number | undefined): string {
 }
 const colorOf = (n: number | undefined) => (typeof n === 'number' ? (n >= 0 ? UP : DOWN) : V('--dsw-alias-label-tertiary', '#999'))
 const keyOf = (code: string, type: AssetType) => `${type}:${code}`
+
+function loadNameCache(): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(NAME_CACHE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object') return {}
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (k && typeof v === 'string' && v.trim()) out[k] = v.trim()
+    }
+    return out
+  } catch { return {} }
+}
+
+function rememberNames(entries: Array<{ code?: string; name?: string }>): Record<string, string> {
+  const map = loadNameCache()
+  let changed = false
+  for (const e of entries) {
+    const code = e.code?.trim()
+    const name = e.name?.trim()
+    if (!code || !name || map[code] === name) continue
+    map[code] = name
+    changed = true
+  }
+  if (changed) {
+    try { window.localStorage.setItem(NAME_CACHE_KEY, JSON.stringify(map)) } catch { /* */ }
+  }
+  return map
+}
 
 function isComposingKey(e: { nativeEvent?: { isComposing?: boolean; keyCode?: number }; isComposing?: boolean; keyCode?: number }): boolean {
   const n = e.nativeEvent ?? e
@@ -482,7 +513,7 @@ function MarketView(props: { active: boolean }) {
 // ---- 快讯 tab（市场电报 + 按持仓/自选的个股新闻）----
 interface Flash { title: string; summary?: string; time?: string; url?: string }
 interface SNews { title: string; date?: string; source?: string; url?: string; summary?: string }
-function NewsView(props: { active: boolean; data: LiveData }) {
+function NewsView(props: { active: boolean; data: LiveData; quoteBy: Map<string, LiveQuote> }) {
   const [flash, setFlash] = useState<Flash[]>([])
   const [loading, setLoading] = useState(false)
   const [code, setCode] = useState('')
@@ -493,7 +524,17 @@ function NewsView(props: { active: boolean; data: LiveData }) {
     try { const r = await apiGet<{ news: Flash[] }>('/news'); setFlash(r.news ?? []) } catch { /* */ } finally { setLoading(false) }
   }, [])
   useEffect(() => { if (props.active && !flash.length) void load() }, [props.active]) // eslint-disable-line react-hooks/exhaustive-deps
-  const codes = [...new Set([...props.data.watchlist.map((w) => w.code), ...props.data.holdings.map((hh) => hh.code)])]
+  const nameByCode = rememberNames([...props.data.watchlist, ...props.data.holdings, ...props.data.quotes])
+  const newsTargets: Array<{ code: string; name: string }> = []
+  const seen = new Set<string>()
+  const pushTarget = (c: string, type: AssetType, fallback?: string) => {
+    if (!c || seen.has(c)) return
+    seen.add(c)
+    const name = props.quoteBy.get(keyOf(c, type))?.name || fallback || nameByCode[c] || c
+    newsTargets.push({ code: c, name })
+  }
+  for (const w of props.data.watchlist) pushTarget(w.code, w.type, w.name)
+  for (const hd of props.data.holdings) pushTarget(hd.code, hd.type, hd.name)
   const open = (u?: string) => { if (u) window.open(u, '_blank', 'noopener') }
   async function loadCode(c: string) {
     setCode(c); setSloading(true)
@@ -502,8 +543,13 @@ function NewsView(props: { active: boolean; data: LiveData }) {
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
     h('div', { style: S.section },
       h('div', { style: S.title }, '个股新闻 · 按持仓/自选'),
-      codes.length === 0 ? h('div', { style: S.muted }, '暂无自选/持仓') : h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
-        codes.map((c) => h('button', { key: c, onClick: () => void loadCode(c), style: { ...S.btn, padding: '2px 8px', background: code === c ? BRAND : S.btn.background, color: code === c ? '#fff' : S.btn.color } }, c))),
+      newsTargets.length === 0 ? h('div', { style: S.muted }, '暂无自选/持仓') : h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
+        newsTargets.map((t) => h('button', {
+          key: t.code,
+          title: t.code,
+          onClick: () => void loadCode(t.code),
+          style: { ...S.btn, padding: '2px 8px', background: code === t.code ? BRAND : S.btn.background, color: code === t.code ? '#fff' : S.btn.color },
+        }, t.name))),
       sloading ? h('div', { style: S.muted }, '加载中…') : snews.map((n, i) => h('div', { key: i, style: { ...S.row, cursor: n.url ? 'pointer' : 'default' }, onClick: () => open(n.url) },
         h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { style: { fontWeight: 500 } }, n.title), h('div', { style: S.muted }, `${n.date ?? ''} · ${n.source ?? ''}`))))),
     h('div', { style: S.section },
@@ -587,6 +633,7 @@ function PanelBody(props: { onClose: () => void; docked: boolean; onToggleDock: 
   const selectTab = (id: string) => { setTab(id); try { window.localStorage.setItem(TAB_KEY, id) } catch { /* */ } }
   const quoteBy = new Map<string, LiveQuote>()
   for (const q of data.quotes) quoteBy.set(keyOf(q.code, q.type ?? 'stock'), q)
+  rememberNames([...data.watchlist, ...data.holdings, ...data.quotes])
   return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
     h('div', { style: S.header },
       h(IconChart, { size: 16 }),
@@ -601,7 +648,7 @@ function PanelBody(props: { onClose: () => void; docked: boolean; onToggleDock: 
       tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate }) : null,
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
-      tab === 'news' ? h(NewsView, { active: tab === 'news', data }) : null,
+      tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))
 }
 
