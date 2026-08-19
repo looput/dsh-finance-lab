@@ -42,6 +42,8 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0",
     "@deepseek-ai/dsh-host-webserver": ">=0.1.0-rc.7",
+    "@deepseek-ai/dsh-skill": ">=0.1.0-rc.7",
+    "@deepseek-ai/dsh-skill-filesystem": ">=0.1.0-rc.7",
     "@deepseek-ai/dsh-settings": ">=0.1.0-rc.7",
     "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.7",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7",
@@ -61,6 +63,8 @@
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/dsh": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-settings": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-skill": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-skill-filesystem": "0.1.0-rc.7",
     "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.7",
     "@deepseek-ai/dsh-tools": "0.1.0-rc.7",
     "@deepseek-ai/schemastery": "3.18.1",
@@ -68,6 +72,8 @@
     "@types/react": "^19.0.10",
     "esbuild": "^0.28.2",
     "react": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   },
@@ -95,8 +101,6 @@
     "@deepseek-ai/dsh-subagent-in-process-driver": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-timeout": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-workflow": "^0.1.0-rc.7",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "@deepseek-ai/dsh-workflow": "^0.1.0-rc.7"
   }
 }

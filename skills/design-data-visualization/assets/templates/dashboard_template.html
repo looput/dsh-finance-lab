@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>仪表板模板</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f5f5f5;
+            padding: 20px;
+        }
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .chart-container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .chart-container h2 {
+            margin-bottom: 15px;
+            color: #333;
+            font-size: 18px;
+        }
+        @media (max-width: 768px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <div class="chart-container">
+            <h2>图表1</h2>
+            <canvas id="chart1"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>图表2</h2>
+            <canvas id="chart2"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>图表3</h2>
+            <canvas id="chart3"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>图表4</h2>
+            <canvas id="chart4"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // Default chart color palette
+        const chartColors = [
+            '#69B1F4',  // chart01 - Light Blue
+            '#F88D72',  // chart02 - Coral
+            '#FBCA74',  // chart03 - Yellow
+            '#7DD4C4',  // chart04 - Turquoise
+            '#68E0F3',  // chart05 - Cyan
+            '#ADAFE8',  // chart06 - Lavender
+            '#3A7BB8',  // chart07 - Blue
+            '#FAB6A5',  // chart08 - Peach
+            '#EDC273',  // chart09 - Gold
+            '#9CCBF8',  // chart10 - Sky Blue
+            '#C8CAEF',  // chart11 - Light Purple
+            '#6B9CCA'   // chart12 - Steel Blue
+        ];
+
+        // Chart 1 - Bar Chart
+        new Chart(document.getElementById('chart1'), {
+            type: 'bar',
+            data: {
+                labels: ['A', 'B', 'C', 'D', 'E'],
+                datasets: [{
+                    label: '数值',
+                    data: [12, 19, 3, 5, 2],
+                    backgroundColor: chartColors.map(c => c + 'CC'),  // Add transparency
+                    borderColor: chartColors,
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true
+            }
+        });
+
+        // Chart 2 - Line Chart
+        new Chart(document.getElementById('chart2'), {
+            type: 'line',
+            data: {
+                labels: ['1月', '2月', '3月', '4月', '5月'],
+                datasets: [{
+                    label: '趋势',
+                    data: [10, 15, 12, 18, 20],
+                    borderColor: chartColors[0],
+                    backgroundColor: chartColors[0] + '33',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true
+            }
+        });
+
+        // Chart 3 - Pie Chart
+        new Chart(document.getElementById('chart3'), {
+            type: 'pie',
+            data: {
+                labels: ['类别1', '类别2', '类别3'],
+                datasets: [{
+                    data: [300, 50, 100],
+                    backgroundColor: [
+                        chartColors[0] + 'CC',
+                        chartColors[1] + 'CC',
+                        chartColors[2] + 'CC'
+                    ],
+                    borderColor: [
+                        chartColors[0],
+                        chartColors[1],
+                        chartColors[2]
+                    ],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true
+            }
+        });
+
+        // Chart 4 - Doughnut Chart
+        new Chart(document.getElementById('chart4'), {
+            type: 'doughnut',
+            data: {
+                labels: ['类别1', '类别2', '类别3'],
+                datasets: [{
+                    data: [40, 30, 30],
+                    backgroundColor: [
+                        chartColors[3] + 'CC',
+                        chartColors[4] + 'CC',
+                        chartColors[5] + 'CC'
+                    ],
+                    borderColor: [
+                        chartColors[3],
+                        chartColors[4],
+                        chartColors[5]
+                    ],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true
+            }
+        });
+    </script>
+</body>
+</html>

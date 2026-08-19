@@ -293,7 +293,7 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
 
   ctx.tools.register(defineTool({
     name: 'web_search',
-    description: '免费网页搜索（DuckDuckGo，无需 API Key）。用于查行情消息、财报、公司资讯。',
+    description: '免费网页搜索（Python ddgs → Bing/Google/Yandex，无需 API Key）。用于查行情消息、财报、公司资讯。',
     parameters: {
       query: { type: 'string', required: true, description: '搜索关键词' },
     },

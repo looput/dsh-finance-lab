@@ -14,4 +14,4 @@
 
 - id: web
   config:
-    searchProvider: dsn-duckduckgo
+    searchProvider: dsn-web-search

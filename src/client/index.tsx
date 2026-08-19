@@ -38,7 +38,7 @@ const DATA_INTERFACES: Array<{ group: string; items: InterfaceItem[] }> = [
   { group: '宏观 / 通用', items: [
     { cap: 'macro', label: '宏观经济', tool: 'get_macro_china', source: '东财 datacenter' },
     { cap: 'symbol_search', label: '代码解析', tool: 'search_symbol', source: '东财 suggest' },
-    { cap: 'web_search', label: '网页搜索', tool: 'web_search', source: 'DuckDuckGo' },
+    { cap: 'web_search', label: '网页搜索', tool: 'web_search', source: 'Bing/Google (Python)' },
   ] },
 ]
 
@@ -739,7 +739,7 @@ function SkillsView() {
   return h('div', { style: S.section },
     h('div', { style: S.title }, '技能', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, disabled: busy, onClick: () => void save() }, busy ? '…' : '保存')),
     hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
-    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, '本插件技能（进入系统提示）'),
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, '本插件技能（进入 skill 目录，按需加载正文）'),
     cat.local.map((s) => row(localSel, setLocalSel, s)),
     h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, cat.yingmiAvailable ? '盈米金融场景 skill（标准 SKILL.md · scope 可见范围）' : '盈米 skill（需全局安装并接入 yingmi-skill-cli）'),
     cat.yingmi.length ? cat.yingmi.map((s) => row(ymSel, setYmSel, s)) : h('div', { style: S.muted }, '—'),

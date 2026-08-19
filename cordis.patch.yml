@@ -8,8 +8,7 @@
         probeReportPath: data/probe-report.json
         portfolioPath: data/portfolio.json
 
-# Route the web search seam through this plugin's DuckDuckGo provider; the
-# default `deepseek-official` provider needs an API key and is otherwise unusable.
+# Route the web search seam through this plugin's meta-search provider.
 - id: web
   config:
-    searchProvider: dsn-duckduckgo
+    searchProvider: dsn-web-search

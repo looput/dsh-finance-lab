@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>柱状图模板</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .chart-container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="chart-container">
+        <h1>柱状图</h1>
+        <canvas id="myChart"></canvas>
+    </div>
+
+    <script>
+        // Default chart color palette
+        const chartColors = [
+            '#69B1F4',  // chart01 - Light Blue
+            '#F88D72',  // chart02 - Coral
+            '#FBCA74',  // chart03 - Yellow
+            '#7DD4C4',  // chart04 - Turquoise
+            '#68E0F3',  // chart05 - Cyan
+            '#ADAFE8',  // chart06 - Lavender
+            '#3A7BB8',  // chart07 - Blue
+            '#FAB6A5',  // chart08 - Peach
+            '#EDC273',  // chart09 - Gold
+            '#9CCBF8',  // chart10 - Sky Blue
+            '#C8CAEF',  // chart11 - Light Purple
+            '#6B9CCA'   // chart12 - Steel Blue
+        ];
+
+        const ctx = document.getElementById('myChart');
+        const chart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['类别1', '类别2', '类别3', '类别4', '类别5'],
+                datasets: [{
+                    label: '数值',
+                    data: [12, 19, 3, 5, 2],
+                    backgroundColor: chartColors.map(c => c + 'CC'),  // Add transparency
+                    borderColor: chartColors,
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: '图表标题'
+                    },
+                    legend: {
+                        display: true,
+                        position: 'top'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>

@@ -11,22 +11,21 @@ export interface WebSearchProviderLike {
   }>
 }
 
-export const DDG_PROVIDER_ID = 'dsn-duckduckgo'
+export const WEB_SEARCH_PROVIDER_ID = 'dsn-web-search'
 
 /**
- * A DuckDuckGo-backed provider for the ctx.web search seam, so the built-in `web_search`
- * tool works without an API key (replacing the default DeepSeek provider, which needs one).
- * Reuses the plugin's ddg providers (html → instant fallback, shared rate limit + cache).
+ * Free web search for the ctx.web seam (replaces key-gated DeepSeek provider).
+ * Backed by Python ddgs + primp → Bing/Google/Yandex meta engines.
  */
-export function createDdgSearchProvider(
+export function createWebSearchProvider(
   search: (query: string, signal?: AbortSignal) => Promise<{ ok: boolean; data?: SearchResult[]; error?: string }>,
 ): WebSearchProviderLike {
   return {
-    id: DDG_PROVIDER_ID,
+    id: WEB_SEARCH_PROVIDER_ID,
     available: () => true,
     async search(request, signal) {
       const res = await search(request.query, signal)
-      if (!res.ok || !Array.isArray(res.data)) throw new Error(res.error ?? 'duckduckgo search unavailable')
+      if (!res.ok || !Array.isArray(res.data)) throw new Error(res.error ?? 'web search unavailable')
       const sources = res.data
         .filter((r): r is SearchResult & { url: string } => typeof r.url === 'string' && r.url.length > 0)
         .map((r) => ({ url: r.url, title: r.title || undefined, snippet: r.snippet || undefined }))

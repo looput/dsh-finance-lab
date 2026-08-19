@@ -71,7 +71,7 @@ export const DEFAULT_PROVIDER_ORDER: Record<Capability, string[]> = {
   stock_news: ['em_stock_news'],
   symbol_search: ['em_suggest'],
   stock_info: ['em_stock_info'],
-  web_search: ['ddg_html', 'ddg_instant'],
+  web_search: ['py_web_search'],
 }
 
 /** Asset kind for a portfolio/watchlist entry. Funds share a 6-digit code shape with A-shares, so the kind is explicit. */

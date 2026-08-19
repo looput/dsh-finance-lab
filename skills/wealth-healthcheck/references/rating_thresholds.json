@@ -1,0 +1,9 @@
+{
+  "savings_rate": {"excellent": {"min": 0.30}, "good": {"min": 0.20, "max": 0.30}, "attention": {"min": 0.10, "max": 0.20}, "risk": {"max": 0.10}},
+  "financial_freedom": {"excellent": {"min": 1.0}, "good": {"min": 0.5, "max": 1.0}, "attention": {"min": 0.2, "max": 0.5}, "risk": {"max": 0.2}},
+  "debt_asset_ratio": {"excellent": {"max": 0.2}, "good": {"min": 0.2, "max": 0.4}, "attention": {"min": 0.4, "max": 0.6}, "risk": {"min": 0.6}},
+  "investment_ratio": {"excellent": {"min": 0.5}, "good": {"min": 0.3, "max": 0.5}, "attention": {"min": 0.1, "max": 0.3}, "risk": {"max": 0.1}},
+  "investment_leverage": {"excellent": {"max": 0.3}, "good": {"min": 0.3, "max": 0.5}, "attention": {"min": 0.5, "max": 0.7}, "risk": {"min": 0.7}},
+  "current_ratio": {"excellent": {"min": 6}, "good": {"min": 3, "max": 6}, "attention": {"min": 1, "max": 3}, "risk": {"max": 1}},
+  "emergency_months": {"excellent": {"min": 6}, "good": {"min": 3, "max": 6}, "attention": {"min": 1, "max": 3}, "risk": {"max": 1}}
+}

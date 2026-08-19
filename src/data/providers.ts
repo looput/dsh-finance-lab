@@ -3,6 +3,10 @@
  * Endpoint shapes are taken from AkShare sources (comments cite function + file);
  * runtime does NOT import or spawn akshare.
  */
+import { execFile } from 'node:child_process'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import {
   DEFAULT_UA,
   httpGetJson,
@@ -14,6 +18,9 @@ import {
   type HttpGetOptions,
 } from './http.js'
 import type { Capability, KlineBar, ProviderContext, ProviderFn, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
+
+const execFileAsync = promisify(execFile)
+const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 export interface ProviderMeta {
   id: string
@@ -539,60 +546,29 @@ async function yahooKline(args: Record<string, unknown>, ctx: ProviderContext) {
   return { rows: bars, sampleKeys: Object.keys(bars[0]!) }
 }
 
-function ddgQuery(args: Record<string, unknown>): string {
+function searchQuery(args: Record<string, unknown>): string {
   const query = String(args.query ?? args.q ?? '').trim()
   if (!query) throw new Error('empty search query')
   return query
 }
 
-function decodeDdgHref(href: string): string {
-  const m = href.match(/[?&]uddg=([^&]+)/)
-  const raw = m ? decodeURIComponent(m[1]!) : href
-  return raw.startsWith('//') ? `https:${raw}` : raw
-}
-
-function stripTags(html: string): string {
-  return html.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim()
-}
-
-/** Source: DuckDuckGo HTML results (free, no key). Best real web results. */
-async function ddgHtml(args: Record<string, unknown>, ctx: ProviderContext) {
-  const query = ddgQuery(args)
-  const html = await httpGetText(
-    'https://html.duckduckgo.com/html/',
-    { q: query, kl: String(args.region ?? 'wt-wt') },
-    opts(ctx, 'https://duckduckgo.com/'),
-  )
-  const titles = [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
-  const snippets = [...html.matchAll(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => stripTags(m[1]!))
-  const results: SearchResult[] = titles.map((m, i) => ({
-    title: stripTags(m[2]!),
-    url: decodeDdgHref(m[1]!),
-    snippet: snippets[i],
-  })).filter((r) => r.title && !/duckduckgo\.com\/y\.js|ad_domain=/.test(r.url ?? '')).slice(0, 10)
-  if (!results.length) throw new Error('ddg html: no results (rate-limited or challenged)')
-  return { rows: results, data: results, sampleKeys: Object.keys(results[0]!) }
-}
-
-/** Source: DuckDuckGo Instant Answer JSON API (free, no key). Entity fallback. */
-async function ddgInstant(args: Record<string, unknown>, ctx: ProviderContext) {
-  const query = ddgQuery(args)
-  const json = await httpGetJson<{
-    Heading?: string
-    AbstractText?: string
-    AbstractURL?: string
-    RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>
-  }>('https://api.duckduckgo.com/', { q: query, format: 'json', no_html: '1', no_redirect: '1', t: 'dsn-finance' }, opts(ctx))
-
-  const results: SearchResult[] = []
-  if (json.AbstractText) {
-    results.push({ title: json.Heading || query, url: json.AbstractURL, snippet: json.AbstractText })
-  }
-  const flat = (json.RelatedTopics ?? []).flatMap((t) => (t.Topics ? t.Topics : [t]))
-  for (const t of flat) {
-    if (t.Text && t.FirstURL) results.push({ title: t.Text.split(' - ')[0]!, url: t.FirstURL, snippet: t.Text })
-  }
-  if (!results.length) throw new Error('ddg instant answer: empty')
+/**
+ * Python ddgs + primp → Brave/Bing/Google (no DuckDuckGo).
+ * primp impersonates browser TLS/headers; Node fetch to the same hosts is blocked or timed out.
+ */
+async function pyWebSearch(args: Record<string, unknown>, ctx: ProviderContext) {
+  const query = searchQuery(args)
+  const script = path.join(PKG_ROOT, 'scripts', 'web_search.py')
+  const { stdout } = await execFileAsync('python3', [script, query], {
+    timeout: ctx.timeoutMs,
+    signal: ctx.signal,
+    maxBuffer: 2 * 1024 * 1024,
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  })
+  const parsed = JSON.parse(stdout.trim()) as { results?: SearchResult[]; error?: string }
+  if (parsed.error) throw new Error(parsed.error)
+  const results = (parsed.results ?? []).filter((r) => r.title)
+  if (!results.length) throw new Error('py web search: empty')
   return { rows: results, data: results, sampleKeys: Object.keys(results[0]!) }
 }
 
@@ -769,11 +745,8 @@ async function emNewsFlash(args: Record<string, unknown>, ctx: ProviderContext) 
   return { rows, data: rows, sampleKeys: Object.keys(list[0]!) }
 }
 
-// Source: eastmoney 搜索 (个股相关资讯). 按持仓/自选代码拉，与仓位相关。
-async function emStockNews(args: Record<string, unknown>, ctx: ProviderContext) {
-  const keyword = String(args.code ?? args.keyword ?? '').trim()
-  if (!keyword) throw new Error('empty code for stock news')
-  const size = Math.min(Math.max(Number(args.size ?? 10), 1), 20)
+// Source: eastmoney 搜索 (search-api-web jsonp). 供 stock_news 复用。
+async function emArticleSearch(keyword: string, size: number, ctx: ProviderContext): Promise<SearchResult[]> {
   const param = JSON.stringify({
     uid: '', keyword, type: ['cmsArticleWebOld'], client: 'web', clientType: 'web', clientVersion: 'curr',
     param: { cmsArticleWebOld: { searchScope: 'default', sort: 'default', pageIndex: 1, pageSize: size, preTag: '', postTag: '' } },
@@ -782,15 +755,27 @@ async function emStockNews(args: Record<string, unknown>, ctx: ProviderContext) 
   const m = text.match(/^[^(]*\(([\s\S]*)\);?\s*$/)
   const json = JSON.parse(m ? m[1]! : text) as { result?: { cmsArticleWebOld?: Array<Record<string, unknown>> } }
   const list = json.result?.cmsArticleWebOld ?? []
-  const rows = list.map((it) => ({
+  return list.map((it) => ({
     title: stripHtml(String(it.title ?? '')),
-    date: String(it.date ?? ''),
-    source: String(it.mediaName ?? ''),
     url: it.url ? String(it.url) : undefined,
-    summary: stripHtml(String(it.content ?? '')).slice(0, 120),
+    snippet: stripHtml(String(it.content ?? '')).slice(0, 200),
+  })).filter((r) => r.title)
+}
+
+async function emStockNews(args: Record<string, unknown>, ctx: ProviderContext) {
+  const keyword = String(args.code ?? args.keyword ?? '').trim()
+  if (!keyword) throw new Error('empty code for stock news')
+  const size = Math.min(Math.max(Number(args.size ?? 10), 1), 20)
+  const results = await emArticleSearch(keyword, size, ctx)
+  const rows = results.map((r) => ({
+    title: r.title,
+    date: '',
+    source: '',
+    url: r.url,
+    summary: r.snippet,
   }))
   if (!rows.length) throw new Error('stock news: empty')
-  return { rows, data: rows, sampleKeys: list[0] ? Object.keys(list[0]) : [] }
+  return { rows, data: rows, sampleKeys: Object.keys(rows[0]!) }
 }
 
 export const PROVIDERS: ProviderMeta[] = [
@@ -970,18 +955,11 @@ export const PROVIDERS: ProviderMeta[] = [
     call: emStockInfo,
   },
   {
-    id: 'ddg_html',
+    id: 'py_web_search',
     capability: 'web_search',
-    endpointRef: 'DuckDuckGo HTML results (html.duckduckgo.com)',
+    endpointRef: 'Python ddgs + primp → Bing/Google/Yandex (pip install ddgs)',
     sampleArgs: { query: 'nvidia stock' },
-    call: ddgHtml,
-  },
-  {
-    id: 'ddg_instant',
-    capability: 'web_search',
-    endpointRef: 'DuckDuckGo Instant Answer API (api.duckduckgo.com)',
-    sampleArgs: { query: 'nvidia' },
-    call: ddgInstant,
+    call: pyWebSearch,
   },
 ]
 

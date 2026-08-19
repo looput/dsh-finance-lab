@@ -17,10 +17,10 @@ import { registerRoutes } from './server-routes.js'
 import { registerMcpSources } from './mcp/manager.js'
 import { HistoryStore } from './history/store.js'
 import { registerHistoryTools } from './history/tools.js'
-import { createDdgSearchProvider } from './web-ddg.js'
+import { createWebSearchProvider } from './web-search.js'
 
 export const name = pluginName
-export const inject = ['tools', 'systemPrompt', 'web', 'webServer', 'agents']
+export const inject = ['tools', 'systemPrompt', 'web', 'webServer', 'agents', 'skills']
 
 export { Config }
 export const FINANCE_NS = settingsNamespace('dsn-finance')
@@ -69,8 +69,8 @@ export function apply(ctx: Context, config: Config) {
   const mcp = registerMcpSources(ctx, current().mcpSources ?? [], packageRoot)
   registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, ctx)
 
-  // Replace the default (key-gated) web search with DuckDuckGo so `web_search` works key-free.
-  ctx.web.registerSearchProvider(createDdgSearchProvider((q, signal) => finance.webSearch(q, signal)))
+  // Replace the default (key-gated) web search with free meta search (Python ddgs → Brave/Bing/Google).
+  ctx.web.registerSearchProvider(createWebSearchProvider((q, signal) => finance.webSearch(q, signal)))
 
   ctx.systemPrompt.section({
     name: 'dsn-finance:portfolio',
@@ -79,6 +79,9 @@ export function apply(ctx: Context, config: Config) {
       '## Finance portfolio file',
       `- Holdings/watchlist live in a local JSON file: ${store.path}`,
       '- After reading a user-uploaded holdings screenshot, call import_holdings (bulk) or upsert_holding to write it; the "金融面板" sidebar refreshes live.',
+      '- Market data uses direct HTTP endpoints (Eastmoney / Tencent), not akshare. If a market tool fails, call probe_finance_sources first.',
+      '- Holdings CRUD works without quotes; P&L enrichment needs a healthy quote provider.',
+      '- 历史K线/财报/分红可用 sync_history 落地到本地库，再用 get_history 读取（含事件标记）。',
       '- Use type:"fund" for funds (基金, 6-digit code) and type:"stock" for stocks (A股/港股/美股).',
       '- When the panel sends an active position-analysis request, gather the requested data with finance tools and finish by calling save_position_analysis with the complete Markdown report.',
     ].join('\n'),
