@@ -90,6 +90,15 @@ export function normalizeCode(code: string): string {
   return String(code).trim().replace(/\.(SH|SZ|BJ)$/i, '').padStart(6, '0').slice(-6)
 }
 
+/** Drop Yahoo-style suffixes so `00700.HK` / `AAPL.US` / `600519.SH` route by bare code. */
+export function stripMarketSuffix(code: string): string {
+  const raw = String(code).trim()
+  const u = raw.toUpperCase()
+  if (/\.HK$/.test(u)) return raw.slice(0, -3).replace(/\D/g, '').padStart(5, '0').slice(-5)
+  if (/^HK[:.]/.test(u)) return raw.slice(3).replace(/\D/g, '').padStart(5, '0').slice(-5)
+  return raw.replace(/\.(US|NYSE|NASDAQ|AMEX|SH|SZ|BJ|SS)$/i, '')
+}
+
 export function toSecuCode(code: string): string {
   const c = normalizeCode(code)
   if (c.startsWith('6') || c.startsWith('9')) return `${c}.SH`
