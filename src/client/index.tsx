@@ -560,6 +560,82 @@ function NewsView(props: { active: boolean; data: LiveData; quoteBy: Map<string,
       h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财全球财经快讯（对照 AkShare stock_info_global_em）')))
 }
 
+// ---- K线 tab (local history + event markers) ----
+interface HistBar { date: string; open: number; high: number; low: number; close: number; volume: number }
+interface HistEvent { date: string; type: string; label: string; value?: number }
+const EVENT_COLOR = (t: string) => (t === '财报' ? BRAND : t === '分红' ? DOWN : '#e6a23c')
+
+function KlineChart(props: { kline: HistBar[]; events: HistEvent[] }) {
+  const { kline, events } = props
+  const W = 372, H = 168, padTop = 16, padBot = 18
+  if (kline.length < 2) return h('div', { style: S.muted }, '暂无K线，先点「同步」')
+  const closes = kline.map((b) => b.close)
+  const min = Math.min(...closes), max = Math.max(...closes)
+  const span = max - min || 1
+  const x = (i: number) => (i / (kline.length - 1)) * (W - 8) + 4
+  const y = (v: number) => padTop + (1 - (v - min) / span) * (H - padTop - padBot)
+  const points = closes.map((c, i) => `${x(i).toFixed(1)},${y(c).toFixed(1)}`).join(' ')
+  const idxByDate = (d: string) => {
+    let idx = kline.findIndex((b) => b.date >= d)
+    if (idx < 0) idx = kline.length - 1
+    return idx
+  }
+  const marks = events.filter((e) => e.date >= kline[0]!.date).map((e) => ({ e, xi: x(idxByDate(e.date)) }))
+  return h('svg', { width: '100%', viewBox: `0 0 ${W} ${H}`, style: { display: 'block' } },
+    h('polyline', { points, fill: 'none', stroke: BRAND, strokeWidth: 1.5 }),
+    ...marks.map((m, i) => h('g', { key: i },
+      h('line', { x1: m.xi, y1: padTop, x2: m.xi, y2: H - padBot, stroke: EVENT_COLOR(m.e.type), strokeWidth: 1, strokeDasharray: '3 3', opacity: 0.7 }),
+      h('circle', { cx: m.xi, cy: padTop, r: 3, fill: EVENT_COLOR(m.e.type) }))),
+    h('text', { x: 4, y: 11, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${max.toFixed(2)}`),
+    h('text', { x: 4, y: H - 4, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${min.toFixed(2)} · ${kline[0]!.date}→${kline[kline.length - 1]!.date}`))
+}
+
+function KlineView(props: { data: LiveData }) {
+  const [code, setCode] = useState('')
+  const [kind, setKind] = useState('a')
+  const [hist, setHist] = useState<{ kline: HistBar[]; events: HistEvent[]; updatedAt?: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState('')
+  const picks = [...props.data.holdings, ...props.data.watchlist].slice(0, 8)
+  const load = async (c: string) => {
+    if (!c) return
+    try {
+      const r = await apiGet<{ ok: boolean; kline?: HistBar[]; events?: HistEvent[]; updatedAt?: string }>(`/history?code=${encodeURIComponent(c)}`)
+      setHist(r.ok ? { kline: r.kline ?? [], events: r.events ?? [], updatedAt: r.updatedAt } : { kline: [], events: [] })
+    } catch { setHist({ kline: [], events: [] }) }
+  }
+  const sync = async () => {
+    const c = code.trim(); if (!c) { setHint('请输入代码'); return }
+    setBusy(true); setHint('')
+    try {
+      const r = await apiPost<{ ok: boolean; bars: number; addedBars: number; addedEvents: number; provider?: string; klineError?: string }>('/history/sync', { code: c, kind })
+      setHint(r.ok ? `同步完成：${r.bars} 根K线（新增 ${r.addedBars}），事件 +${r.addedEvents}｜${r.provider ?? ''}` : `同步失败：${r.klineError ?? ''}`)
+      await load(c)
+    } catch { setHint('同步失败') } finally { setBusy(false) }
+  }
+  useEffect(() => { if (code) void load(code) }, [])
+  return h('div', { style: S.section },
+    h('div', { style: S.title }, 'K线与事件'),
+    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+      h('input', { style: { ...S.input, flex: 1, minWidth: 90 }, placeholder: '代码 600519', value: code, onChange: (e: { target: { value: string } }) => setCode(e.target.value) }),
+      h('select', { style: { ...S.input, width: 70 }, value: kind, onChange: (e: { target: { value: string } }) => setKind(e.target.value) },
+        h('option', { value: 'a' }, 'A股'), h('option', { value: 'hk' }, '港股'), h('option', { value: 'us' }, '美股'), h('option', { value: 'fund' }, '基金')),
+      h('button', { style: S.btn, disabled: busy, onClick: () => void sync() }, busy ? '同步中…' : '同步'),
+      h('button', { style: S.btn, onClick: () => void load(code.trim()) }, '查看')),
+    picks.length ? h('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } }, picks.map((p) => h('button', {
+      key: keyOf(p.code, p.type ?? 'stock'), style: { ...S.btn, padding: '2px 6px', fontSize: 11 },
+      onClick: () => { setCode(p.code); setKind(p.type === 'fund' ? 'fund' : 'a'); void load(p.code) },
+    }, p.name || p.code))) : null,
+    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
+    hist ? h(KlineChart, { kline: hist.kline, events: hist.events }) : h('div', { style: S.muted }, '输入代码后「同步」拉取并本地保存历史'),
+    hist && hist.events.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 } },
+      h('div', { style: { ...S.muted, fontWeight: 600 } }, `事件标记 (${hist.events.length})`),
+      hist.events.slice(-12).reverse().map((e, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center' } },
+        h('span', { style: { width: 8, height: 8, borderRadius: 999, background: EVENT_COLOR(e.type), flex: '0 0 auto' } }),
+        h('span', { style: { ...S.muted, width: 82, flex: '0 0 auto' } }, e.date),
+        h('span', { style: { flex: 1 } }, e.label)))) : null)
+}
+
 // ---- 数据源 tab (per-capability provider selection) ----
 const CAP_LABEL: Record<string, string> = {
   stock_list: 'A股列表', quote: 'A股行情', kline: 'A股K线', indices: '指数概览', financials: '财务指标', sectors: '行业板块',
@@ -681,7 +757,7 @@ function HealthView(props: { health: LiveData['health'] }) {
 
 const TABS: Array<{ id: string; label: string }> = [
   { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
-  { id: 'funds', label: '基金' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
+  { id: 'funds', label: '基金' }, { id: 'kline', label: 'K线' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
   { id: 'sources', label: '数据源' }, { id: 'health', label: '接口' },
 ]
 
@@ -752,6 +828,7 @@ function PanelBody(props: { onClose: () => void; docked: boolean; onToggleDock: 
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
+      tab === 'kline' ? h(KlineView, { data }) : null,
       tab === 'sources' ? h(SourcesView, null) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))
 }

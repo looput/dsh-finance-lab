@@ -14,6 +14,8 @@ import { registerTools } from './tools/register.js'
 import { registerSkills } from './skills.js'
 import { registerRoutes } from './server-routes.js'
 import { registerMcpSources } from './mcp/manager.js'
+import { HistoryStore } from './history/store.js'
+import { registerHistoryTools } from './history/tools.js'
 import { createDdgSearchProvider } from './web-ddg.js'
 
 export const name = pluginName
@@ -54,11 +56,14 @@ export function apply(ctx: Context, config: Config) {
     async (holdings) => { await store.setHoldings(holdings) },
   )
 
+  const history = new HistoryStore(path.join(packageRoot, 'data/history'))
+
   ctx.provide('financeData', finance)
   registerTools(ctx, finance, store)
+  registerHistoryTools(ctx, finance, history)
   registerSkills(ctx, packageRoot)
   const mcp = registerMcpSources(ctx, current().mcpSources ?? [], packageRoot)
-  registerRoutes(ctx.webServer, finance, store, mcp)
+  registerRoutes(ctx.webServer, finance, store, mcp, history)
 
   // Replace the default (key-gated) web search with DuckDuckGo so `web_search` works key-free.
   ctx.web.registerSearchProvider(createDdgSearchProvider((q, signal) => finance.webSearch(q, signal)))

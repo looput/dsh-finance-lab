@@ -2,8 +2,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
 import type { McpManager } from './mcp/manager.js'
+import type { HistoryStore } from './history/store.js'
+import { syncHistory, type SymbolKind } from './history/sync.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
 import type { AssetType } from './types.js'
+
+const HISTORY_KINDS: SymbolKind[] = ['a', 'hk', 'us', 'fund']
 
 export const API_PREFIX = '/plugins/dsn-finance/api'
 
@@ -57,7 +61,7 @@ function snapshotItems(store: PortfolioStore): SnapshotItem[] {
  * Register the finance panel's HTTP API on ctx.webServer. Live quotes are computed on demand
  * and returned to the client (held in React state) — never written to plugin config.
  */
-export function registerRoutes(webServer: WebServerLike, finance: FinanceDataService, store: PortfolioStore, mcp?: McpManager): () => void {
+export function registerRoutes(webServer: WebServerLike, finance: FinanceDataService, store: PortfolioStore, mcp?: McpManager, history?: HistoryStore): () => void {
   return webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -74,6 +78,31 @@ export function registerRoutes(webServer: WebServerLike, finance: FinanceDataSer
         }
         if (req.method === 'GET' && sub === '/providers') {
           return sendJson(res, 200, { catalog: finance.getProviderCatalog() })
+        }
+        if (history && req.method === 'GET' && sub === '/history/list') {
+          return sendJson(res, 200, { symbols: await history.list() })
+        }
+        if (history && req.method === 'GET' && sub === '/history') {
+          const code = url.searchParams.get('code') ?? ''
+          const h = await history.read(code)
+          if (!h) return sendJson(res, 200, { ok: false, code, error: 'no local history' })
+          return sendJson(res, 200, { ok: true, ...h })
+        }
+        if (history && req.method === 'POST' && sub === '/history/sync') {
+          const body = await readBody(req)
+          const code = String(body.code ?? '').trim()
+          if (!code) return sendJson(res, 400, { ok: false, error: 'missing code' })
+          const kind = (HISTORY_KINDS.includes(body.kind as SymbolKind) ? body.kind : 'a') as SymbolKind
+          const result = await syncHistory(finance, history, code, kind)
+          return sendJson(res, 200, result)
+        }
+        if (history && req.method === 'POST' && sub === '/history/event') {
+          const body = await readBody(req)
+          const code = String(body.code ?? '').trim()
+          const date = String(body.date ?? '').trim()
+          if (!code || !date) return sendJson(res, 400, { ok: false, error: 'missing code/date' })
+          const added = await history.mergeEvents(code, 'a', [{ date, type: String(body.type ?? '自定义'), label: String(body.label ?? ''), value: typeof body.value === 'number' ? body.value : undefined }])
+          return sendJson(res, 200, { ok: true, added })
         }
         if (req.method === 'POST' && sub === '/providers') {
           const body = await readBody(req)
