@@ -22,15 +22,17 @@ export async function buildLiveSnapshot(
         spark = kl.data.map((b) => b.close).filter((n) => Number.isFinite(n)).slice(-40)
       }
     } catch { /* omit sparkline on failure */ }
+    const price = r.ok ? r.data?.price : undefined
+    const hasPrice = typeof price === 'number' && Number.isFinite(price)
     quotes.push({
       code: it.code,
       type: it.type,
       market: r.market,
       name: (r.ok ? r.data?.name : undefined) ?? it.name,
-      price: r.ok ? r.data?.price : undefined,
+      price: hasPrice ? price : undefined,
       changePercent: r.ok ? r.data?.changePercent : undefined,
       spark: spark && spark.length >= 2 ? spark : undefined,
-      error: r.ok ? undefined : r.error,
+      error: r.ok ? (hasPrice ? undefined : '暂无行情') : (r.error ?? '获取失败'),
     })
   }
 

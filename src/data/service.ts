@@ -1,4 +1,5 @@
 import type { AssetType, Holding, KlineBar, PortfolioHolding, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
+import { stripMarketSuffix } from './http.js'
 import type { ProviderRegistry } from './registry.js'
 
 export function calculateMA(closes: number[], period: number): number[] {
@@ -188,9 +189,10 @@ export class FinanceDataService {
   /**
    * Route a code to the right market. Funds are explicit (`type: 'fund'`) since they share the
    * 6-digit shape with A-shares; stocks route by shape: letters→US, 4-5 digits→HK, else A-share.
+   * Suffixes like `.HK` / `.US` / `.SH` are stripped first so they are not mistaken for US tickers.
    */
   async getAutoQuote(code: string, signal?: AbortSignal, type: AssetType = 'stock') {
-    const c = code.trim()
+    const c = type === 'fund' ? code.trim() : stripMarketSuffix(code)
     if (type === 'fund') return { market: '基金', ...(await this.getFundQuote(c, signal)) }
     if (/[A-Za-z]/.test(c)) return { market: '美股', ...(await this.getUsQuote(c, signal)) }
     if (/^\d{4,5}$/.test(c)) return { market: '港股', ...(await this.getHkQuote(c, signal)) }
@@ -199,7 +201,7 @@ export class FinanceDataService {
 
   /** Same market routing as getAutoQuote, for daily K-line (sparkline source). */
   async getAutoKline(code: string, signal?: AbortSignal, type: AssetType = 'stock') {
-    const c = code.trim()
+    const c = type === 'fund' ? code.trim() : stripMarketSuffix(code)
     if (type === 'fund') return this.getFundKline(c, signal)
     if (/[A-Za-z]/.test(c)) return this.getUsKline(c, 'daily', undefined, undefined, signal)
     if (/^\d{4,5}$/.test(c)) return this.getHkKline(c, 'daily', undefined, undefined, signal)

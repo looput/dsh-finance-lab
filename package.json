@@ -25,7 +25,8 @@
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "prepare": "npm run build",
     "probe": "tsx scripts/probe_sources.ts --out data/probe-report.json",
-    "test:avail": "tsx scripts/test_availability.ts"
+    "test:avail": "tsx scripts/test_availability.ts",
+    "web:restart": "bash scripts/restart_web.sh"
   },
   "dsh": {
     "bundle": {

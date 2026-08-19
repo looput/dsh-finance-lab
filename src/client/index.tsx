@@ -1,10 +1,15 @@
-import { createElement as h, useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { createElement as h, useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
+// Host module table supplies react-dom; types live on the web shell, not this plugin.
+// @ts-expect-error
+import { createPortal } from 'react-dom'
 import type { CSSProperties } from 'react'
 import type { Config } from '../config.js'
 import type { AssetType, IndexQuote, LiveQuote, PortfolioHolding, WatchItem } from '../types.js'
 
 export const name = 'dsn-finance-client'
 export const inject = ['slots', 'settingsScope']
+
+const PANEL_W = 410
 
 const API = '/plugins/dsn-finance/api'
 const TAB_KEY = 'dsn-finance:tab'
@@ -52,13 +57,19 @@ const UP = '#d1403f'
 const DOWN = '#2ba471'
 const V = (n: string, f: string) => `var(${n}, ${f})`
 const BRAND = V('--dsw-alias-brand-primary', '#4b7bec')
+const panelShell = (extra?: CSSProperties): CSSProperties => ({
+  display: 'flex', flexDirection: 'column', background: V('--dsw-alias-bg-layer-3', '#fff'),
+  borderLeft: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`,
+  color: V('--dsw-alias-label-primary', '#111'), fontSize: 13, ...extra,
+})
 const S = {
-  backdrop: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 2147483000 } as CSSProperties,
+  backdrop: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 40 } as CSSProperties,
   drawer: {
-    position: 'fixed', top: 0, right: 0, bottom: 0, width: 410, maxWidth: '95vw', zIndex: 2147483001,
-    display: 'flex', flexDirection: 'column', background: V('--dsw-alias-bg-layer-3', '#fff'),
-    borderLeft: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`, boxShadow: '-8px 0 24px rgba(0,0,0,0.12)',
-    color: V('--dsw-alias-label-primary', '#111'), fontSize: 13,
+    ...panelShell({ boxShadow: '-8px 0 24px rgba(0,0,0,0.12)' }),
+    position: 'fixed', top: 0, right: 0, bottom: 0, width: PANEL_W, maxWidth: '95vw', zIndex: 41,
+  } as CSSProperties,
+  docked: {
+    ...panelShell(), position: 'fixed', top: 0, right: 0, bottom: 0, width: PANEL_W, zIndex: 30,
   } as CSSProperties,
   header: { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}` } as CSSProperties,
   tabs: { display: 'flex', gap: 2, padding: '6px 10px 0', borderBottom: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`, flexWrap: 'wrap' } as CSSProperties,
@@ -88,6 +99,31 @@ function pctStr(n: number | undefined): string {
 const colorOf = (n: number | undefined) => (typeof n === 'number' ? (n >= 0 ? UP : DOWN) : V('--dsw-alias-label-tertiary', '#999'))
 const keyOf = (code: string, type: AssetType) => `${type}:${code}`
 
+function isComposingKey(e: { nativeEvent?: { isComposing?: boolean; keyCode?: number }; isComposing?: boolean; keyCode?: number }): boolean {
+  const n = e.nativeEvent ?? e
+  return n.isComposing === true || n.keyCode === 229
+}
+
+function onEnterCommit(fn: () => void) {
+  return (e: { key: string; preventDefault: () => void; nativeEvent?: { isComposing?: boolean; keyCode?: number } }) => {
+    if (e.key !== 'Enter' || isComposingKey(e)) return
+    e.preventDefault()
+    fn()
+  }
+}
+
+function IconChart(props: { size?: number }) {
+  const s = props.size ?? 16
+  return h('svg', {
+    width: s, height: s, viewBox: '0 0 16 16', fill: 'none', xmlns: 'http://www.w3.org/2000/svg',
+    style: { flex: '0 0 auto', display: 'block' }, 'aria-hidden': true,
+  },
+    h('path', {
+      d: 'M2 13h12M3.5 10l2.6-3 2.2 1.7 3.8-5',
+      stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round',
+    }))
+}
+
 function Sparkline(props: { data?: number[]; color: string; w?: number }) {
   const data = props.data
   const w = props.w ?? 72
@@ -103,19 +139,27 @@ function Sparkline(props: { data?: number[]; color: string; w?: number }) {
     h('polyline', { points: pts, fill: 'none', stroke: props.color, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }))
 }
 
-function QuoteRow(props: { q: LiveQuote; onRemove?: () => void }) {
+function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => void }) {
   const q = props.q
   const pct = q.changePercent
   const sparkColor = q.spark && q.spark.length >= 2 ? (q.spark[q.spark.length - 1]! >= q.spark[0]! ? UP : DOWN) : colorOf(pct)
   const digits = q.type === 'fund' ? 4 : 2
+  const hasPrice = typeof q.price === 'number' && Number.isFinite(q.price)
+  const priceNode = (() => {
+    if (hasPrice) return fmt(q.price, digits)
+    if (props.loading) return h('span', { style: S.muted }, '加载中')
+    const err = q.error ?? ''
+    const limited = /429|限流|rate.?limit|timeout|超时/i.test(err)
+    return h('span', { style: S.muted, title: err || '暂无行情' }, limited ? '限流' : '获取失败')
+  })()
   return h('div', { style: S.row },
     h('div', { style: { flex: 1, minWidth: 0 } },
       h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, q.name || q.code),
       h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center' } },
         h('span', { style: S.tag }, q.market || (q.type === 'fund' ? '基金' : '股票')), q.code)),
     h(Sparkline, { data: q.spark, color: sparkColor }),
-    h('div', { style: { width: 62, textAlign: 'right' } }, q.error ? h('span', { style: S.muted }, '限流') : fmt(q.price, digits)),
-    h('div', { style: { width: 54, textAlign: 'right', color: colorOf(pct) } }, pctStr(pct)),
+    h('div', { style: { width: 62, textAlign: 'right' } }, priceNode),
+    h('div', { style: { width: 54, textAlign: 'right', color: colorOf(pct) } }, hasPrice ? pctStr(pct) : '—'),
     props.onRemove ? h('button', { style: { ...S.btn, padding: '2px 6px' }, title: '移除', onClick: props.onRemove }, '×') : null)
 }
 
@@ -162,14 +206,21 @@ function useLive() {
       setData({ at: s.at, quotes: s.quotes ?? [], indices: s.indices ?? [], health: s.health ?? [], holdings: s.holdings ?? [], watchlist: s.watchlist ?? [], portfolioPath: s.portfolioPath })
     } catch { /* keep prior */ } finally {
       inflight.current = false
-      setLoading(false)
-      if (again.current) { again.current = false; void loadLive() }
+      if (again.current) {
+        again.current = false
+        void loadLive()
+      } else {
+        setLoading(false)
+      }
     }
   }, [])
 
   const mutate = useCallback(async (action: string, payload: Record<string, unknown>) => {
-    const r = await apiPost<{ ok: boolean; holdings?: PortfolioHolding[]; watchlist?: WatchItem[] }>('/mutate', { action, payload })
-    if (r.ok) setData((d) => ({ ...d, holdings: r.holdings ?? d.holdings, watchlist: r.watchlist ?? d.watchlist }))
+    setLoading(true)
+    try {
+      const r = await apiPost<{ ok: boolean; holdings?: PortfolioHolding[]; watchlist?: WatchItem[] }>('/mutate', { action, payload })
+      if (r.ok) setData((d) => ({ ...d, holdings: r.holdings ?? d.holdings, watchlist: r.watchlist ?? d.watchlist }))
+    } catch { /* keep prior */ }
     void loadLive()
   }, [loadLive])
 
@@ -193,35 +244,53 @@ function SegToggle(props: { value: AssetType; onChange: (v: AssetType) => void }
 
 interface Match { code: string; name: string; market: string }
 function SearchAdd(props: { onAdd: (code: string, type: AssetType) => void }) {
-  const [q, setQ] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
   const [matches, setMatches] = useState<Match[]>([])
   const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState('')
   async function run() {
-    const kw = q.trim()
+    const kw = inputRef.current?.value.trim() ?? ''
     if (!kw) return
     setBusy(true)
+    setHint('')
     try {
       const r = await apiGet<{ ok: boolean; matches: Match[] }>(`/search?q=${encodeURIComponent(kw)}`)
-      setMatches(r.ok ? r.matches : [])
-    } catch { setMatches([]) } finally { setBusy(false) }
+      const list = r.ok ? (r.matches ?? []) : []
+      setMatches(list)
+      setHint(r.ok ? (list.length ? '' : '未找到') : '搜索失败')
+    } catch { setMatches([]); setHint('搜索失败') } finally { setBusy(false) }
   }
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
     h('div', { style: { display: 'flex', gap: 6 } },
-      h('input', { style: { ...S.input, flex: 1 }, placeholder: '搜索代码/名称，如 腾讯 / 00700 / AAPL', value: q, onChange: (e: any) => setQ(e.target.value), onKeyDown: (e: any) => e.key === 'Enter' && run() }),
-      h('button', { style: S.btn, onClick: run, disabled: busy }, busy ? '…' : '搜索')),
+      h('input', {
+        ref: inputRef,
+        style: { ...S.input, flex: 1 },
+        placeholder: '搜索代码/名称，如 腾讯 / 00700 / AAPL',
+        defaultValue: '',
+        onKeyDown: onEnterCommit(() => { void run() }),
+      }),
+      h('button', { style: S.btn, onClick: () => { void run() }, disabled: busy }, busy ? '…' : '搜索')),
+    hint ? h('div', { style: S.muted }, hint) : null,
     matches.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
       matches.map((m) => {
         const isFund = /基金|ETF|LOF/i.test(m.market)
         return h('div', { key: `${m.market}-${m.code}`, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' } },
           h('span', { style: { flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } },
             h('span', { style: S.tag }, m.market || '—'), ' ', m.name, ' ', h('code', { style: { ...S.muted, fontSize: 11 } }, m.code)),
-          h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => { props.onAdd(m.code, isFund ? 'fund' : 'stock'); setMatches([]); setQ('') } }, '加自选'))
+          h('button', {
+            style: { ...S.btn, padding: '2px 8px' },
+            onClick: () => {
+              props.onAdd(m.code, isFund ? 'fund' : 'stock')
+              setMatches([])
+              if (inputRef.current) inputRef.current.value = ''
+            },
+          }, '加自选'))
       })) : null)
 }
 
 // ---- 行情 tab ----
-function QuotesView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; mutate: (a: string, p: Record<string, unknown>) => void }) {
-  const { data, quoteBy, mutate } = props
+function QuotesView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; loading: boolean; mutate: (a: string, p: Record<string, unknown>) => void }) {
+  const { data, quoteBy, loading, mutate } = props
   const [wCode, setWCode] = useState('')
   const [wType, setWType] = useState<AssetType>('stock')
   const watchQuotes: LiveQuote[] = data.watchlist.map((w) => quoteBy.get(keyOf(w.code, w.type)) ?? { code: w.code, type: w.type, name: w.name })
@@ -240,10 +309,10 @@ function QuotesView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; mu
             h('span', { style: { color: colorOf(ix.changePercent), fontWeight: 600 } }, `${fmt(ix.price)} ${pctStr(ix.changePercent)}`))))),
     h('div', { style: S.section },
       h('div', { style: S.title }, '自选 · 行情走势'),
-      watchQuotes.length === 0 ? h('div', { style: S.muted }, '暂无自选，在下方添加') : watchQuotes.map((q) => h(QuoteRow, { key: `w-${q.type}-${q.code}`, q, onRemove: () => mutate('removeWatch', { code: q.code, type: q.type }) })),
+      watchQuotes.length === 0 ? h('div', { style: S.muted }, '暂无自选，在下方添加') : watchQuotes.map((q) => h(QuoteRow, { key: `w-${q.type}-${q.code}`, q, loading, onRemove: () => mutate('removeWatch', { code: q.code, type: q.type }) })),
       data.at ? h('div', { style: S.muted }, `更新于 ${new Date(data.at).toLocaleTimeString()}`) : null,
       h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
-        h('input', { style: { ...S.input, flex: 1 }, placeholder: '代码，如 600519 / 00700 / AAPL / 110022', value: wCode, onChange: (e: any) => setWCode(e.target.value), onKeyDown: (e: any) => e.key === 'Enter' && addWatch() }),
+        h('input', { style: { ...S.input, flex: 1 }, placeholder: '代码，如 600519 / 00700 / AAPL / 110022', value: wCode, onChange: (e: any) => setWCode(e.target.value), onKeyDown: onEnterCommit(addWatch) }),
         h(SegToggle, { value: wType, onChange: setWType }),
         h('button', { style: S.btn, onClick: addWatch }, '添加')),
       h(SearchAdd, { onAdd: (code, type) => mutate('addWatch', { code, type }) })))
@@ -312,9 +381,9 @@ function HoldingsView(props: { data: LiveData; quoteBy: Map<string, LiveQuote>; 
         h('span', null, h('span', { style: { color: '#e0a53f' } }, '● '), `基金 ${byType.fund.toFixed(0)}%`)),
       h('div', { style: S.muted }, `集中度：最大 ${top1.toFixed(0)}%（${weights[0]?.name ?? '—'}）· 前三 ${top3.toFixed(0)}%`)) : null,
     h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
-      h('input', { style: { ...S.input, flex: 2 }, placeholder: '代码', value: hCode, onChange: (e: any) => setHCode(e.target.value) }),
-      h('input', { style: { ...S.input, flex: 1 }, placeholder: '数量', value: hQty, onChange: (e: any) => setHQty(e.target.value) }),
-      h('input', { style: { ...S.input, flex: 1 }, placeholder: '成本', value: hCost, onChange: (e: any) => setHCost(e.target.value) }),
+      h('input', { style: { ...S.input, flex: 2 }, placeholder: '代码', value: hCode, onChange: (e: any) => setHCode(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
+      h('input', { style: { ...S.input, flex: 1 }, placeholder: '数量', value: hQty, onChange: (e: any) => setHQty(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
+      h('input', { style: { ...S.input, flex: 1 }, placeholder: '成本', value: hCost, onChange: (e: any) => setHCost(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
       h(SegToggle, { value: hType, onChange: setHType }),
       h('button', { style: S.btn, onClick: addHolding }, '加')),
     data.portfolioPath ? h('div', { style: { ...S.muted, fontSize: 11 } }, `持仓文件：${data.portfolioPath}（可让 Agent 识别截图后写入）`) : null)
@@ -467,61 +536,117 @@ const TABS: Array<{ id: string; label: string }> = [
   { id: 'funds', label: '基金' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' }, { id: 'health', label: '接口' },
 ]
 
-function Drawer(props: { onClose: () => void; docked: boolean; onToggleDock: () => void }) {
+function findShellFrame(): HTMLElement | null {
+  return document.querySelector('[data-shell-overlay]')?.parentElement ?? null
+}
+
+/** Shrink the shell grid so the docked panel sits in reserved right padding. */
+function useCenterReserve(active: boolean) {
+  useLayoutEffect(() => {
+    if (!active) return
+    const frame = findShellFrame()
+    if (!frame) return
+    const prevPad = frame.style.paddingRight
+    const prevBox = frame.style.boxSizing
+    frame.style.boxSizing = 'border-box'
+    frame.style.paddingRight = `${PANEL_W}px`
+    return () => {
+      frame.style.paddingRight = prevPad
+      frame.style.boxSizing = prevBox
+    }
+  }, [active])
+}
+
+function portalHost(): HTMLElement {
+  return document.getElementById('root') ?? document.body
+}
+
+/** Keep composer glyphs opaque so Chromium attaches IME. Do not intercept
+ * keydown — capture/stop on Space during composition commits pinyin as Latin. */
+function useComposerImeFix() {
+  useEffect(() => {
+    const style = document.createElement('style')
+    style.textContent = [
+      'textarea[data-phase],textarea[data-phase]:focus{',
+      'color:var(--dsw-alias-label-primary,#111)!important;',
+      '-webkit-text-fill-color:var(--dsw-alias-label-primary,#111)!important;',
+      '}',
+      '[data-input-scroll]:focus-within [data-input-backdrop]{color:transparent;}',
+    ].join('')
+    document.head.appendChild(style)
+    return () => { style.remove() }
+  }, [])
+}
+
+function PanelBody(props: { onClose: () => void; docked: boolean; onToggleDock: () => void }) {
   const { onClose, docked, onToggleDock } = props
   const { data, loading, loadLive, mutate } = useLive()
   const [tab, setTab] = useState<string>(() => {
     try { return window.localStorage.getItem(TAB_KEY) || 'quotes' } catch { return 'quotes' }
   })
   const selectTab = (id: string) => { setTab(id); try { window.localStorage.setItem(TAB_KEY, id) } catch { /* */ } }
-
   const quoteBy = new Map<string, LiveQuote>()
   for (const q of data.quotes) quoteBy.set(keyOf(q.code, q.type ?? 'stock'), q)
+  return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
+    h('div', { style: S.header },
+      h(IconChart, { size: 16 }),
+      h('div', { style: { flex: 1, fontWeight: 600 } }, 'DSN 金融面板'),
+      h('button', { style: S.btn, onClick: () => void loadLive(), disabled: loading }, loading ? '刷新中…' : '刷新'),
+      h('button', { style: { ...S.btn, padding: '4px 8px' }, title: docked ? '切换为浮动窗' : '停靠为侧栏页', onClick: onToggleDock }, docked ? '浮动' : '停靠'),
+      h('button', { style: { ...S.btn, padding: '4px 8px' }, onClick: onClose }, '×')),
+    h('div', { style: S.tabs }, TABS.map((t) => h('button', { key: t.id, style: S.tab(tab === t.id), onClick: () => selectTab(t.id) }, t.label))),
+    h('div', { style: S.body },
+      tab === 'quotes' ? h(QuotesView, { data, quoteBy, loading, mutate }) : null,
+      tab === 'market' ? h(MarketView, { active: tab === 'market' }) : null,
+      tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate }) : null,
+      tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
+      tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
+      tab === 'news' ? h(NewsView, { active: tab === 'news', data }) : null,
+      tab === 'health' ? h(HealthView, { health: data.health }) : null))
+}
 
-  return h('div', null,
-    docked ? null : h('div', { style: S.backdrop, onClick: onClose }),
-    h('div', { style: docked ? { ...S.drawer, boxShadow: 'none' } : S.drawer },
-      h('div', { style: S.header },
-        h('span', { style: { fontSize: 16 } }, '📈'),
-        h('div', { style: { flex: 1, fontWeight: 600 } }, 'DSN 金融面板'),
-        h('button', { style: S.btn, onClick: () => void loadLive(), disabled: loading }, loading ? '刷新中…' : '刷新'),
-        h('button', { style: { ...S.btn, padding: '4px 8px' }, title: docked ? '切换为浮动窗' : '停靠为侧栏页', onClick: onToggleDock }, docked ? '浮动' : '停靠'),
-        h('button', { style: { ...S.btn, padding: '4px 8px' }, onClick: onClose }, '×')),
-      h('div', { style: S.tabs }, TABS.map((t) => h('button', { key: t.id, style: S.tab(tab === t.id), onClick: () => selectTab(t.id) }, t.label))),
-      h('div', { style: S.body },
-        tab === 'quotes' ? h(QuotesView, { data, quoteBy, mutate }) : null,
-        tab === 'market' ? h(MarketView, { active: tab === 'market' }) : null,
-        tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate }) : null,
-        tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
-        tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
-        tab === 'news' ? h(NewsView, { active: tab === 'news', data }) : null,
-        tab === 'health' ? h(HealthView, { health: data.health }) : null)))
+function FloatingDrawer(props: { onClose: () => void; onToggleDock: () => void }) {
+  return createPortal(
+    h('div', null,
+      h('div', { style: S.backdrop, onClick: props.onClose }),
+      h('div', { style: S.drawer }, h(PanelBody, { ...props, docked: false }))),
+    portalHost())
+}
+
+function DockedPanel(props: { onClose: () => void; onToggleDock: () => void }) {
+  useCenterReserve(true)
+  return createPortal(h('div', { style: S.docked }, h(PanelBody, { ...props, docked: true })), portalHost())
 }
 
 function FootAction(props: { scope: FinanceScope; wide?: boolean }) {
+  useComposerImeFix()
   const { value } = useConfig(props.scope)
   const open = value.panelOpen === true
   const docked = value.panelDocked !== false // default: docked (page-like)
   const setOpen = (v: boolean) => void props.scope.set('panelOpen', v)
   const setDocked = (v: boolean) => void props.scope.set('panelDocked', v)
+  const wide = props.wide === true
   const trigger = h('button', {
-    title: '金融面板', onClick: () => setOpen(!open),
+    type: 'button', title: '金融面板', onClick: () => setOpen(!open),
     style: {
-      display: 'flex', alignItems: 'center', gap: 8, width: '100%', cursor: 'pointer',
-      background: 'transparent', border: 'none',
-      color: open ? BRAND : V('--dsw-alias-label-secondary', '#555'),
-      padding: props.wide ? '6px 8px' : 8, borderRadius: 8, font: 'inherit', fontSize: 13,
-      justifyContent: props.wide ? 'flex-start' : 'center',
+      display: 'flex', alignItems: 'center', boxSizing: 'border-box', cursor: 'pointer',
+      border: 'none', overflow: 'hidden', fontFamily: 'inherit',
+      background: open ? V('--dsw-alias-interactive-bg-hover', '#f2f3f5') : 'transparent',
+      color: V('--dsw-alias-label-primary', '#111'),
+      ...(wide
+        ? { gap: 8, width: 'calc(100% + 4px)', height: 42, margin: '4px -2px', padding: '0 10px 0 8px', borderRadius: 12, fontSize: 14, lineHeight: '22px', justifyContent: 'flex-start' }
+        : { gap: 0, width: 36, height: 36, margin: '8px 0 10px', padding: 0, borderRadius: '50%', justifyContent: 'center' }),
     } as CSSProperties,
-  }, h('span', { style: { fontSize: 16 } }, '📈'), props.wide ? h('span', null, '金融面板') : null)
+  }, h(IconChart, { size: wide ? 16 : 18 }), wide ? h('span', { style: { overflow: 'hidden', whiteSpace: 'nowrap' } }, '金融面板') : null)
   return h('div', null, trigger,
-    open ? h(Drawer, { docked, onClose: () => setOpen(false), onToggleDock: () => setDocked(!docked) }) : null)
+    open && docked ? h(DockedPanel, { onClose: () => setOpen(false), onToggleDock: () => setDocked(false) }) : null,
+    open && !docked ? h(FloatingDrawer, { onClose: () => setOpen(false), onToggleDock: () => setDocked(true) }) : null)
 }
 
 function SettingsCard() {
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 8, fontSize: 13 } },
     h('h3', { style: { margin: 0 } }, 'DSN Finance'),
-    h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '左下角「📈 金融面板」提供行情 / 持仓 / 宏观 / 基金 / 接口五个标签页，实时数据，含基金净值与中国宏观指标。'),
+    h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '左下角「金融面板」提供行情 / 持仓 / 宏观 / 基金 / 接口五个标签页，实时数据，含基金净值与中国宏观指标。'),
     h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '持仓与自选保存在本地 JSON 文件中；可上传持仓截图让 Agent 解析并写入，面板会实时刷新。'))
 }
 
