@@ -564,6 +564,30 @@ function NewsView(props: { active: boolean; data: LiveData; quoteBy: Map<string,
 interface McpSource { name: string; kind: string; label: string; enabled: boolean; tokenPresent: boolean; state: string; detail?: string; toolCount?: number }
 const MCP_STATE_LABEL: Record<string, string> = { ready: '已接入', 'no-token': '缺少 token', disabled: '已停用', error: '错误' }
 
+function McpSourceRow(props: { s: McpSource; onSaved: (sources: McpSource[]) => void }) {
+  const { s } = props
+  const [editing, setEditing] = useState(false)
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const good = s.state === 'ready'
+  const save = async () => {
+    setBusy(true)
+    try {
+      const r = await apiPost<{ ok: boolean; sources: McpSource[] }>('/mcp/token', { name: s.name, token })
+      if (r.ok) { props.onSaved(r.sources ?? []); setEditing(false); setToken('') }
+    } catch { /* */ } finally { setBusy(false) }
+  }
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, padding: '3px 0' } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 }, title: s.detail || '' },
+      h('span', { style: { width: 8, height: 8, borderRadius: 999, background: good ? DOWN : (s.state === 'disabled' ? '#bbb' : UP), flex: '0 0 auto' } }),
+      h('span', { style: { flex: 1 } }, s.label, ' ', h('code', { style: { ...S.muted, fontSize: 11 } }, s.name)),
+      h('span', { style: S.muted }, (MCP_STATE_LABEL[s.state] ?? s.state) + (s.toolCount ? ` · ${s.toolCount} 工具` : '')),
+      h('button', { style: { ...S.btn, padding: '2px 6px' }, title: s.tokenPresent ? '更新 token' : '配置 token', onClick: () => setEditing(!editing) }, s.tokenPresent ? '🔑' : '设置')),
+    editing ? h('div', { style: { display: 'flex', gap: 6 } },
+      h('input', { type: 'password', style: { ...S.input, flex: 1 }, placeholder: `${s.name} token`, value: token, onChange: (e: { target: { value: string } }) => setToken(e.target.value) }),
+      h('button', { style: S.btn, disabled: busy, onClick: () => void save() }, busy ? '重载中…' : '保存')) : null)
+}
+
 function McpSourcesView() {
   const [sources, setSources] = useState<McpSource[]>([])
   useEffect(() => {
@@ -576,14 +600,8 @@ function McpSourcesView() {
   if (!sources.length) return null
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
     h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, '外部数据源 (MCP)'),
-    sources.map((s) => {
-      const good = s.state === 'ready'
-      return h('div', { key: s.name, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' }, title: s.detail || '' },
-        h('span', { style: { width: 8, height: 8, borderRadius: 999, background: good ? DOWN : (s.state === 'disabled' ? '#bbb' : UP), flex: '0 0 auto' } }),
-        h('span', { style: { flex: 1 } }, s.label, ' ', h('code', { style: { ...S.muted, fontSize: 11 } }, s.name)),
-        h('span', { style: S.muted }, (MCP_STATE_LABEL[s.state] ?? s.state) + (s.toolCount ? ` · ${s.toolCount} 工具` : '')))
-    }),
-    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, 'token 通过环境变量、data/mcp-secrets.json 或设置面板配置；改动后重启生效'))
+    sources.map((s) => h(McpSourceRow, { key: s.name, s, onSaved: setSources })),
+    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, 'token 保存到 data/mcp-secrets.json（也支持环境变量）；保存后即时热重载'))
 }
 
 function HealthView(props: { health: LiveData['health'] }) {

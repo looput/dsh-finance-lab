@@ -72,6 +72,14 @@ export function registerRoutes(webServer: WebServerLike, finance: FinanceDataSer
         if (req.method === 'GET' && sub === '/mcp') {
           return sendJson(res, 200, { sources: mcp?.status() ?? [] })
         }
+        if (req.method === 'POST' && sub === '/mcp/token') {
+          if (!mcp) return sendJson(res, 400, { ok: false, error: 'mcp disabled' })
+          const body = await readBody(req)
+          const name = String(body.name ?? '').trim()
+          if (!name) return sendJson(res, 400, { ok: false, error: 'missing name' })
+          await mcp.setToken(name, String(body.token ?? ''))
+          return sendJson(res, 200, { ok: true, sources: mcp.status() })
+        }
         if (req.method === 'GET' && sub === '/live') {
           const snapshot = await buildLiveSnapshot(finance, snapshotItems(store))
           const { holdings, watchlist } = store.get()
