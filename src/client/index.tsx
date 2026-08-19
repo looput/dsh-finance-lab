@@ -3,6 +3,8 @@ import { createElement as h, useCallback, useEffect, useLayoutEffect, useReducer
 // @ts-expect-error
 import { createPortal } from 'react-dom'
 import type { CSSProperties } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { Config } from '../config.js'
 import type { AssetType, IndexQuote, LiveQuote, PortfolioHolding, WatchItem } from '../types.js'
 
@@ -230,6 +232,24 @@ interface AnalysisItem {
   code: string
   type: AssetType
   name?: string
+}
+
+const ANALYSIS_MARKDOWN_COMPONENTS = {
+  h1: ({ children }: any) => h('h1', { style: { fontSize: 24, lineHeight: 1.25, margin: '0 0 16px' } }, children),
+  h2: ({ children }: any) => h('h2', { style: { fontSize: 19, lineHeight: 1.35, margin: '24px 0 10px', borderBottom: `1px solid ${V('--dsw-alias-border-l2', '#eee')}`, paddingBottom: 5 } }, children),
+  h3: ({ children }: any) => h('h3', { style: { fontSize: 15, lineHeight: 1.4, margin: '18px 0 8px' } }, children),
+  p: ({ children }: any) => h('p', { style: { margin: '8px 0', lineHeight: 1.65 } }, children),
+  ul: ({ children }: any) => h('ul', { style: { margin: '8px 0', paddingLeft: 22, lineHeight: 1.65 } }, children),
+  ol: ({ children }: any) => h('ol', { style: { margin: '8px 0', paddingLeft: 22, lineHeight: 1.65 } }, children),
+  li: ({ children }: any) => h('li', { style: { margin: '3px 0' } }, children),
+  blockquote: ({ children }: any) => h('blockquote', { style: { margin: '12px 0', padding: '4px 12px', borderLeft: `3px solid ${BRAND}`, color: V('--dsw-alias-label-secondary', '#666') } }, children),
+  table: ({ children }: any) => h('div', { style: { overflowX: 'auto', margin: '12px 0' } },
+    h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12 } }, children)),
+  th: ({ children }: any) => h('th', { style: { border: `1px solid ${V('--dsw-alias-border-l2', '#ddd')}`, background: V('--dsw-alias-bg-module-platform', '#f5f6f7'), padding: '6px 8px', textAlign: 'left', whiteSpace: 'nowrap' } }, children),
+  td: ({ children }: any) => h('td', { style: { border: `1px solid ${V('--dsw-alias-border-l2', '#ddd')}`, padding: '6px 8px', verticalAlign: 'top' } }, children),
+  hr: () => h('hr', { style: { border: 0, borderTop: `1px solid ${V('--dsw-alias-border-l2', '#eee')}`, margin: '18px 0' } }),
+  code: ({ children }: any) => h('code', { style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, background: V('--dsw-alias-bg-module-platform', '#f2f3f5'), borderRadius: 4, padding: '1px 4px' } }, children),
+  a: ({ href, children }: any) => h('a', { href, target: '_blank', rel: 'noreferrer', style: { color: BRAND } }, children),
 }
 
 async function apiGet<T>(path: string): Promise<T> {
@@ -706,12 +726,8 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
         analysis ? h('div', null,
           h('div', { style: { ...S.muted, marginBottom: 12 } },
             `生成于 ${new Date(analysis.generatedAt).toLocaleString()}${analysis.dataAsOf ? ` · 数据截至 ${analysis.dataAsOf}` : ''}`),
-          h('pre', {
-            style: {
-              margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', font: 'inherit',
-              lineHeight: 1.65,
-            },
-          }, analysis.report)) : null)))
+          h('div', { style: { wordBreak: 'break-word', fontSize: 13 } },
+            h(ReactMarkdown, { remarkPlugins: [remarkGfm], components: ANALYSIS_MARKDOWN_COMPONENTS }, analysis.report))) : null)))
 }
 
 const TABS: Array<{ id: string; label: string }> = [
