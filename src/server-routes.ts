@@ -92,6 +92,25 @@ export function registerRoutes(webServer: WebServerLike, finance: FinanceDataSer
           const r = await finance.getFundRank(fundType, size)
           return sendJson(res, 200, { ok: r.ok, rows: r.ok && Array.isArray(r.data) ? r.data : [], error: r.ok ? undefined : r.error })
         }
+        if (req.method === 'GET' && sub === '/market') {
+          const [gain, lose] = await Promise.all([finance.getSectorBoard('desc'), finance.getSectorBoard('asc')])
+          const snapshot = await buildLiveSnapshot(finance, [])
+          return sendJson(res, 200, {
+            at: new Date().toISOString(),
+            indices: snapshot.indices,
+            gainers: gain.ok && Array.isArray(gain.data) ? (gain.data as unknown[]).slice(0, 10) : [],
+            losers: lose.ok && Array.isArray(lose.data) ? (lose.data as unknown[]).slice(0, 10) : [],
+          })
+        }
+        if (req.method === 'GET' && sub === '/news') {
+          const code = url.searchParams.get('code')
+          if (code) {
+            const r = await finance.getStockNews(code, 10)
+            return sendJson(res, 200, { ok: r.ok, code, news: r.ok && Array.isArray(r.data) ? r.data : [], error: r.ok ? undefined : r.error })
+          }
+          const r = await finance.getNewsFlash(25)
+          return sendJson(res, 200, { ok: r.ok, news: r.ok && Array.isArray(r.data) ? r.data : [], error: r.ok ? undefined : r.error })
+        }
         if (req.method === 'POST' && sub === '/mutate') {
           const body = await readBody(req)
           const action = String(body.action ?? '')

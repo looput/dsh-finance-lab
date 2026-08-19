@@ -244,7 +244,7 @@ async function txKline(args: Record<string, unknown>, ctx: ProviderContext) {
  */
 async function emIndexMain(_args: Record<string, unknown>, ctx: ProviderContext) {
   const json = await httpGetJson<{ data?: { diff?: Array<Record<string, unknown>> } }>(
-    'https://33.push2.eastmoney.com/api/qt/clist/get',
+    'https://push2.eastmoney.com/api/qt/clist/get',
     {
       pn: '1',
       pz: '100',
@@ -303,13 +303,13 @@ async function emMainFinadata(args: Record<string, unknown>, ctx: ProviderContex
  * Source: akshare.stock.stock_board_industry_em.stock_board_industry_name_em
  * URL: https://17.push2.eastmoney.com/api/qt/clist/get (first page)
  */
-async function emIndustryBoard(_args: Record<string, unknown>, ctx: ProviderContext) {
+async function emIndustryBoard(args: Record<string, unknown>, ctx: ProviderContext) {
   const json = await httpGetJson<{ data?: { diff?: Array<Record<string, unknown>> } }>(
-    'https://17.push2.eastmoney.com/api/qt/clist/get',
+    'https://push2.eastmoney.com/api/qt/clist/get',
     {
       pn: '1',
       pz: '50',
-      po: '1',
+      po: String(args.order === 'asc' ? '0' : '1'), // 1=涨幅榜, 0=跌幅榜
       np: '1',
       ut: 'bd1d9ddb04089700cf9c27f6f7426281',
       fltt: '2',
@@ -707,6 +707,59 @@ async function emFundRank(args: Record<string, unknown>, ctx: ProviderContext) {
   return { rows, data: rows, sampleKeys: Object.keys(rows[0]!) }
 }
 
+// ---- 快讯 / 新闻（东财，akshare stock_info_global_em / stock_news_em 同源）----
+function stripHtml(s: string): string {
+  return s.replace(/<[^>]+>/g, '').trim()
+}
+
+// Source: eastmoney 全球财经快讯 (getFastNewsList). 单一时间线电报。
+async function emNewsFlash(args: Record<string, unknown>, ctx: ProviderContext) {
+  const size = Math.min(Math.max(Number(args.size ?? 20), 1), 50)
+  const json = await httpGetJson<{ data?: { fastNewsList?: Array<Record<string, unknown>> } }>(
+    'https://np-listapi.eastmoney.com/comm/web/getFastNewsList',
+    { client: 'web', biz: 'web_724', fastColumn: '102', sortEnd: '', pageSize: String(size), req_trace: String(Date.now()), _: String(Date.now()) },
+    opts(ctx, 'https://kuaixun.eastmoney.com/'),
+  )
+  const list = json.data?.fastNewsList ?? []
+  const rows = list.map((it) => {
+    const summary = stripHtml(String(it.summary ?? ''))
+    const title = String(it.title ?? '') || summary.match(/^【(.+?)】/)?.[1] || summary.slice(0, 48)
+    const code = it.code ? String(it.code) : undefined
+    return {
+      title,
+      summary,
+      time: String(it.showTime ?? it.showtime ?? it.time ?? ''),
+      url: it.url ? String(it.url) : code ? `https://finance.eastmoney.com/a/${code}.html` : undefined,
+    }
+  })
+  if (!rows.length) throw new Error('news flash: empty')
+  return { rows, data: rows, sampleKeys: Object.keys(list[0]!) }
+}
+
+// Source: eastmoney 搜索 (个股相关资讯). 按持仓/自选代码拉，与仓位相关。
+async function emStockNews(args: Record<string, unknown>, ctx: ProviderContext) {
+  const keyword = String(args.code ?? args.keyword ?? '').trim()
+  if (!keyword) throw new Error('empty code for stock news')
+  const size = Math.min(Math.max(Number(args.size ?? 10), 1), 20)
+  const param = JSON.stringify({
+    uid: '', keyword, type: ['cmsArticleWebOld'], client: 'web', clientType: 'web', clientVersion: 'curr',
+    param: { cmsArticleWebOld: { searchScope: 'default', sort: 'default', pageIndex: 1, pageSize: size, preTag: '', postTag: '' } },
+  })
+  const text = await httpGetText('https://search-api-web.eastmoney.com/search/jsonp', { cb: 'x', param }, opts(ctx, 'https://so.eastmoney.com/'))
+  const m = text.match(/^[^(]*\(([\s\S]*)\);?\s*$/)
+  const json = JSON.parse(m ? m[1]! : text) as { result?: { cmsArticleWebOld?: Array<Record<string, unknown>> } }
+  const list = json.result?.cmsArticleWebOld ?? []
+  const rows = list.map((it) => ({
+    title: stripHtml(String(it.title ?? '')),
+    date: String(it.date ?? ''),
+    source: String(it.mediaName ?? ''),
+    url: it.url ? String(it.url) : undefined,
+    summary: stripHtml(String(it.content ?? '')).slice(0, 120),
+  }))
+  if (!rows.length) throw new Error('stock news: empty')
+  return { rows, data: rows, sampleKeys: list[0] ? Object.keys(list[0]) : [] }
+}
+
 export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'em_a_clist',
@@ -840,6 +893,20 @@ export const PROVIDERS: ProviderMeta[] = [
     endpointRef: 'fund.eastmoney.com pingzhongdata (净值走势序列)',
     sampleArgs: { code: '110022' },
     call: emFundKline,
+  },
+  {
+    id: 'em_news_flash',
+    capability: 'news_flash',
+    endpointRef: 'eastmoney 全球财经快讯 getFastNewsList (akshare stock_info_global_em)',
+    sampleArgs: { size: 5 },
+    call: emNewsFlash,
+  },
+  {
+    id: 'em_stock_news',
+    capability: 'stock_news',
+    endpointRef: 'eastmoney 搜索资讯 (akshare stock_news_em)',
+    sampleArgs: { code: '600519', size: 5 },
+    call: emStockNews,
   },
   {
     id: 'em_macro',

@@ -19,6 +19,9 @@ export type Capability =
   | 'fund_rank'
   // 宏观
   | 'macro'
+  // 快讯 / 新闻
+  | 'news_flash'
+  | 'stock_news'
   // 通用 / 搜索
   | 'symbol_search'
   | 'stock_info'
@@ -40,6 +43,8 @@ export const CAPABILITIES: Capability[] = [
   'fund_kline',
   'fund_rank',
   'macro',
+  'news_flash',
+  'stock_news',
   'symbol_search',
   'stock_info',
   'web_search',
@@ -62,6 +67,8 @@ export const DEFAULT_PROVIDER_ORDER: Record<Capability, string[]> = {
   fund_kline: ['em_fund_kline'],
   fund_rank: ['em_fund_rank'],
   macro: ['em_macro'],
+  news_flash: ['em_news_flash'],
+  stock_news: ['em_stock_news'],
   symbol_search: ['em_suggest'],
   stock_info: ['em_stock_info'],
   web_search: ['ddg_html', 'ddg_instant'],

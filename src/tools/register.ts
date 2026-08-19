@@ -234,6 +234,49 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
   }))
 
   ctx.tools.register(defineTool({
+    name: 'get_sector_board',
+    description: '行业板块涨跌（东财，对照 AkShare stock_board_industry_name_em）。order=desc 涨幅榜 / asc 跌幅榜。用于看“今天风险在哪个板块”。',
+    parameters: {
+      order: { type: 'string', enum: ['desc', 'asc'], description: 'desc 涨幅榜（默认）/ asc 跌幅榜' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getSectorBoard((args.order as 'desc' | 'asc') ?? 'desc', exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, count: res.data.length, sectors: res.data.slice(0, 20) })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_market_news',
+    description: '市场快讯电报（东财全球财经快讯，单一时间线，对照 AkShare stock_info_global_em）。用于了解“正在发生什么”。',
+    parameters: {
+      size: { type: 'number', description: '返回条数（1-50，默认 20）' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getNewsFlash(args.size ?? 20, exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, count: res.data.length, news: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_stock_news',
+    description: '个股相关新闻（东财搜索，对照 AkShare stock_news_em）。按持仓/自选代码拉，与仓位相关。',
+    parameters: {
+      code: { type: 'string', required: true, description: '代码或名称，如 600519 / 00700 / 腾讯' },
+      size: { type: 'number', description: '返回条数（1-20，默认 10）' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getStockNews(args.code, args.size ?? 10, exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, count: res.data.length, news: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'get_macro_china',
     description: '中国宏观经济指标（东财 datacenter，对照 AkShare macro_china_*）。series：cpi/ppi/pmi/gdp/money_supply。返回近 24 期与最新值。',
     parameters: {
