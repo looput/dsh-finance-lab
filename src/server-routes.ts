@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { AnalysisStore } from './analysis-store.js'
 import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
 import type { McpManager } from './mcp/manager.js'
@@ -18,6 +20,20 @@ interface WebServerLike {
     path: string
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
   }): () => void
+}
+
+interface ModelAgentLike {
+  followup(message: {
+    id: string
+    role: 'user'
+    content: [{ type: 'text'; text: string }]
+    source: { kind: 'user' }
+  }): void
+}
+
+interface ModelContextLike {
+  agent?: unknown
+  agents?: { roots(): unknown[] }
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -58,11 +74,58 @@ function snapshotItems(store: PortfolioStore): SnapshotItem[] {
   return items
 }
 
+function currentAgent(context: ModelContextLike): ModelAgentLike | undefined {
+  if (context.agent && typeof (context.agent as ModelAgentLike).followup === 'function') {
+    return context.agent as ModelAgentLike
+  }
+  const root = context.agents?.roots?.()[0] as ModelAgentLike | undefined
+  return root && typeof root.followup === 'function' ? root : undefined
+}
+
+function analysisPrompt(
+  code: string,
+  type: AssetType,
+  holding: { name?: string; quantity: number; avgCost: number } | undefined,
+): string {
+  const position = holding
+    ? `这是当前持仓，数量 ${holding.quantity}，平均成本 ${holding.avgCost}${holding.name ? `，名称 ${holding.name}` : ''}。`
+    : '这是当前自选标的，不要编造持仓数量或成本。'
+  const dataPlan = type === 'fund'
+    ? [
+      '先调用 get_fund_quote 获取最新净值、净值日期、基金经理、资产配置、持有人结构、规模变化、同类评价等画像数据。',
+      '再调用 get_fund_kline 获取历史净值走势，并调用 get_fund_rank 获取同类阶段排名。',
+      '补充 get_macro_china、get_market_news 和 web_search，说明宏观与消息环境；数据失败时明确标注。',
+    ]
+    : [
+      '先调用 get_realtime_quote、get_stock_info 和 get_stock_kline 获取行情、档案和历史 K 线。',
+      '再调用 calculate_technical_indicators（至少 MA5、MA20、MA60、MACD、RSI、KDJ）与 get_financial_indicators。',
+      '补充 get_stock_news、get_macro_china、get_market_overview 和 get_sector_board，说明消息、宏观和行业环境。',
+    ]
+  return [
+    `用户刚刚在 DSN Finance 面板主动点击了${type === 'fund' ? '基金' : '股票'} ${code}，请求生成一次完整中文解读。`,
+    position,
+    ...dataPlan,
+    '请基于工具返回的真实数据写出完整 Markdown 报告，不要编造缺失字段，也不要把研究参考写成确定性买卖建议。',
+    '报告至少包含：一句话结论、标的概况、近期表现、趋势/技术或净值分析、基本面或基金画像、消息与宏观、主要风险、后续观察清单、数据时间与数据源。',
+    `完成报告后必须调用 save_position_analysis，参数 code="${code}"、type="${type}"，将完整报告放入 report；不要只把报告留在普通回复中。`,
+  ].join('\n')
+}
+
 /**
  * Register the finance panel's HTTP API on ctx.webServer. Live quotes are computed on demand
  * and returned to the client (held in React state) — never written to plugin config.
  */
-export function registerRoutes(webServer: WebServerLike, finance: FinanceDataService, store: PortfolioStore, mcp?: McpManager, history?: HistoryStore, skills?: SkillManager): () => void {
+export function registerRoutes(
+  webServer: WebServerLike,
+  finance: FinanceDataService,
+  store: PortfolioStore,
+  mcp: McpManager | undefined,
+  history: HistoryStore | undefined,
+  skills: SkillManager | undefined,
+  analyses: AnalysisStore,
+  modelContext: ModelContextLike,
+): () => void {
+  const pendingAnalyses = new Map<string, number>()
   return webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -170,6 +233,45 @@ export function registerRoutes(webServer: WebServerLike, finance: FinanceDataSer
           }
           const r = await finance.getNewsFlash(25)
           return sendJson(res, 200, { ok: r.ok, news: r.ok && Array.isArray(r.data) ? r.data : [], error: r.ok ? undefined : r.error })
+        }
+        if (req.method === 'GET' && sub === '/analysis') {
+          const code = String(url.searchParams.get('code') ?? '').trim()
+          const type = url.searchParams.get('type') === 'fund' ? 'fund' : 'stock'
+          if (!code) return sendJson(res, 400, { ok: false, error: 'code is required' })
+          const analysis = analyses.get(code, type)
+          return sendJson(res, 200, { ok: true, found: Boolean(analysis), analysis })
+        }
+        if (req.method === 'POST' && sub === '/analysis') {
+          const body = await readBody(req)
+          const code = String(body.code ?? '').trim()
+          const type: AssetType = body.type === 'fund' ? 'fund' : 'stock'
+          const force = body.force === true
+          if (!code) return sendJson(res, 400, { ok: false, error: 'code is required' })
+          const key = `${type}:${code}`
+          const cached = analyses.get(code, type)
+          if (cached && !force) return sendJson(res, 200, { ok: true, status: 'cached', analysis: cached })
+          const pendingAt = pendingAnalyses.get(key)
+          if (pendingAt && Date.now() - pendingAt < 10 * 60_000) {
+            return sendJson(res, 202, { ok: true, status: 'generating', code, type })
+          }
+          const agent = currentAgent(modelContext)
+          if (!agent) {
+            return sendJson(res, 503, { ok: false, error: 'current Harness session is unavailable' })
+          }
+          const holding = store.get().holdings.find((h) => h.code === code && h.type === type)
+          pendingAnalyses.set(key, Date.now())
+          try {
+            agent.followup({
+              id: randomUUID(),
+              role: 'user',
+              content: [{ type: 'text', text: analysisPrompt(code, type, holding) }],
+              source: { kind: 'user' },
+            })
+            return sendJson(res, 202, { ok: true, status: 'generating', code, type })
+          } catch (err) {
+            pendingAnalyses.delete(key)
+            return sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
+          }
         }
         if (req.method === 'POST' && sub === '/mutate') {
           const body = await readBody(req)

@@ -6,6 +6,7 @@ data/mcp-secrets.json
 data/provider-policy.json
 data/skills-policy.json
 data/history/
+data/analysis-cache.json
 *.tmp
 *.tgz
 .DS_Store

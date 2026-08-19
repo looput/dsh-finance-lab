@@ -596,12 +596,26 @@ async function ddgInstant(args: Record<string, unknown>, ctx: ProviderContext) {
   return { rows: results, data: results, sampleKeys: Object.keys(results[0]!) }
 }
 
-// ---- 基金（东财 pingzhongdata：单位净值走势 + 名称，免费直连）----
-interface FundData { name?: string; navTrend: Array<{ date: string; nav: number }> }
+// ---- 基金（东财 pingzhongdata：净值走势 + 画像数据，免费直连）----
+interface FundData {
+  name?: string
+  navTrend: Array<{ date: string; nav: number }>
+  profile: Record<string, unknown>
+}
 const fundCache = new Map<string, { at: number; data: FundData }>()
 
 function fundCode(code: string): string {
   return String(code).replace(/\D/g, '').padStart(6, '0').slice(-6)
+}
+
+function parseFundVariable<T>(text: string, name: string): T | undefined {
+  const match = text.match(new RegExp(`${name}\\s*=\\s*([\\[{][\\s\\S]*?);`))
+  if (!match) return undefined
+  try {
+    return JSON.parse(match[1]!) as T
+  } catch {
+    return undefined
+  }
 }
 
 // Source: fund.eastmoney.com pingzhongdata (Data_netWorthTrend + fS_name).
@@ -621,7 +635,26 @@ async function emFundData(code: string, ctx: ProviderContext): Promise<FundData>
     }
   }
   if (!navTrend.length) throw new Error(`fund ${c}: empty nav trend`)
-  const data: FundData = { name: nameM?.[1] || undefined, navTrend }
+  const profile: Record<string, unknown> = {}
+  const profileKeys = [
+    'Data_assetAllocation',
+    'Data_buySedemption',
+    'Data_currentFundManager',
+    'Data_fluctuationScale',
+    'Data_holderStructure',
+    'Data_performanceEvaluation',
+    'Data_rateInSimilarPersent',
+    'Data_rateInSimilarType',
+  ]
+  for (const key of profileKeys) {
+    const value = parseFundVariable<unknown>(text, key)
+    if (value !== undefined) {
+      profile[key.slice('Data_'.length)] = Array.isArray(value) ? value.slice(-180) : value
+    }
+  }
+  const grandTotal = parseFundVariable<unknown[]>(text, 'Data_grandTotal')
+  if (grandTotal) profile.grandTotal = grandTotal.slice(-180)
+  const data: FundData = { name: nameM?.[1] || undefined, navTrend, profile }
   fundCache.set(c, { at: Date.now(), data })
   return data
 }
@@ -637,7 +670,7 @@ async function emFundQuote(args: Record<string, unknown>, ctx: ProviderContext) 
     price: last.nav,
     change: prev ? Number((last.nav - prev.nav).toFixed(4)) : undefined,
     changePercent: prev && prev.nav ? Number((((last.nav - prev.nav) / prev.nav) * 100).toFixed(2)) : undefined,
-    raw: { navDate: last.date },
+    raw: { navDate: last.date, profile: fd.profile },
   }
   return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
 }
