@@ -21,7 +21,7 @@ interface ModelAgentLike {
     id: string
     role: 'user'
     content: [{ type: 'text'; text: string }]
-    source: { kind: 'plugin'; plugin: string }
+    source: { kind: 'user' }
   }): void
 }
 
@@ -202,7 +202,7 @@ export function registerRoutes(
               id: randomUUID(),
               role: 'user',
               content: [{ type: 'text', text: analysisPrompt(code, type, holding) }],
-              source: { kind: 'plugin', plugin: 'dsn-finance' },
+              source: { kind: 'user' },
             })
             return sendJson(res, 202, { ok: true, status: 'generating', code, type })
           } catch (err) {
