@@ -115,6 +115,7 @@ npx @deepseek-ai/dsh web --patch ./cordis.dev.yml
 | `httpTimeoutMs` | `30000` | 单次请求超时 |
 | `probeReportPath` | `data/probe-report.json` | provider 探测报告 |
 | `portfolioPath` | `data/portfolio.json` | 本地持仓/自选文件 |
+| `mcpSources` | 预置 妙想 / 盈米 | 外部 MCP 数据源列表（见「多来源数据」） |
 | `panelOpen` | 未设置 | 是否打开金融面板 |
 | `panelDocked` | 未设置 | 是否默认停靠为侧栏页 |
 
@@ -139,10 +140,28 @@ npm run test:avail -- --group us
 - provider 会按 capability 独立降级。公开源并不承诺稳定性或完整覆盖，返回结果应结合时间、市场状态和来源健康度解读。
 - 本项目用于研究和组合记录，不构成投资建议；不连接券商，也不执行下单。
 
+## 多来源数据（MCP）
+
+除公开免费源外，可通过 `mcpSources` 接入需要凭证的外部数据源，其工具会被桥接进模型工具集，并显示在金融面板「接口」标签页。支持三类：
+
+| kind | 说明 | 桥接后的工具名 |
+| --- | --- | --- |
+| `mcp-http` | Streamable HTTP MCP Server | `mcp__<name>__*` |
+| `mcp-stdio` | 子进程 stdio MCP Server | `mcp__<name>__*` |
+| `cli` | 遵循 `<command> mcp list/schema/call` 约定的 CLI | `<name>_list` / `_schema` / `_call` |
+
+默认预置两个（需自备 token）：
+
+- **妙想数据**（`mx`，`mcp-http`，东方财富）：A股/港股/美股/基金/债券/指数板块/宏观/新闻/公告的自然语言查询。
+- **盈米**（`yingmi`，`cli`）：基金详情、风险与资产配置等能力，依赖全局安装的 `yingmi-skill-cli`。
+
+Token 解析优先级：环境变量（`apiKeyEnv`，如 `EM_API_KEY`）→ 本地 `data/mcp-secrets.json`（不提交，见 `data/mcp-secrets.example.json`）→ 配置内联 `apiKey`（可在设置面板填写）。改动 token 后重启生效。
+
 ## 项目结构
 
 ```text
 src/                  插件服务、provider、模型工具和金融面板
+src/mcp/              外部 MCP 数据源桥接（妙想 HTTP / 盈米 CLI）
 skills/               财务分析、组合、策略、风控与研究团队 playbook
 scripts/              provider 探测、可用性测试和本地 Web 启动脚本
 cordis.patch.yml      Harness 插件注册与默认配置
