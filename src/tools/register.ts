@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import '@deepseek-ai/dsh-tools'
+import type { AnalysisStore } from '../analysis-store.js'
 import type { FinanceDataService } from '../data/service.js'
 import type { PortfolioStore } from '../store.js'
 import type { AssetType } from '../types.js'
@@ -19,7 +20,7 @@ const jsonOut = {
   render: (_args: unknown, value: unknown) => text(JSON.stringify(value, null, 2)),
 }
 
-export function registerTools(ctx: Context, finance: FinanceDataService, store: PortfolioStore) {
+export function registerTools(ctx: Context, finance: FinanceDataService, store: PortfolioStore, analyses: AnalysisStore) {
   ctx.tools.register(defineTool({
     name: 'probe_finance_sources',
     description: '逐个探测公开行情 HTTP 端点健康状态（串行、有间隔）。公开源不稳定时应先运行本工具。',
@@ -505,6 +506,30 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
     output: jsonOut,
     async execute(_args, exec) {
       return asJson(await finance.analyzePortfolio(exec.signal))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'save_position_analysis',
+    description: '保存主动解读请求生成的股票/基金分析报告。只有在完成数据收集并写出完整中文报告后调用；报告会缓存到本地。',
+    parameters: {
+      code: { type: 'string', required: true, description: '股票或基金代码' },
+      type: { type: 'string', required: true, enum: ['stock', 'fund'], description: '资产类型' },
+      report: { type: 'string', required: true, description: '完整中文 Markdown 解读报告' },
+      dataAsOf: { type: 'string', description: '报告使用的最新数据时间' },
+    },
+    output: jsonOut,
+    async execute(args) {
+      const code = String(args.code ?? '').trim()
+      const report = String(args.report ?? '').trim()
+      if (!code || !report) return asJson({ ok: false, error: 'code and report are required' })
+      const analysis = await analyses.set({
+        code,
+        type: (args.type === 'fund' ? 'fund' : 'stock') as AssetType,
+        report,
+        dataAsOf: args.dataAsOf ? String(args.dataAsOf) : undefined,
+      })
+      return asJson({ ok: true, code: analysis.code, type: analysis.type, generatedAt: analysis.generatedAt })
     },
   }))
 }
