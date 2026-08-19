@@ -17,7 +17,7 @@ import { registerRoutes } from './server-routes.js'
 import { createDdgSearchProvider } from './web-ddg.js'
 
 export const name = pluginName
-export const inject = ['tools', 'systemPrompt', 'web', 'webServer']
+export const inject = ['tools', 'systemPrompt', 'web', 'webServer', 'agents']
 
 export { Config }
 export const FINANCE_NS = settingsNamespace('dsn-finance')
