@@ -560,6 +560,63 @@ function NewsView(props: { active: boolean; data: LiveData; quoteBy: Map<string,
       h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财全球财经快讯（对照 AkShare stock_info_global_em）')))
 }
 
+// ---- 数据源 tab (per-capability provider selection) ----
+const CAP_LABEL: Record<string, string> = {
+  stock_list: 'A股列表', quote: 'A股行情', kline: 'A股K线', indices: '指数概览', financials: '财务指标', sectors: '行业板块',
+  hk_quote: '港股行情', hk_kline: '港股K线', hk_list: '港股列表', us_quote: '美股行情', us_kline: '美股K线',
+  fund_quote: '基金净值', fund_kline: '基金走势', fund_rank: '基金排行', macro: '宏观', news_flash: '市场快讯',
+  stock_news: '个股新闻', symbol_search: '代码解析', stock_info: '个股档案', web_search: '网页搜索',
+}
+interface CapProvider { id: string; source: string; endpointRef: string; ok?: boolean; selected: boolean }
+interface CapCatalog { capability: string; selected: string[]; hasPolicy: boolean; providers: CapProvider[] }
+
+function SourcesView() {
+  const [catalog, setCatalog] = useState<CapCatalog[]>([])
+  const [sel, setSel] = useState<Record<string, string[]>>({})
+  const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState('')
+  const apply = (cat: CapCatalog[]) => {
+    setCatalog(cat)
+    const s: Record<string, string[]> = {}
+    for (const c of cat) s[c.capability] = c.providers.filter((p) => p.selected).map((p) => p.id)
+    setSel(s)
+  }
+  useEffect(() => { void apiGet<{ catalog: CapCatalog[] }>('/providers').then((r) => apply(r.catalog ?? [])).catch(() => { /* */ }) }, [])
+  const toggle = (cap: string, id: string) => setSel((s) => {
+    const cur = new Set(s[cap] ?? [])
+    if (cur.has(id)) cur.delete(id); else cur.add(id)
+    const ordered = (catalog.find((c) => c.capability === cap)?.providers ?? []).filter((p) => cur.has(p.id)).map((p) => p.id)
+    return { ...s, [cap]: ordered }
+  })
+  const save = async (policy: Record<string, string[]>) => {
+    setBusy(true); setHint('')
+    try { const r = await apiPost<{ ok: boolean; catalog: CapCatalog[] }>('/providers', { policy }); if (r.ok) { apply(r.catalog ?? []); setHint('已保存并即时生效') } }
+    catch { setHint('保存失败') } finally { setBusy(false) }
+  }
+  const multi = catalog.filter((c) => c.providers.length > 1)
+  const single = catalog.filter((c) => c.providers.length <= 1)
+  const chip = (cap: string, p: CapProvider) => {
+    const on = (sel[cap] ?? []).includes(p.id)
+    return h('button', {
+      key: p.id, title: p.endpointRef, onClick: () => toggle(cap, p.id),
+      style: { ...S.btn, padding: '2px 8px', display: 'inline-flex', alignItems: 'center', gap: 5, background: on ? BRAND : S.btn.background, color: on ? '#fff' : S.btn.color },
+    }, p.ok === false ? h('span', { style: { width: 6, height: 6, borderRadius: 999, background: UP } }) : (p.ok ? h('span', { style: { width: 6, height: 6, borderRadius: 999, background: DOWN } }) : null), p.source)
+  }
+  const capRow = (c: CapCatalog) => h('div', { key: c.capability, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' } },
+    h('span', { style: { width: 76, flex: '0 0 auto', fontWeight: 500 } }, CAP_LABEL[c.capability] ?? c.capability),
+    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 } }, c.providers.map((p) => chip(c.capability, p))))
+  return h('div', { style: S.section },
+    h('div', { style: S.title }, '数据源选择',
+      h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, disabled: busy, onClick: () => void save(sel) }, busy ? '…' : '保存'),
+      h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: busy, title: '清空自定义，回到探测顺序', onClick: () => void save({}) }, '重置')),
+    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, '多来源能力（可多选/切换优先级）'),
+    multi.map(capRow),
+    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, '单一来源能力（可启用/停用）'),
+    single.map(capRow),
+    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6 } }, '绿点=探测可用，红点=探测失败；选择按钮顺序即调用优先级。妙想/盈米在「接口」页作为整体数据源开关。'))
+}
+
 // ---- 接口 tab ----
 interface McpSource { name: string; kind: string; label: string; enabled: boolean; tokenPresent: boolean; state: string; detail?: string; toolCount?: number }
 const MCP_STATE_LABEL: Record<string, string> = { ready: '已接入', 'no-token': '缺少 token', disabled: '已停用', error: '错误' }
@@ -624,7 +681,8 @@ function HealthView(props: { health: LiveData['health'] }) {
 
 const TABS: Array<{ id: string; label: string }> = [
   { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
-  { id: 'funds', label: '基金' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' }, { id: 'health', label: '接口' },
+  { id: 'funds', label: '基金' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
+  { id: 'sources', label: '数据源' }, { id: 'health', label: '接口' },
 ]
 
 function findShellFrame(): HTMLElement | null {
@@ -694,6 +752,7 @@ function PanelBody(props: { onClose: () => void; docked: boolean; onToggleDock: 
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
+      tab === 'sources' ? h(SourcesView, null) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))
 }
 

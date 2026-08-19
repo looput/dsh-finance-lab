@@ -92,6 +92,15 @@ export class FinanceDataService {
     return this.registry.getHealth()
   }
 
+  getProviderCatalog() {
+    return this.registry.getCatalog()
+  }
+
+  async setProviderPolicy(policy: Record<string, string[]>) {
+    await this.registry.setPolicy(policy as never)
+    return this.registry.getCatalog()
+  }
+
   async probe(signal?: AbortSignal) {
     return this.registry.probeAll(undefined, signal)
   }

@@ -72,6 +72,15 @@ export function registerRoutes(webServer: WebServerLike, finance: FinanceDataSer
         if (req.method === 'GET' && sub === '/mcp') {
           return sendJson(res, 200, { sources: mcp?.status() ?? [] })
         }
+        if (req.method === 'GET' && sub === '/providers') {
+          return sendJson(res, 200, { catalog: finance.getProviderCatalog() })
+        }
+        if (req.method === 'POST' && sub === '/providers') {
+          const body = await readBody(req)
+          const policy = (body.policy ?? {}) as Record<string, string[]>
+          const catalog = await finance.setProviderPolicy(policy)
+          return sendJson(res, 200, { ok: true, catalog })
+        }
         if (req.method === 'POST' && sub === '/mcp/token') {
           if (!mcp) return sendJson(res, 400, { ok: false, error: 'mcp disabled' })
           const body = await readBody(req)

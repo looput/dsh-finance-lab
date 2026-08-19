@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
   CAPABILITIES,
@@ -12,6 +12,22 @@ import {
 import { RateLimiter, TtlCache } from './cache.js'
 import { PROVIDER_BY_ID, PROVIDERS } from './providers.js'
 
+/** Human-facing data-source family, derived from the provider id prefix. */
+function sourceFamily(id: string): string {
+  if (id.startsWith('em_')) return '东财'
+  if (id.startsWith('tx_')) return '腾讯'
+  if (id.startsWith('yahoo_')) return 'Yahoo'
+  if (id.startsWith('ddg_')) return 'DuckDuckGo'
+  return '其他'
+}
+
+export interface CapabilityCatalog {
+  capability: Capability
+  selected: string[]
+  hasPolicy: boolean
+  providers: Array<{ id: string; source: string; endpointRef: string; ok?: boolean; selected: boolean }>
+}
+
 export interface RegistryOptions {
   cacheTtlSec: number
   requestGapMs: number
@@ -22,6 +38,8 @@ export interface RegistryOptions {
 
 export class ProviderRegistry {
   private providerOrder: Record<Capability, string[]> = structuredClone(DEFAULT_PROVIDER_ORDER)
+  /** User-selected per-capability provider allowlist/order; authoritative over probe order. */
+  private policy: Partial<Record<Capability, string[]>> = {}
   private health: ProbeResult[] = []
   private probedAt?: string
   private readonly cache: TtlCache
@@ -30,6 +48,59 @@ export class ProviderRegistry {
   constructor(private readonly options: RegistryOptions) {
     this.cache = new TtlCache(options.cacheTtlSec * 1000)
     this.limiter = new RateLimiter(options.requestGapMs)
+  }
+
+  private get policyPath(): string {
+    return path.join(this.options.packageRoot, 'data/provider-policy.json')
+  }
+
+  /** Providers actually tried for a capability: user policy wins, else probe/default order. */
+  private effectiveOrder(capability: Capability): string[] {
+    return this.policy[capability] ?? this.providerOrder[capability] ?? DEFAULT_PROVIDER_ORDER[capability]
+  }
+
+  async loadPolicy(): Promise<void> {
+    try {
+      const raw = await readFile(this.policyPath, 'utf8')
+      await this.setPolicy(JSON.parse(raw) as Partial<Record<Capability, string[]>>, false)
+    } catch { /* no policy file */ }
+  }
+
+  /** Set the per-capability selection (invalid ids dropped) and optionally persist it. */
+  async setPolicy(policy: Partial<Record<Capability, string[]>>, persist = true): Promise<void> {
+    const clean: Partial<Record<Capability, string[]>> = {}
+    for (const cap of CAPABILITIES) {
+      const sel = policy[cap]
+      if (!sel) continue
+      const valid = PROVIDERS.filter((p) => p.capability === cap).map((p) => p.id)
+      clean[cap] = sel.filter((id) => valid.includes(id))
+    }
+    this.policy = clean
+    this.cache.clear()
+    if (persist) {
+      await mkdir(path.dirname(this.policyPath), { recursive: true })
+      await writeFile(this.policyPath, JSON.stringify(clean, null, 2) + '\n', 'utf8')
+    }
+  }
+
+  /** Per-capability provider catalog with source family, health and current selection. */
+  getCatalog(): CapabilityCatalog[] {
+    return CAPABILITIES.map((cap) => {
+      const order = this.effectiveOrder(cap)
+      const healthBy = new Map(this.health.filter((r) => r.capability === cap).map((r) => [r.provider, r.ok]))
+      return {
+        capability: cap,
+        selected: order,
+        hasPolicy: !!this.policy[cap],
+        providers: PROVIDERS.filter((p) => p.capability === cap).map((p) => ({
+          id: p.id,
+          source: sourceFamily(p.id),
+          endpointRef: p.endpointRef,
+          ok: healthBy.get(p.id),
+          selected: order.includes(p.id),
+        })),
+      }
+    })
   }
 
   async loadProbeReport(): Promise<void> {
@@ -86,7 +157,7 @@ export class ProviderRegistry {
     const cached = this.cache.get<ProviderCallResult<T>>(cacheKey)
     if (cached) return cached
 
-    const order = this.providerOrder[capability] ?? DEFAULT_PROVIDER_ORDER[capability]
+    const order = this.effectiveOrder(capability)
     const attempts: Array<{ provider: string; error: string }> = []
     const ctx: ProviderContext = { timeoutMs: this.options.httpTimeoutMs, signal }
 

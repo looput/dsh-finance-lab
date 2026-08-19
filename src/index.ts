@@ -40,6 +40,7 @@ export function apply(ctx: Context, config: Config) {
     packageRoot,
   })
   void registry.loadProbeReport()
+  void registry.loadPolicy()
 
   const portfolioPath = path.isAbsolute(config.portfolioPath)
     ? config.portfolioPath
