@@ -101,6 +101,10 @@ export class FinanceDataService {
     return this.registry.getCatalog()
   }
 
+  isPublicEnabled() {
+    return this.registry.isPublicEnabled()
+  }
+
   async setPublicEnabled(enabled: boolean) {
     await this.registry.setPublicEnabled(enabled)
     return this.registry.getCatalog()

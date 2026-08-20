@@ -61,10 +61,16 @@ export class ProviderRegistry {
     return path.join(this.options.packageRoot, 'data/provider-policy.json')
   }
 
-  /** Providers actually tried for a capability: none when public disabled; else user policy, then probe/default. */
+  /**
+   * Providers actually tried for a capability (data path — used by the panel AND tools).
+   * `publicEnabled` gates only the model's tool registration, never data fetching, so the
+   * panel keeps updating even when public tools are switched off. A user policy is a soft
+   * preference: an empty selection falls back to the default order so panel data never breaks.
+   */
   private effectiveOrder(capability: Capability): string[] {
-    if (!this.publicEnabled) return []
-    return this.policy[capability] ?? this.providerOrder[capability] ?? DEFAULT_PROVIDER_ORDER[capability]
+    const picked = this.policy[capability]
+    if (picked && picked.length) return picked
+    return this.providerOrder[capability] ?? DEFAULT_PROVIDER_ORDER[capability]
   }
 
   private async persistPolicy(): Promise<void> {
@@ -98,17 +104,20 @@ export class ProviderRegistry {
     if (persist) await this.persistPolicy()
   }
 
-  /** Enable/disable the whole public-provider family (e.g. "only 妙想"). */
+  isPublicEnabled(): boolean {
+    return this.publicEnabled
+  }
+
+  /** Toggle the "公开数据" source family. Gates the model's public tools only; panel data is unaffected. */
   async setPublicEnabled(enabled: boolean): Promise<void> {
     this.publicEnabled = enabled
-    this.cache.clear()
     await this.persistPolicy()
   }
 
   /** Per-capability provider catalog with source family, health and current selection. */
   getCatalog(): ProviderCatalog {
     const capabilities = CAPABILITIES.map((cap) => {
-      const order = this.publicEnabled ? (this.policy[cap] ?? this.providerOrder[cap] ?? DEFAULT_PROVIDER_ORDER[cap]) : []
+      const order = this.effectiveOrder(cap)
       const healthBy = new Map(this.health.filter((r) => r.capability === cap).map((r) => [r.provider, r.ok]))
       return {
         capability: cap,

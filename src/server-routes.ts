@@ -5,6 +5,7 @@ import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
 import type { McpManager } from './mcp/manager.js'
 import type { SkillManager } from './skills.js'
+import type { FinanceToolController } from './tools/register.js'
 import type { HistoryStore } from './history/store.js'
 import { syncHistory, type SymbolKind } from './history/sync.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
@@ -124,6 +125,7 @@ export function registerRoutes(
   skills: SkillManager | undefined,
   analyses: AnalysisStore,
   modelContext: ModelContextLike,
+  toolController?: FinanceToolController,
 ): () => void {
   const pendingAnalyses = new Map<string, number>()
   return webServer.register({
@@ -141,7 +143,7 @@ export function registerRoutes(
           return sendJson(res, 200, { sources: mcp?.status() ?? [] })
         }
         if (req.method === 'GET' && sub === '/providers') {
-          return sendJson(res, 200, finance.getProviderCatalog())
+          return sendJson(res, 200, { ...finance.getProviderCatalog(), dataToolCount: toolController?.activeDataToolCount() ?? 0 })
         }
         if (req.method === 'GET' && sub === '/info') {
           const code = url.searchParams.get('code') ?? ''
@@ -189,7 +191,10 @@ export function registerRoutes(
         }
         if (req.method === 'POST' && sub === '/providers/public') {
           const body = await readBody(req)
-          return sendJson(res, 200, { ok: true, ...(await finance.setPublicEnabled(body.enabled !== false)) })
+          const enabled = body.enabled !== false
+          const catalog = await finance.setPublicEnabled(enabled)
+          toolController?.setDataToolsEnabled(enabled) // sync the model's public tool list
+          return sendJson(res, 200, { ok: true, ...catalog, dataToolCount: toolController?.activeDataToolCount() ?? 0 })
         }
         if (mcp && req.method === 'POST' && sub === '/mcp/source') {
           const body = await readBody(req)

@@ -786,23 +786,25 @@ interface McpSourceLite { name: string; label: string; enabled: boolean; state: 
 
 function SourcesView() {
   const [pub, setPub] = useState(true)
+  const [dataTools, setDataTools] = useState(0)
   const [catalog, setCatalog] = useState<CapCatalog[]>([])
   const [sel, setSel] = useState<Record<string, string[]>>({})
   const [srcs, setSrcs] = useState<McpSourceLite[]>([])
   const [busy, setBusy] = useState(false)
   const [hint, setHint] = useState('')
-  const applyCat = (c: { publicEnabled: boolean; capabilities: CapCatalog[] }) => {
+  const applyCat = (c: { publicEnabled: boolean; capabilities: CapCatalog[]; dataToolCount?: number }) => {
     setPub(c.publicEnabled)
+    if (typeof c.dataToolCount === 'number') setDataTools(c.dataToolCount)
     setCatalog(c.capabilities ?? [])
     const s: Record<string, string[]> = {}
     for (const x of c.capabilities ?? []) s[x.capability] = x.providers.filter((p) => p.selected).map((p) => p.id)
     setSel(s)
   }
   const loadSrcs = () => apiGet<{ sources: McpSourceLite[] }>('/mcp').then((r) => setSrcs(r.sources ?? [])).catch(() => { /* */ })
-  useEffect(() => { void apiGet<{ publicEnabled: boolean; capabilities: CapCatalog[] }>('/providers').then(applyCat).catch(() => { /* */ }); void loadSrcs() }, [])
+  useEffect(() => { void apiGet<{ publicEnabled: boolean; capabilities: CapCatalog[]; dataToolCount?: number }>('/providers').then(applyCat).catch(() => { /* */ }); void loadSrcs() }, [])
   const togglePublic = async () => {
     setBusy(true); setHint('')
-    try { const r = await apiPost<{ ok: boolean; publicEnabled: boolean; capabilities: CapCatalog[] }>('/providers/public', { enabled: !pub }); if (r.ok) applyCat(r) } finally { setBusy(false) }
+    try { const r = await apiPost<{ ok: boolean; publicEnabled: boolean; capabilities: CapCatalog[]; dataToolCount?: number }>('/providers/public', { enabled: !pub }); if (r.ok) applyCat(r) } finally { setBusy(false) }
   }
   const toggleSrc = async (name: string, enabled: boolean) => {
     setBusy(true); setHint('')
@@ -837,9 +839,9 @@ function SourcesView() {
   return h('div', { style: S.section },
     h('div', { style: S.title }, '数据来源'),
     h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-      srcBtn('公开数据', pub, () => void togglePublic(), '东财/腾讯/Yahoo/DDG'),
+      srcBtn('公开数据', pub, () => void togglePublic(), pub ? `${dataTools}工具` : '东财/腾讯/Yahoo/DDG'),
       ...srcs.map((s) => srcBtn(s.label || s.name, s.enabled, () => void toggleSrc(s.name, !s.enabled), s.enabled ? (s.state === 'ready' ? `${s.toolCount ?? 0}工具` : (MCP_STATE_LABEL[s.state] ?? s.state)) : undefined))),
-    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 4 } }, '可只用某一来源或混用（如只开妙想）；开关即时生效。公开数据可在下方按能力细选 provider。'),
+    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 4 } }, '开关控制“给模型的工具”（即时同步），不影响面板数据——面板始终更新。可只用某一来源或混用。'),
     pub ? h('div', { style: { marginTop: 6 } },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
         h('div', { style: { ...S.muted, fontWeight: 600, flex: 1 } }, '公开数据 · 按能力选择 provider'),
@@ -851,7 +853,7 @@ function SourcesView() {
       h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, '单一来源能力（启用/停用）'),
       single.map(capRow),
       h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6 } }, '绿点=探测可用，红点=探测失败。'),
-    ) : h('div', { style: { ...S.muted, marginTop: 8 } }, '公开数据已关闭，插件行情/K线等能力仅使用所选外部来源（妙想/盈米工具由模型调用）。'))
+    ) : h('div', { style: { ...S.muted, marginTop: 8 } }, '公开数据已关闭：模型不再获得公开行情/K线等工具（改用所选外部来源）；但金融面板数据仍持续更新。'))
 }
 
 // ---- 接口 tab ----

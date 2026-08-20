@@ -43,7 +43,6 @@ export function apply(ctx: Context, config: Config) {
     packageRoot,
   })
   void registry.loadProbeReport()
-  void registry.loadPolicy()
 
   const portfolioPath = path.isAbsolute(config.portfolioPath)
     ? config.portfolioPath
@@ -62,12 +61,14 @@ export function apply(ctx: Context, config: Config) {
   const history = new HistoryStore(path.join(packageRoot, 'data/history'))
 
   ctx.provide('financeData', finance)
-  registerTools(ctx, finance, store, analyses)
+  const toolController = registerTools(ctx, finance, store, analyses)
+  // Apply the persisted "公开数据" switch to the model's tool list once policy is loaded.
+  void registry.loadPolicy().then(() => toolController.setDataToolsEnabled(registry.isPublicEnabled()))
   registerHistoryTools(ctx, finance, history)
   const yingmiCommand = (current().mcpSources ?? []).find((s) => s.kind === 'cli' && s.enabled)?.command || undefined
   const skills = registerSkills(ctx, packageRoot, yingmiCommand)
   const mcp = registerMcpSources(ctx, current().mcpSources ?? [], packageRoot)
-  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, ctx)
+  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, ctx, toolController)
 
   // Replace the default (key-gated) web search with free meta search (Python ddgs → Brave/Bing/Google).
   ctx.web.registerSearchProvider(createWebSearchProvider((q, signal) => finance.webSearch(q, signal)))
