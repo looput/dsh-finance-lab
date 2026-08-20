@@ -164,6 +164,12 @@ export interface LiveQuote {
   /** Recent closing prices for the mini K-line sparkline (oldest→newest). */
   spark?: number[]
   error?: string
+  /** 数据截至时间（用于基金 T+1 诚实标签、美股盘前/盘后） */
+  asOf?: string
+  /** 市场状态：如 交易中/已收盘/盘前/盘后/T+1 */
+  status?: string
+  /** 今日贡献度（仅持仓归因时由服务端计算，单位 %） */
+  contribution?: number
 }
 
 /** One index overview row for the market header. */

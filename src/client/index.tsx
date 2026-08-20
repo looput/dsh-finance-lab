@@ -185,6 +185,9 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
   const sparkColor = q.spark && q.spark.length >= 2 ? (q.spark[q.spark.length - 1]! >= q.spark[0]! ? UP : DOWN) : colorOf(pct)
   const digits = q.type === 'fund' ? 4 : 2
   const hasPrice = typeof q.price === 'number' && Number.isFinite(q.price)
+  const isFund = q.type === 'fund'
+  const statusLabel = q.status || (isFund ? 'T+1' : undefined)
+  const alert = typeof pct === 'number' && Math.abs(pct) >= 5 ? (pct >= 0 ? '🔥' : '⚠️') : ''
   const priceNode = (() => {
     if (hasPrice) return fmt(q.price, digits)
     if (props.loading) return h('span', { style: S.muted }, '加载中')
@@ -194,12 +197,19 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
   })()
   return h('div', { style: { ...S.row, cursor: props.onClick ? 'pointer' : 'default' }, onClick: props.onClick },
     h('div', { style: { flex: 1, minWidth: 0 } },
-      h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, q.name || q.code),
-      h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center' } },
-        h('span', { style: S.tag }, q.market || (q.type === 'fund' ? '基金' : '股票')), q.code)),
+      h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'flex', alignItems: 'center', gap: 4 } },
+        h('span', null, q.name || q.code), alert ? h('span', { title: '今日波动≥5% 值得关注', style: { fontSize: 12 } }, alert) : null),
+      h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+        h('span', { style: S.tag }, q.market || (isFund ? '基金' : '股票')), q.code,
+        statusLabel ? h('span', { style: { ...S.tag, background: isFund ? '#eef6ff' : S.tag.background, color: isFund ? '#3a6bba' : S.tag.color } }, statusLabel) : null,
+        isFund && q.asOf ? h('span', { style: { fontSize: 10, color: V('--dsw-alias-label-tertiary', '#999') } }, `截至 ${q.asOf.slice(0,10)}`) : null)),
     h(Sparkline, { data: q.spark, color: sparkColor }),
-    h('div', { style: { width: 62, textAlign: 'right' } }, priceNode),
-    h('div', { style: { width: 54, textAlign: 'right', color: colorOf(pct) } }, hasPrice ? pctStr(pct) : '—'),
+    h('div', { style: { width: 62, textAlign: 'right', display: 'flex', flexDirection: 'column', gap: 0 } },
+      h('span', null, priceNode),
+      isFund && hasPrice ? h('span', { style: { fontSize: 10, ...S.muted } }, 'T+1净值') : null),
+    h('div', { style: { width: 54, textAlign: 'right', color: colorOf(pct), display: 'flex', flexDirection: 'column', gap: 0 } },
+      hasPrice ? h('span', null, pctStr(pct)) : h('span', null, '—'),
+      typeof q.contribution === 'number' && q.contribution !== 0 ? h('span', { style: { fontSize: 10, color: V('--dsw-alias-label-tertiary', '#999') } }, `贡献 ${q.contribution > 0 ? '+' : ''}${q.contribution.toFixed(2)}%`) : null),
     props.onRemove ? h('button', {
       style: { ...S.btn, padding: '2px 6px' },
       title: '移除',
@@ -276,6 +286,7 @@ function useLive() {
 
   const loadLive = useCallback(async () => {
     if (inflight.current) { again.current = true; return }
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') { again.current = true; return }
     inflight.current = true
     setLoading(true)
     try {
@@ -293,18 +304,33 @@ function useLive() {
   }, [])
 
   const mutate = useCallback(async (action: string, payload: Record<string, unknown>) => {
+    // 乐观更新：先本地改，再 sync
+    const optimistic = (prev: LiveData) => {
+      const next = { ...prev, holdings: [...prev.holdings], watchlist: [...prev.watchlist] }
+      if (action === 'addWatch' && payload.code) {
+        const c = String(payload.code); const t = (payload.type as AssetType) ?? 'stock'
+        if (!next.watchlist.some(w=> w.code===c && w.type===t)) next.watchlist.push({ code: c, type: t, name: payload.name as string | undefined })
+      }
+      if (action === 'removeWatch' && payload.code) {
+        next.watchlist = next.watchlist.filter(w=> !(w.code===String(payload.code) && (!payload.type || w.type===payload.type)))
+      }
+      return next
+    }
+    setData(optimistic)
     setLoading(true)
     try {
       const r = await apiPost<{ ok: boolean; holdings?: PortfolioHolding[]; watchlist?: WatchItem[] }>('/mutate', { action, payload })
       if (r.ok) setData((d) => ({ ...d, holdings: r.holdings ?? d.holdings, watchlist: r.watchlist ?? d.watchlist }))
-    } catch { /* keep prior */ }
+    } catch { /* keep optimistic */ }
     void loadLive()
   }, [loadLive])
 
   useEffect(() => {
     void loadState().then(loadLive)
     const t = window.setInterval(loadLive, 60_000)
-    return () => window.clearInterval(t)
+    const onVis = () => { if (document.visibilityState === 'visible') void loadLive() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { window.clearInterval(t); document.removeEventListener('visibilitychange', onVis) }
   }, [loadState, loadLive])
 
   return { data, loading, loadLive, mutate }
@@ -407,7 +433,7 @@ function QuotesView(props: {
       h(SearchAdd, { onAdd: (code, type) => mutate('addWatch', { code, type }) })))
 }
 
-// ---- 持仓 tab ----
+// ---- 持仓 tab · 场景化重塑：归因 + 健康度人话 + 目标进度 + 模拟沙盘 ----
 function HoldingsView(props: {
   data: LiveData
   quoteBy: Map<string, LiveQuote>
@@ -419,6 +445,10 @@ function HoldingsView(props: {
   const [hQty, setHQty] = useState('100')
   const [hCost, setHCost] = useState('0')
   const [hType, setHType] = useState<AssetType>('stock')
+  const [goalTarget, setGoalTarget] = useState('500000')
+  const [sandbox, setSandbox] = useState(false)
+  const [sandboxW, setSandboxW] = useState<Record<string, number>>({})
+  // 基础盈亏
   const totalCost = data.holdings.reduce((s, hd) => s + hd.avgCost * hd.quantity, 0)
   const totalValue = data.holdings.reduce((s, hd) => {
     const p = quoteBy.get(keyOf(hd.code, hd.type))?.price
@@ -426,68 +456,199 @@ function HoldingsView(props: {
   }, 0)
   const pnl = totalValue - totalCost
   const pnlPct = totalCost ? (pnl / totalCost) * 100 : 0
-  // 配置 / 集中度（借鉴 dsh-finance 的 portfolio_risk 思路）
+  // 今日归因：并发后 quoteBy 已含 changePercent，用权重*涨跌算贡献
   const denom = totalValue > 0 ? totalValue : 1
   const valOf = (hd: PortfolioHolding) => {
     const p = quoteBy.get(keyOf(hd.code, hd.type))?.price
     return (typeof p === 'number' ? p : hd.avgCost) * hd.quantity
   }
   const byType = { stock: 0, fund: 0 }
+  const byMarket: Record<string, number> = {}
   const weights = data.holdings.map((hd) => {
     const w = (valOf(hd) / denom) * 100
     byType[hd.type] += w
-    return { name: quoteBy.get(keyOf(hd.code, hd.type))?.name || hd.name || hd.code, w }
+    const mkt = quoteBy.get(keyOf(hd.code, hd.type))?.market || (hd.type === 'fund' ? '基金' : 'A股')
+    byMarket[mkt] = (byMarket[mkt] ?? 0) + w
+    return { code: hd.code, type: hd.type, name: quoteBy.get(keyOf(hd.code, hd.type))?.name || hd.name || hd.code, w, q: quoteBy.get(keyOf(hd.code, hd.type)) }
   }).sort((a, b) => b.w - a.w)
   const top1 = weights[0]?.w ?? 0
   const top3 = weights.slice(0, 3).reduce((s, x) => s + x.w, 0)
+  const hhi = weights.reduce((s, x) => s + (x.w / 100) ** 2, 0)
+  // 人话健康度
+  const health = (() => {
+    if (!weights.length) return { label: '—', color: S.muted.color as string, advice: '添加持仓后生成健康度' }
+    if (top1 > 40 || hhi > 0.25) return { label: '集中偏高', color: UP, advice: `最大持仓 ${top1.toFixed(0)}% (HHI ${hhi.toFixed(2)}) 偏高，建议单一标的不超30%，可考虑分散` }
+    if (top1 > 30 || hhi > 0.18) return { label: '相对集中', color: '#d48806', advice: `前三占 ${top3.toFixed(0)}%，适度分散更稳健` }
+    return { label: '分散良好', color: DOWN, advice: `前三 ${top3.toFixed(0)}%，结构均衡` }
+  })()
+  // 今日贡献
+  const todayAttribution = weights.map(w => {
+    const cp = w.q?.changePercent
+    const contrib = typeof cp === 'number' ? (w.w * cp / 100) : 0
+    return { ...w, cp, contrib }
+  }).sort((a,b)=> b.contrib - a.contrib)
+  const todayPnL = todayAttribution.reduce((s, x) => {
+    const price = x.q?.price
+    const cp = x.cp
+    if (typeof price !== 'number' || typeof cp !== 'number' || !Number.isFinite(price) || !Number.isFinite(cp) || cp===0) return s
+    const hd = data.holdings.find(h=> h.code===x.code && h.type===x.type)
+    if (!hd) return s
+    const prev = price / (1 + cp/100)
+    return s + (price - prev) * hd.quantity
+  }, 0)
+  const todayReturn = totalValue ? (todayPnL/totalValue)*100 : 0
+  // 目标进度
+  const targetNum = Number(goalTarget) || 0
+  const progress = targetNum ? Math.min(100, (totalValue/targetNum)*100) : 0
   function addHolding() {
     const c = hCode.trim(); const q = Number(hQty); const av = Number(hCost)
     if (!c || !Number.isFinite(q) || !Number.isFinite(av)) return
     mutate('upsertHolding', { code: c, quantity: q, avgCost: av, type: hType }); setHCode('')
   }
-  return h('div', { style: S.section },
-    h('div', { style: S.title }, '持仓 · 盈亏'),
-    data.holdings.length === 0 ? h('div', { style: S.muted }, '暂无持仓') : data.holdings.map((hd) => {
-      const q = quoteBy.get(keyOf(hd.code, hd.type))
-      const price = q?.price
-      const hpnl = typeof price === 'number' ? (price - hd.avgCost) * hd.quantity : undefined
-      return h('div', {
-        key: `h-${hd.type}-${hd.code}`,
-        style: { ...S.row, cursor: 'pointer' },
-        onClick: () => props.onOpen({ code: hd.code, type: hd.type, name: q?.name || hd.name }),
-      },
-        h('div', { style: { flex: 1, minWidth: 0 } },
-          h('div', { style: { fontWeight: 500 } }, h('span', { style: S.tag }, hd.type === 'fund' ? '基' : '股'), ' ', q?.name || hd.name || hd.code),
-          h('div', { style: S.muted }, `${hd.code} · ${hd.quantity} @ ${fmt(hd.avgCost, hd.type === 'fund' ? 4 : 2)}`)),
-        h('div', { style: { width: 118, textAlign: 'right' } },
-          typeof hpnl === 'number'
-            ? h('span', { style: { color: colorOf(hpnl) } }, `${hpnl >= 0 ? '+' : ''}${hpnl.toFixed(0)}`)
-            : h('span', { style: S.muted }, `现价 ${fmt(price, hd.type === 'fund' ? 4 : 2)}`)),
-        h('button', {
-          style: { ...S.btn, padding: '2px 6px' },
-          onClick: (e: any) => { e.stopPropagation(); mutate('removeHolding', { code: hd.code, type: hd.type }) },
-        }, '删'))
-    }),
-    data.holdings.length ? h('div', { style: { ...S.row, fontWeight: 600 } },
-      h('div', { style: { flex: 1 } }, '合计'),
-      h('div', { style: { textAlign: 'right' } }, `市值 ${totalValue.toFixed(0)} · `,
-        h('span', { style: { color: colorOf(pnl) } }, `${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)} (${pctStr(pnlPct)})`))) : null,
-    data.holdings.length ? h('div', { style: { ...S.card, marginTop: 2 } },
-      h('div', { style: S.title }, '配置 · 集中度'),
-      h('div', { style: { display: 'flex', height: 8, borderRadius: 999, overflow: 'hidden', background: V('--dsw-alias-bg-module-platform', '#eef0f3') } },
-        byType.stock > 0 ? h('div', { style: { width: `${byType.stock}%`, background: BRAND } }) : null,
-        byType.fund > 0 ? h('div', { style: { width: `${byType.fund}%`, background: '#e0a53f' } }) : null),
-      h('div', { style: { display: 'flex', gap: 12, ...S.muted } },
+  const sandboxActive = sandbox && weights.length >= 2
+  const sandboxHhi = sandboxActive ? (() => {
+    const wMap = sandboxW
+    const ws = weights.map(x => wMap[`${x.type}:${x.code}`] ?? x.w)
+    const sum = ws.reduce((a,b)=>a+b,0) || 1
+    const norm = ws.map(v=> v/sum*100)
+    return norm.reduce((s,v)=> s + (v/100)**2, 0)
+  })() : hhi
+
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 14 } },
+    // 顶部：今日归因 + 总览
+    data.holdings.length ? h('div', { style: { ...S.card, background: V('--dsw-alias-bg-module-platform', '#f8f9fb'), border: `1px solid ${V('--dsw-alias-border-l2', '#eee')}` } },
+      h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+        h('span', { style: { fontWeight: 700, fontSize: 16 } }, `今日 ${todayReturn >=0 ? '+' : ''}${todayReturn.toFixed(2)}%`),
+        h('span', { style: { color: colorOf(todayPnL), fontWeight: 600 } }, `${todayPnL >=0 ? '+' : ''}${todayPnL.toFixed(0)} 元`),
+        h('span', { style: S.muted }, `总市值 ${totalValue.toFixed(0)} · 累计 ${pnl >=0 ? '+' : ''}${pnl.toFixed(0)} (${pctStr(pnlPct)})`)),
+      todayAttribution.length ? h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } },
+        `贡献榜：${todayAttribution.slice(0,2).map(x=> `${x.name} ${x.contrib >=0 ? '+' : ''}${x.contrib.toFixed(2)}%`).join(' ｜ ') || '—'}`,
+        todayAttribution.length >=2 ? ` ｜ 拖累：${todayAttribution.slice(-1)[0]!.name} ${todayAttribution.slice(-1)[0]!.contrib.toFixed(2)}%` : null,
+        h('span', { style: { marginLeft: 6, color: BRAND, cursor: 'pointer' }, onClick: ()=> {
+          const leader = todayAttribution[0]; if (leader) props.onOpen({ code: leader.code, type: leader.type, name: leader.name })
+        } }, '看归因→')
+      ) : null,
+    ) : null,
+
+    // 持仓列表：增加贡献度与异常点提示
+    h('div', { style: S.section },
+      h('div', { style: S.title }, '持仓 · 明细', h('span', { style: { ...S.muted, fontWeight: 400, marginLeft: 6 } }, `点击卡片生成AI解读`)),
+      data.holdings.length === 0 ? h('div', { style: { ...S.card, borderStyle: 'dashed' } },
+        h('div', { style: { fontWeight: 600 } }, '还没有持仓'),
+        h('div', { style: S.muted }, '试试直接发持仓截图，或在下方输入代码；也可说“把600519加100股成本30元”让模型帮你写。'),
+        h('div', { style: { ...S.muted, fontSize: 11 } }, '粘贴图片到对话输入框，或拖拽持仓Excel截图，模型会调用 import_holdings 写入。')
+      ) : todayAttribution.map((w) => {
+        const hd = data.holdings.find(h=> h.code===w.code && h.type===w.type)!
+        const q = w.q
+        const price = q?.price
+        const hpnl = typeof price === 'number' ? (price - hd.avgCost) * hd.quantity : undefined
+        const isAlert = typeof w.cp === 'number' && Math.abs(w.cp) >= 5
+        return h('div', {
+          key: `h-${w.type}-${w.code}`,
+          style: { ...S.row, cursor: 'pointer', background: isAlert ? 'rgba(209,64,63,0.06)' : undefined, borderRadius: isAlert ? 8 : 0, padding: isAlert ? '6px 6px' : '6px 0', borderTop: isAlert ? 'none' : S.row.borderTop },
+          onClick: () => props.onOpen({ code: w.code, type: w.type, name: w.name }),
+        },
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { style: { fontWeight: 500, display: 'flex', gap: 6, alignItems: 'center' } },
+              h('span', { style: S.tag }, w.type === 'fund' ? '基' : '股'),
+              h('span', { style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, w.name),
+              isAlert ? h('span', { style: { fontSize: 10, padding: '1px 5px', borderRadius: 999, background: UP, color: '#fff' } }, '波动') : null,
+              w.type==='fund' && q?.status ? h('span', { style: { ...S.tag, background: '#eef6ff', color: '#3a6bba' } }, q.status) : null),
+            h('div', { style: { ...S.muted, display: 'flex', gap: 8, flexWrap: 'wrap' } },
+              h('span', null, `${w.code} · ${hd.quantity} @ ${fmt(hd.avgCost, w.type === 'fund' ? 4 : 2)}`),
+              h('span', null, `权重 ${w.w.toFixed(1)}%`),
+              typeof w.cp === 'number' ? h('span', { style: { color: colorOf(w.cp) } }, `${pctStr(w.cp)} · 贡献 ${w.contrib >=0 ? '+' : ''}${w.contrib.toFixed(2)}%`) : null)),
+          h('div', { style: { width: 118, textAlign: 'right' } },
+            typeof hpnl === 'number'
+              ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 0, alignItems: 'flex-end' } },
+                h('span', { style: { color: colorOf(hpnl), fontWeight: 600 } }, `${hpnl >= 0 ? '+' : ''}${hpnl.toFixed(0)}`),
+                h('span', { style: { ...S.muted, fontSize: 11 } }, `现价 ${fmt(price, w.type === 'fund' ? 4 : 2)}`))
+              : h('span', { style: S.muted }, `现价 ${fmt(price, w.type === 'fund' ? 4 : 2)}`)),
+          h('button', {
+            style: { ...S.btn, padding: '2px 6px' },
+            onClick: (e: any) => { e.stopPropagation(); mutate('removeHolding', { code: w.code, type: w.type }) },
+          }, '删'))
+      }),
+      data.holdings.length ? h('div', { style: { ...S.row, fontWeight: 600 } },
+        h('div', { style: { flex: 1 } }, '合计'),
+        h('div', { style: { textAlign: 'right' } }, `市值 ${totalValue.toFixed(0)} · `,
+          h('span', { style: { color: colorOf(pnl) } }, `${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)} (${pctStr(pnlPct)})`))) : null,
+    ),
+
+    // 健康度人话翻译 + 模拟沙盘
+    data.holdings.length ? h('div', { style: S.card },
+      h('div', { style: S.title }, '健康度 · 人话解读',
+        h('span', { style: { marginLeft: 'auto', fontSize: 11, padding: '2px 8px', borderRadius: 999, background: health.color, color: '#fff' } }, health.label),
+        h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 6, background: sandbox ? BRAND : S.btn.background, color: sandbox ? '#fff' : S.btn.color }, onClick: ()=> setSandbox(!sandbox) }, sandbox ? '退出模拟' : '模拟调仓')),
+      h('div', { style: { display: 'flex', height: 8, borderRadius: 999, overflow: 'hidden', background: V('--dsw-alias-bg-module-platform', '#eef0f3'), marginTop: 4 } },
+        (() => {
+          const ws = sandboxActive ? weights.map(x=> ({...x, w: sandboxW[`${x.type}:${x.code}`] ?? x.w })) : weights
+          const sum = ws.reduce((a,b)=>a+b.w,0) || 1
+          const colors = ['#4b7bec','#e0a53f','#2ba471','#d48806','#722ed1','#eb2f96']
+          return ws.map((x,i)=> h('div', { key: `${x.type}:${x.code}`, style: { width: `${x.w/sum*100}%`, background: colors[i % colors.length]!, transition: 'width 0.3s' } }))
+        })()
+      ),
+      h('div', { style: { display: 'flex', gap: 12, ...S.muted, flexWrap: 'wrap', marginTop: 6 } },
         h('span', null, h('span', { style: { color: BRAND } }, '● '), `股票 ${byType.stock.toFixed(0)}%`),
-        h('span', null, h('span', { style: { color: '#e0a53f' } }, '● '), `基金 ${byType.fund.toFixed(0)}%`)),
-      h('div', { style: S.muted }, `集中度：最大 ${top1.toFixed(0)}%（${weights[0]?.name ?? '—'}）· 前三 ${top3.toFixed(0)}%`)) : null,
-    h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
-      h('input', { style: { ...S.input, flex: 2 }, placeholder: '代码', value: hCode, onChange: (e: any) => setHCode(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
-      h('input', { style: { ...S.input, flex: 1 }, placeholder: '数量', value: hQty, onChange: (e: any) => setHQty(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
-      h('input', { style: { ...S.input, flex: 1 }, placeholder: '成本', value: hCost, onChange: (e: any) => setHCost(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
+        h('span', null, h('span', { style: { color: '#e0a53f' } }, '● '), `基金 ${byType.fund.toFixed(0)}%`),
+        ...Object.entries(byMarket).map(([k,v])=> h('span', { key: k }, `${k} ${v.toFixed(0)}%`))),
+      h('div', { style: { ...S.muted, marginTop: 4 } }, health.advice),
+      h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, `HHI ${hhi.toFixed(2)} (0-1，越高越集中)${sandboxActive ? ` → 模拟后 ${sandboxHhi.toFixed(2)}` : ''} · 最大 ${top1.toFixed(0)}%（${weights[0]?.name ?? '—'}）· 前三 ${top3.toFixed(0)}%`),
+      sandboxActive ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${V('--dsw-alias-border-l2', '#eee')}` } },
+        h('div', { style: { ...S.muted, fontWeight: 600 } }, '拖动模拟权重（仅本地预览，不改真实持仓）'),
+        weights.map(w=> h('div', { key: `sb-${w.type}:${w.code}`, style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('span', { style: { flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12 } }, w.name),
+          h('input', {
+            type: 'range', min: 0, max: 50, step: 1,
+            value: String(sandboxW[`${w.type}:${w.code}`] ?? w.w),
+            style: { flex: 1 },
+            onChange: (e: any)=> setSandboxW(s=> ({...s, [`${w.type}:${w.code}`]: Number(e.target.value)}))
+          }),
+          h('span', { style: { width: 44, textAlign: 'right', fontSize: 12 } }, `${(sandboxW[`${w.type}:${w.code}`] ?? w.w).toFixed(0)}%`))),
+        h('div', { style: { ...S.muted, fontSize: 11 } }, '合规提示：模拟结果基于历史权重推算，不构成投资建议。满意后可在对话说“按模拟权重帮我改持仓”。')
+      ) : null,
+      h('div', { style: { display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' } },
+        h('button', { style: { ...S.btn, padding: '4px 8px', background: BRAND, color: '#fff', borderColor: BRAND }, onClick: ()=> {
+          const leader = todayAttribution[0]; if (leader) props.onOpen({ code: leader.code, type: leader.type, name: leader.name })
+        } }, '🔍 诊断今日波动'),
+        h('button', { style: S.btn, onClick: ()=> {
+          // 一键组团研究：让模型并行研究持仓
+          const codes = data.holdings.map(h=> h.code).join('、')
+          const prompt = `请对我的持仓 ${codes} 做一次组团深研：基本面/技术/宏观/舆情 4个视角并行，最后汇总成一份中文 Markdown 报告并调用 save_position_analysis。`
+          // 通过在对话输入框注入？此处通过复制到剪贴板引导
+          try{ navigator.clipboard.writeText(prompt); }catch{}
+          alert('已复制组团研究指令，去对话粘贴发送即可：\n'+prompt)
+        } }, '👥 组团深研')
+      )
+    ) : null,
+
+    // 目标进度（wealth-goalcalc 场景化）
+    h('div', { style: S.card },
+      h('div', { style: S.title }, '目标 · 进度'),
+      h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+        h('span', { style: S.muted }, '目标金额'),
+        h('input', { style: { ...S.input, flex: 1 }, value: goalTarget, placeholder: '如 500000', onChange: (e:any)=> setGoalTarget(e.target.value) }),
+        h('span', { style: S.muted }, '元')),
+      targetNum ? h('div', null,
+        h('div', { style: { display: 'flex', height: 8, borderRadius: 999, overflow: 'hidden', background: V('--dsw-alias-bg-module-platform', '#eef0f3'), marginTop: 6 } },
+          h('div', { style: { width: `${progress}%`, background: progress >=100 ? DOWN : BRAND, transition: 'width 0.3s' } })),
+        h('div', { style: { ...S.muted, marginTop: 4, display: 'flex', justifyContent: 'space-between' } },
+          h('span', null, `${progress.toFixed(1)}% · 已投 ${totalValue.toFixed(0)} / ${targetNum.toFixed(0)}`),
+          h('span', null, `${totalValue >= targetNum ? '已达成 🎉' : `缺口 ${(targetNum-totalValue).toFixed(0)}`}`)),
+        h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, '基于当前市值进度条，调仓后实时变化。详细测算可用 wealth-goalcalc Skill 在对话里说“帮我算养老目标”。')
+      ) : h('div', { style: { ...S.muted, marginTop: 4 } }, '输入你的目标金额，进度条实时联动。')),
+    
+    // 添加持仓：增加对话式提示
+    h('div', { style: { display: 'flex', gap: 6, marginTop: 2, flexWrap: 'wrap' } },
+      h('input', { style: { ...S.input, flex: 2, minWidth: 80 }, placeholder: '代码 如600519', value: hCode, onChange: (e: any) => setHCode(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
+      h('input', { style: { ...S.input, flex: 1, minWidth: 60 }, placeholder: '数量', value: hQty, onChange: (e: any) => setHQty(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
+      h('input', { style: { ...S.input, flex: 1, minWidth: 70 }, placeholder: '成本', value: hCost, onChange: (e: any) => setHCost(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
       h(SegToggle, { value: hType, onChange: setHType }),
       h('button', { style: S.btn, onClick: addHolding }, '加')),
-    data.portfolioPath ? h('div', { style: { ...S.muted, fontSize: 11 } }, `持仓文件：${data.portfolioPath}（可让 Agent 识别截图后写入）`) : null)
+    h('div', { style: { ...S.muted, fontSize: 11, lineHeight: 1.5 } },
+      h('div', null, '💡 小技巧：直接发持仓截图或在对话说“把贵州茅台加100股成本1700”—— 模型会调用 import_holdings 写入，面板自动刷新。'),
+      data.portfolioPath ? h('div', null, `持仓文件：${data.portfolioPath}`) : null)
+  )
 }
 
 // ---- 宏观 tab ----
@@ -704,6 +865,75 @@ function KlineView(props: { data: LiveData }) {
         h('span', { style: { width: 8, height: 8, borderRadius: 999, background: EVENT_COLOR(e.type), flex: '0 0 auto' } }),
         h('span', { style: { ...S.muted, width: 82, flex: '0 0 auto' } }, e.date),
         h('span', { style: { flex: 1 } }, e.label)))) : null)
+}
+
+// ---- 叙事 tab：K线事件 + 市场快讯 + 宏观 + 持仓新闻 同屏时间轴（金融叙事核心）----
+interface NarrativeEvent { time: string; kind: 'kline'|'news'|'macro'|'flash'; label: string; detail?: string; color: string; code?: string }
+function NarrativeView(props: { active: boolean; data: LiveData; quoteBy: Map<string, LiveQuote> }) {
+  const [events, setEvents] = useState<NarrativeEvent[]>([])
+  const [loading, setLoading] = useState(false)
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [newsR, macroR] = await Promise.all([
+        apiGet<{ news: Array<{ title: string; time?: string; url?: string }> }>('/news').catch(()=> ({ news: [] } as any)),
+        apiGet<{ series: Array<{ series: string; label?: string; latest?: { time: string; value?: number }; error?: string }> }>('/macro').catch(()=> ({ series: [] } as any)),
+      ])
+      const list: NarrativeEvent[] = []
+      for (const n of (newsR as any).news?.slice(0,8) ?? []) {
+        list.push({ time: n.time || new Date().toISOString(), kind: 'flash', label: n.title, detail: n.url, color: BRAND })
+      }
+      for (const s of (macroR as any).series ?? []) {
+        if (s.error || !s.latest?.time) continue
+        list.push({ time: s.latest.time, kind: 'macro', label: `${s.label || s.series} ${s.latest.value}`, detail: s.series, color: '#722ed1' })
+      }
+      // 持仓相关K线事件（本地历史）
+      for (const hd of props.data.holdings.slice(0,3)) {
+        try {
+          const h = await apiGet<{ ok: boolean; events?: Array<{ date: string; type: string; label: string }> }>(`/history?code=${encodeURIComponent(hd.code)}`)
+          for (const e of h.events?.slice(-2) ?? []) {
+            list.push({ time: e.date, kind: 'kline', label: `${hd.code} ${e.type}：${e.label}`, detail: e.type, color: e.type==='财报' ? BRAND : DOWN, code: hd.code })
+          }
+        } catch {}
+      }
+      list.sort((a,b)=> b.time.localeCompare(a.time))
+      setEvents(list.slice(0,20))
+    } catch { /* */ } finally { setLoading(false) }
+  }, [props.data.holdings])
+  useEffect(()=> { if (props.active && !events.length) void load() }, [props.active]) // eslint-disable-line react-hooks/exhaustive-deps
+  const icon = (k: string) => k==='flash' ? '⚡' : k==='macro' ? '🏛' : k==='kline' ? '📈' : '📰'
+  const greeting = (() => {
+    const h = new Date().getHours()
+    if (h < 9) return '开盘前 · 看看今日叙事'
+    if (h < 11.5) return '上午盘 · 叙事正在形成'
+    if (h < 13) return '午休 · 复盘上午'
+    if (h < 15) return '下午盘 · 关注收盘'
+    return '盘后 · 梳理今日叙事'
+  })()
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    h('div', { style: S.card, background: 'linear-gradient(135deg, #f0f5ff 0%, #f6ffed 100%)', borderColor: '#d9e7ff' },
+      h('div', { style: { fontWeight: 700 } }, greeting),
+      h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, `已聚合 ${events.length} 条  ·  市场快讯 + 宏观指标 + 持仓事件同屏时间轴，帮你回答“今天为什么涨/跌”`),
+      h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6, background: BRAND, color: '#fff', borderColor: BRAND }, onClick: ()=> void load(), disabled: loading }, loading ? '聚合中…' : '刷新叙事线')),
+    events.length===0 ? h('div', { style: S.muted }, loading ? '聚合中…' : '暂无叙事，先同步K线或等待快讯') :
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: 0, position: 'relative', paddingLeft: 14, borderLeft: `2px solid ${V('--dsw-alias-border-l2', '#eee')}` } },
+        events.map((e,i)=> h('div', { key: i, style: { display: 'flex', gap: 8, padding: '7px 0', borderTop: i? `1px solid ${V('--dsw-alias-border-l2', '#f5f5f5')}` : 'none' } },
+          h('span', { style: { width: 22, height: 22, borderRadius: 999, background: e.color, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, flex: '0 0 auto' } }, icon(e.kind)),
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { style: { fontSize: 12, fontWeight: 500, lineHeight: 1.4 } }, e.label),
+            h('div', { style: { ...S.muted, fontSize: 11, display: 'flex', gap: 6 } },
+              h('span', null, e.time.slice(0,10)),
+              h('span', { style: S.tag }, e.kind==='flash'?'快讯': e.kind==='macro'?'宏观': e.kind==='kline'?'事件':'新闻'),
+              e.code ? h('span', { style: S.tag }, e.code) : null)),
+          e.detail && e.detail.startsWith('http') ? h('button', { style: { ...S.btn, padding: '2px 6px', flex: '0 0 auto' }, onClick: ()=> window.open(e.detail, '_blank') }, '看') : null))
+      ),
+    h('div', { style: { ...S.card, background: '#fffbe6', borderColor: '#ffe58f' } },
+      h('div', { style: { fontWeight: 600, fontSize: 12 } }, '💡 如何用叙事'),
+      h('div', { style: { ...S.muted, fontSize: 11, lineHeight: 1.6 } },
+        '· 看到持仓异动，先来叙事页看同日是否有快讯/宏观/财报事件；', h('br', null),
+        '· 点击事件→可让模型“结合今日叙事解读持仓波动”生成报告；', h('br', null),
+        '· 盘前看宏观日历，盘中看快讯，盘后看事件——同一时间轴自动聚合。'))
+  )
 }
 
 // ---- 技能 tab (local playbooks + 盈米 remote skills) ----
@@ -950,7 +1180,7 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
 
 const TABS: Array<{ id: string; label: string }> = [
   { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
-  { id: 'funds', label: '基金' }, { id: 'kline', label: 'K线' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
+  { id: 'narrative', label: '叙事' }, { id: 'funds', label: '基金' }, { id: 'kline', label: 'K线' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
   { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
 ]
 
@@ -1011,10 +1241,20 @@ function PanelBody(props: {
   const quoteBy = new Map<string, LiveQuote>()
   for (const q of data.quotes) quoteBy.set(keyOf(q.code, q.type ?? 'stock'), q)
   rememberNames([...data.watchlist, ...data.holdings, ...data.quotes])
+  const greeting = (() => {
+    const h = new Date().getHours()
+    if (h < 9) return '早 · 开盘前看叙事'
+    if (h < 11.5) return '上午 · 交易中'
+    if (h < 13) return '午休 · 复盘'
+    if (h < 15) return '下午 · 收盘前'
+    return '晚 · 盘后梳理'
+  })()
   return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
     h('div', { style: S.header },
       h(IconChart, { size: 16 }),
-      h('div', { style: { flex: 1, fontWeight: 600 } }, 'DSN 金融面板'),
+      h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 0 } },
+        h('span', { style: { fontWeight: 600, lineHeight: 1.1 } }, 'DSN 金融面板'),
+        h('span', { style: { fontSize: 11, color: V('--dsw-alias-label-tertiary', '#999') } }, `${greeting} · ${data.holdings.length}持仓 ${data.watchlist.length}自选`)),
       h('button', { style: S.btn, onClick: () => void loadLive(), disabled: loading }, loading ? '刷新中…' : '刷新'),
       h('button', { style: { ...S.btn, padding: '4px 8px' }, title: docked ? '切换为浮动窗' : '停靠为侧栏页', onClick: onToggleDock }, docked ? '浮动' : '停靠'),
       h('button', { style: { ...S.btn, padding: '4px 8px' }, onClick: onClose }, '×')),
@@ -1023,6 +1263,7 @@ function PanelBody(props: {
       tab === 'quotes' ? h(QuotesView, { data, quoteBy, loading, mutate, onOpen: props.onOpenAnalysis }) : null,
       tab === 'market' ? h(MarketView, { active: tab === 'market' }) : null,
       tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate, onOpen: props.onOpenAnalysis }) : null,
+      tab === 'narrative' ? h(NarrativeView, { active: tab === 'narrative', data, quoteBy }) : null,
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,

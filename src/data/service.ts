@@ -278,25 +278,61 @@ export class FinanceDataService {
 
   async analyzePortfolio(signal?: AbortSignal) {
     const holdings = this.getHoldings()
+    if (!holdings.length) {
+      return {
+        ok: true as const,
+        quoteAvailable: false,
+        summary: { holdingCount: 0, totalCost: 0, totalValue: 0, totalProfit: 0, profitPercent: 0 },
+        risk: computeRisk([], [], 0),
+        holdings: [] as Holding[],
+        attribution: [] as Array<{ code: string; name?: string; type: AssetType; contribution: number; changePercent?: number }>,
+        narrative: { todayPnL: 0, todayReturn: 0, leader: undefined as string | undefined, laggard: undefined as string | undefined },
+      }
+    }
+    // 并发获取所有报价 + 实时涨跌，避免串行 N*3s
+    const quotes = await Promise.all(holdings.map((h) => this.getAutoQuote(h.code, signal, (h.type ?? 'stock') as AssetType)))
     const enriched: Holding[] = []
     const markets: string[] = []
     let quoteOk = false
-    for (const h of holdings) {
-      const item: Holding = { ...h, type: h.type ?? 'stock' }
-      const quote = await this.getAutoQuote(h.code, signal, item.type)
-      markets.push(quote.market ?? (item.type === 'fund' ? '基金' : 'A股'))
-      if (quote.ok && quote.data?.price != null) {
+    for (let i = 0; i < holdings.length; i++) {
+      const h = holdings[i]!
+      const quote = quotes[i]!
+      const item: Holding = { ...h, type: (h.type ?? 'stock') as AssetType }
+      markets.push((quote as any).market ?? (item.type === 'fund' ? '基金' : 'A股'))
+      if ((quote as any).ok && (quote as any).data?.price != null) {
         quoteOk = true
-        item.currentPrice = quote.data.price
-        item.name = item.name ?? quote.data.name
-        item.marketValue = quote.data.price * h.quantity
-        item.profit = (quote.data.price - h.avgCost) * h.quantity
-        item.profitPercent = ((quote.data.price - h.avgCost) / h.avgCost) * 100
+        item.currentPrice = (quote as any).data.price
+        item.name = item.name ?? (quote as any).data.name
+        item.marketValue = (quote as any).data.price * h.quantity
+        item.profit = ((quote as any).data.price - h.avgCost) * h.quantity
+        item.profitPercent = (((quote as any).data.price - h.avgCost) / h.avgCost) * 100
+        // 透传当日涨跌用于归因
+        ;(item as any).changePercent = (quote as any).data.changePercent
+        ;(item as any).asOf = (quote as any).data.raw?.f86 ? String((quote as any).data.raw.f86) : undefined
       }
       enriched.push(item)
     }
     const totalCost = enriched.reduce((s, h) => s + h.avgCost * h.quantity, 0)
     const totalValue = enriched.reduce((s, h) => s + (h.marketValue ?? h.avgCost * h.quantity), 0)
+    const totalCostForReturn = totalCost || 1
+    // 今日归因：贡献度 = 权重 * 当日涨跌
+    const risk = computeRisk(enriched, markets, totalValue)
+    const weightByCode = new Map(risk.weights.map((w) => [`${w.type}:${w.code}`, w.weight]))
+    const attribution = enriched.map((h) => {
+      const w = weightByCode.get(`${h.type}:${h.code}`) ?? 0
+      const cp = (h as any).changePercent as number | undefined
+      const contrib = typeof cp === 'number' ? Number(((w * cp) / 100).toFixed(3)) : 0
+      return { code: h.code, name: h.name, type: h.type, weight: w, changePercent: cp, contribution: contrib }
+    }).sort((a, b) => b.contribution - a.contribution)
+    const todayPnL = enriched.reduce((s, h, idx) => {
+      const q = quotes[idx] as any
+      const cp = q?.data?.changePercent
+      const price = q?.data?.price
+      if (typeof cp !== 'number' || typeof price !== 'number' || !Number.isFinite(cp) || !Number.isFinite(price) || cp === 0) return s
+      const prev = price / (1 + cp / 100)
+      return s + (price - prev) * h.quantity
+    }, 0)
+    const todayReturn = totalValue ? (todayPnL / totalValue) * 100 : 0
     return {
       ok: true as const,
       quoteAvailable: quoteOk,
@@ -307,8 +343,17 @@ export class FinanceDataService {
         totalProfit: totalValue - totalCost,
         profitPercent: totalCost ? ((totalValue - totalCost) / totalCost) * 100 : 0,
       },
-      risk: computeRisk(enriched, markets, totalValue),
+      risk,
       holdings: enriched,
+      attribution,
+      narrative: {
+        todayPnL: Number(todayPnL.toFixed(2)),
+        todayReturn: Number(todayReturn.toFixed(3)),
+        leader: attribution[0]?.code,
+        laggard: attribution[attribution.length - 1]?.code,
+        leaderContrib: attribution[0]?.contribution,
+        laggardContrib: attribution[attribution.length - 1]?.contribution,
+      },
     }
   }
 }

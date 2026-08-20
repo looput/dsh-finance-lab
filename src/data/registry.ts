@@ -44,6 +44,8 @@ export class ProviderRegistry {
   private probedAt?: string
   private readonly cache: TtlCache
   private readonly limiter: RateLimiter
+  /** 去重并发相同请求 */
+  private inflight = new Map<string, Promise<ProviderCallResult<unknown>>>()
 
   constructor(private readonly options: RegistryOptions) {
     this.cache = new TtlCache(options.cacheTtlSec * 1000)
@@ -156,40 +158,52 @@ export class ProviderRegistry {
     const cacheKey = `${capability}:${JSON.stringify(args)}`
     const cached = this.cache.get<ProviderCallResult<T>>(cacheKey)
     if (cached) return cached
+    const inflightKey = cacheKey
+    const existing = this.inflight.get(inflightKey)
+    if (existing) return existing as Promise<ProviderCallResult<T>>
 
-    const order = this.effectiveOrder(capability)
-    const attempts: Array<{ provider: string; error: string }> = []
-    const ctx: ProviderContext = { timeoutMs: this.options.httpTimeoutMs, signal }
+    const task = (async (): Promise<ProviderCallResult<T>> => {
+      const order = this.effectiveOrder(capability)
+      const attempts: Array<{ provider: string; error: string }> = []
+      const ctx: ProviderContext = { timeoutMs: this.options.httpTimeoutMs, signal }
 
-    for (const providerId of order) {
-      const meta = PROVIDER_BY_ID.get(providerId)
-      if (!meta || meta.capability !== capability) continue
-      await this.limiter.wait(signal)
-      try {
-        const data = await meta.call(args, ctx)
-        const result: ProviderCallResult<T> = {
-          ok: true,
-          capability,
-          provider: providerId,
-          data: (data.data ?? data.rows ?? data) as T,
+      for (const providerId of order) {
+        const meta = PROVIDER_BY_ID.get(providerId)
+        if (!meta || meta.capability !== capability) continue
+        await this.limiter.wait(signal)
+        try {
+          const data = await meta.call(args, ctx)
+          const result: ProviderCallResult<T> = {
+            ok: true,
+            capability,
+            provider: providerId,
+            data: (data.data ?? data.rows ?? data) as T,
+          }
+          this.cache.set(cacheKey, result, this.cache.ttlFor(capability))
+          return result
+        } catch (err) {
+          attempts.push({
+            provider: providerId,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
-        this.cache.set(cacheKey, result)
-        return result
-      } catch (err) {
-        attempts.push({
-          provider: providerId,
-          error: err instanceof Error ? err.message : String(err),
-        })
       }
-    }
 
-    return {
-      ok: false,
-      capability,
-      error: attempts.length
-        ? `all providers failed for ${capability}`
-        : `no providers configured for ${capability}; run probe`,
-      attempts,
+      return {
+        ok: false,
+        capability,
+        error: attempts.length
+          ? `all providers failed for ${capability}`
+          : `no providers configured for ${capability}; run probe`,
+        attempts,
+      }
+    })()
+
+    this.inflight.set(inflightKey, task as Promise<ProviderCallResult<unknown>>)
+    try {
+      return await task
+    } finally {
+      this.inflight.delete(inflightKey)
     }
   }
 
