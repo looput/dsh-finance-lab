@@ -159,13 +159,18 @@ Token 解析优先级：环境变量（`apiKeyEnv`，如 `EM_API_KEY`）→ 本�
 
 ## 数据源选择（多来源策略）
 
-面板「数据源」页可按 capability 选择使用哪些 provider（`quote`/`kline`/`hk_*`/`us_*`/`web_search` 等常有多个来源共存）：多选、点击顺序即调用优先级，绿点=探测可用。选择保存到本地 `data/provider-policy.json` 并即时生效（用户选择优先于探测顺序）。妙想/盈米作为整体数据源在「接口」页开关。
+面板「数据源」页分两层：
+
+- **数据来源开关（来源级）**：`公开数据` / `妙想数据` / `盈米` 各自可独立开关、即时生效——可只用某一来源（如只开妙想）或混用。公开数据关闭后，插件行情/K线等能力仅使用所选外部来源；妙想/盈米开关等价于热重载对应 MCP 源。
+- **公开数据明细（子项级）**：按 capability 选择使用哪些 provider（`quote`/`kline`/`hk_*`/`us_*`/`web_search` 常多源共存）：多选、点击顺序即优先级、绿点=探测可用。
+
+选择保存到本地 `data/provider-policy.json`、`data/mcp-sources-state.json`，用户选择优先于探测顺序。
 
 ## 本地历史库与 K 线事件
 
-面板「K线」页可把日 K 线与事件落地到本地库并追加更新（`data/history/<code>.json`）：
+在「行情」页点击个股即进入详情：展示实时价、涨跌、今开/昨收/最高/最低/成交量额/总市值等，以及本地 K 线（含事件标注）。日 K 线与事件落地到本地库并追加更新（`data/history/<code>.json`）：
 
-- `sync_history`（工具）/ `POST api/history/sync`：抓取日 K 线（A股/港股/美股/基金）并按日期去重合并，股票同时把财报日期存为事件。
+- `sync_history`（工具）/ 详情页「同步」/ `POST api/history/sync`：抓取日 K 线（A股/港股/美股/基金）并按日期去重合并，股票同时把财报日期存为事件。
 - `add_market_event` / `get_history` / `list_history`：追加分红/公告等自定义事件、读取、列出。
 - K 线图上以虚线标注事件（财报=蓝、分红=绿），下方列出事件时间。
 
