@@ -28,6 +28,11 @@ export interface CapabilityCatalog {
   providers: Array<{ id: string; source: string; endpointRef: string; ok?: boolean; selected: boolean }>
 }
 
+export interface ProviderCatalog {
+  publicEnabled: boolean
+  capabilities: CapabilityCatalog[]
+}
+
 export interface RegistryOptions {
   cacheTtlSec: number
   requestGapMs: number
@@ -40,6 +45,8 @@ export class ProviderRegistry {
   private providerOrder: Record<Capability, string[]> = structuredClone(DEFAULT_PROVIDER_ORDER)
   /** User-selected per-capability provider allowlist/order; authoritative over probe order. */
   private policy: Partial<Record<Capability, string[]>> = {}
+  /** Master switch for the public HTTP providers as a data-source family. */
+  private publicEnabled = true
   private health: ProbeResult[] = []
   private probedAt?: string
   private readonly cache: TtlCache
@@ -54,15 +61,26 @@ export class ProviderRegistry {
     return path.join(this.options.packageRoot, 'data/provider-policy.json')
   }
 
-  /** Providers actually tried for a capability: user policy wins, else probe/default order. */
+  /** Providers actually tried for a capability: none when public disabled; else user policy, then probe/default. */
   private effectiveOrder(capability: Capability): string[] {
+    if (!this.publicEnabled) return []
     return this.policy[capability] ?? this.providerOrder[capability] ?? DEFAULT_PROVIDER_ORDER[capability]
+  }
+
+  private async persistPolicy(): Promise<void> {
+    await mkdir(path.dirname(this.policyPath), { recursive: true })
+    await writeFile(this.policyPath, JSON.stringify({ publicEnabled: this.publicEnabled, capabilities: this.policy }, null, 2) + '\n', 'utf8')
   }
 
   async loadPolicy(): Promise<void> {
     try {
-      const raw = await readFile(this.policyPath, 'utf8')
-      await this.setPolicy(JSON.parse(raw) as Partial<Record<Capability, string[]>>, false)
+      const parsed = JSON.parse(await readFile(this.policyPath, 'utf8')) as Record<string, unknown>
+      if (parsed && typeof parsed === 'object' && 'capabilities' in parsed) {
+        this.publicEnabled = parsed.publicEnabled !== false
+        await this.setPolicy((parsed.capabilities ?? {}) as Partial<Record<Capability, string[]>>, false)
+      } else {
+        await this.setPolicy(parsed as Partial<Record<Capability, string[]>>, false)
+      }
     } catch { /* no policy file */ }
   }
 
@@ -77,16 +95,20 @@ export class ProviderRegistry {
     }
     this.policy = clean
     this.cache.clear()
-    if (persist) {
-      await mkdir(path.dirname(this.policyPath), { recursive: true })
-      await writeFile(this.policyPath, JSON.stringify(clean, null, 2) + '\n', 'utf8')
-    }
+    if (persist) await this.persistPolicy()
+  }
+
+  /** Enable/disable the whole public-provider family (e.g. "only 妙想"). */
+  async setPublicEnabled(enabled: boolean): Promise<void> {
+    this.publicEnabled = enabled
+    this.cache.clear()
+    await this.persistPolicy()
   }
 
   /** Per-capability provider catalog with source family, health and current selection. */
-  getCatalog(): CapabilityCatalog[] {
-    return CAPABILITIES.map((cap) => {
-      const order = this.effectiveOrder(cap)
+  getCatalog(): ProviderCatalog {
+    const capabilities = CAPABILITIES.map((cap) => {
+      const order = this.publicEnabled ? (this.policy[cap] ?? this.providerOrder[cap] ?? DEFAULT_PROVIDER_ORDER[cap]) : []
       const healthBy = new Map(this.health.filter((r) => r.capability === cap).map((r) => [r.provider, r.ok]))
       return {
         capability: cap,
@@ -101,6 +123,7 @@ export class ProviderRegistry {
         })),
       }
     })
+    return { publicEnabled: this.publicEnabled, capabilities }
   }
 
   async loadProbeReport(): Promise<void> {
