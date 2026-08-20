@@ -84,6 +84,8 @@ export function apply(ctx: Context, config: Config) {
       '- 历史K线/财报/分红可用 sync_history 落地到本地库，再用 get_history 读取（含事件标记）。',
       '- Use type:"fund" for funds (基金, 6-digit code) and type:"stock" for stocks (A股/港股/美股).',
       '- When the panel sends an active position-analysis request, gather the requested data with finance tools and finish by calling save_position_analysis with the complete Markdown report.',
+      '- 对话中可用 dsn://portfolio/<code>?type=stock|fund 协议嵌入可交互持仓卡片，例如 ![持仓卡片](dsn://portfolio/600519?type=stock) 会在前端渲染为可点击卡片（面板联动），适用于持仓/自选的快速操作。',
+      '- 面板"组团研究"会触发 5 视角并行（行情/基本面/宏观/舆情/基金），模型应调用对应工具并汇总；沙盘模拟仅为本地预览，需提示"基于历史回测，不构成投资建议"。',
     ].join('\n'),
   })
 }

@@ -134,6 +134,25 @@ function narrativeAnalysisPrompt(
   ].join('\n')
 }
 
+function groupResearchPrompt(codes: string[], holdings: Array<{ code: string; name?: string; quantity: number; avgCost: number; type: string }>): string {
+  const list = holdings.map(h=> `${h.code}${h.name?`(${h.name})`:''} ${h.quantity}股 成本${h.avgCost}`).join('\n')
+  const codeList = codes.join('、')
+  return [
+    `用户在 DSN Finance 面板点击了“一键组团研究”，持仓：${codeList}。`,
+    holdings.length ? `持仓明细：\n${list}` : '暂无持仓，按自选研究。',
+    `请启动 5 个子智能体并行研究后汇总：`,
+    `1) 行情+技术：对每只标的调用 get_stock_kline/get_realtime_quote/calculate_technical_indicators(MA5/20/60/MACD/RSI/KDJ)，总结趋势与量价`,
+    `2) 基本面：调用 get_financial_indicators/get_stock_info，总结盈利与估值`,
+    `3) 宏观：调用 get_macro_china(cpi/ppi/pmi) + get_market_overview/get_sector_board，说明宏观与板块环境`,
+    `4) 舆情：调用 get_stock_news + get_market_news/web_search，总结消息面`,
+    `5) 基金画像（若含基金）：调用 get_fund_quote/get_fund_kline/get_fund_rank`,
+    `汇总要求：用中文 Markdown 输出，包含一句话结论、组合概览、5视角分述、持仓相关性与集中度(HHI)、主要风险、后续观察清单、数据时间与数据源。`,
+    `完成后对每只持仓分别调用 save_position_analysis(code,type,report) 存档；若为组合级报告，直接在回复中输出并在末尾注明“已调用 save_position_analysis 存档”。`,
+    `不要编造未返回数据，缺失字段明确标注“暂无”。`,
+  ].join('\n')
+}
+
+
 /**
  * Register the finance panel's HTTP API on ctx.webServer. Live quotes are computed on demand
  * and returned to the client (held in React state) — never written to plugin config.
@@ -461,6 +480,76 @@ export function registerRoutes(
               }
             }
             res.write(`event: progress\ndata: ${JSON.stringify({ progress: Math.round(progress), step, status: isPending ? 'generating' : 'waiting' })}\n\n`)
+          }, 1000)
+          req.on('close', ()=> { clearInterval(timer); clearInterval(heartbeat) })
+          req.on('error', ()=> { clearInterval(timer); clearInterval(heartbeat) })
+          return
+        }
+        if (req.method === 'POST' && sub === '/research/group') {
+          const body = await readBody(req)
+          const codes = Array.isArray(body.codes) ? (body.codes as string[]).map(s=> String(s).trim()).filter(Boolean) : []
+          if (!codes.length) return sendJson(res, 400, { ok: false, error: 'codes is required' })
+          const key = `research:GROUP:${codes.slice(0,5).join(',')}`
+          const pendingAt = pendingAnalyses.get(key)
+          if (pendingAt && Date.now() - pendingAt < 10*60*1000) return sendJson(res, 202, { ok: true, status: 'generating', key })
+          const agent = currentAgent(modelContext)
+          if (!agent) return sendJson(res, 503, { ok: false, error: 'current Harness session is unavailable' })
+          const { holdings } = store.get()
+          const relevant = holdings.filter(h=> codes.includes(h.code))
+          pendingAnalyses.set(key, Date.now())
+          try {
+            agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: groupResearchPrompt(codes, relevant) }], source: { kind: 'user' } })
+            return sendJson(res, 202, { ok: true, status: 'generating', key, codes })
+          } catch (err) {
+            pendingAnalyses.delete(key)
+            return sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
+          }
+        }
+        if (req.method === 'GET' && sub === '/research/stream') {
+          const codesParam = String(url.searchParams.get('codes') ?? '')
+          const codes = codesParam ? codesParam.split(',').map(s=> s.trim()).filter(Boolean) : []
+          const key = codes.length ? `research:GROUP:${codes.slice(0,5).join(',')}` : 'research:GROUP'
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          })
+          res.write(`event: open\ndata: ${JSON.stringify({ at: new Date().toISOString(), codes })}\n\n`)
+          let progress = 10
+          const startedAt = Date.now()
+          const heartbeat = setInterval(()=> { try { res.write(`: heartbeat ${Date.now()}\n\n`) } catch {} }, 15000)
+          const timer = setInterval(()=> {
+            const elapsed = Date.now() - startedAt
+            if (elapsed < 25000) progress = Math.min(60, 10 + elapsed/400)
+            else if (elapsed < 90000) progress = Math.min(85, 60 + (elapsed-25000)/3000)
+            else progress = Math.min(95, 85 + (elapsed-90000)/15000)
+            const pendingAt = pendingAnalyses.get(key)
+            const isPending = pendingAt && Date.now() - pendingAt < 10*60*1000
+            // 检查是否有任一持仓的 analysis 已生成，视为进度推进
+            let doneCount = 0
+            if (codes.length) {
+              for (const c of codes) {
+                const a = analyses.get(c, 'stock') || analyses.get(c, 'fund')
+                if (a) doneCount++
+              }
+            }
+            if (doneCount && doneCount === codes.length) {
+              progress = 100
+              res.write(`event: progress\ndata: ${JSON.stringify({ progress: 100, step: '组团研究已完成', status: 'ready', doneCount })}\n\n`)
+              res.write(`event: done\ndata: ${JSON.stringify({ ok: true, doneCount, codes })}\n\n`)
+              clearInterval(timer); clearInterval(heartbeat)
+              try { res.end() } catch {}
+              return
+            }
+            if (elapsed > 6*60*1000) {
+              res.write(`event: timeout\ndata: ${JSON.stringify({ ok: false, error: 'timeout' })}\n\n`)
+              clearInterval(timer); clearInterval(heartbeat)
+              try { res.end() } catch {}
+              return
+            }
+            const step = progress < 30 ? '子智能体并行收集中… (行情/基本面/宏观/舆情/基金)' : progress < 65 ? '子任务汇总中…' : progress < 85 ? '主智能体合成报告…' : '报告收尾…'
+            res.write(`event: progress\ndata: ${JSON.stringify({ progress: Math.round(progress), step, status: isPending ? 'generating' : 'waiting', doneCount })}\n\n`)
           }, 1000)
           req.on('close', ()=> { clearInterval(timer); clearInterval(heartbeat) })
           req.on('error', ()=> { clearInterval(timer); clearInterval(heartbeat) })
