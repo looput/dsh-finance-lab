@@ -100,25 +100,6 @@ const S = {
     boxShadow: '0 12px 40px rgba(0,0,0,0.2)', overflow: 'hidden',
   } as CSSProperties,
 }
-function parseDsnUrl(href: string): { code: string; type: AssetType; name?: string } | null {
-  try {
-    const u = new URL(href)
-    if (u.protocol !== 'dsn:') return null
-    let code = ''
-    let type: AssetType = 'stock'
-    const t = u.searchParams.get('type') as AssetType | null
-    if (t === 'fund' || t === 'stock') type = t
-    const pathCode = u.pathname.replace(/^\/+/, '').split('/').pop() || ''
-    if (pathCode && /^\w+$/.test(pathCode)) code = pathCode
-    if (!code) code = u.searchParams.get('code') || ''
-    if (!code) {
-      if (u.hostname && u.hostname !== 'portfolio' && u.hostname !== 'card') code = u.hostname
-    }
-    if (!code) return null
-    const name = u.searchParams.get('name') || undefined
-    return { code: code.trim(), type, name }
-  } catch { return null }
-}
 function fmt(n: number | undefined, d = 2): string {
   return typeof n === 'number' && Number.isFinite(n) ? n.toFixed(d) : '—'
 }
@@ -183,63 +164,6 @@ function IconChart(props: { size?: number }) {
     }))
 }
 
-function calcBacktestMetrics(dailyReturns: number[]): { annReturn: number; annVol: number; sharpe: number; maxDD: number } {
-  if (dailyReturns.length < 2) return { annReturn: 0, annVol: 0, sharpe: 0, maxDD: 0 }
-  const n = dailyReturns.length
-  const avg = dailyReturns.reduce((a,b)=>a+b,0)/n
-  const annReturn = avg * 252
-  const variance = dailyReturns.reduce((s,r)=> s + (r-avg)**2,0) / (n-1 || 1)
-  const annVol = Math.sqrt(variance) * Math.sqrt(252)
-  const sharpe = annVol ? annReturn / annVol : 0
-  let peak = 1, cum = 1, maxDD = 0
-  for (const r of dailyReturns) {
-    cum *= (1 + r)
-    if (cum > peak) peak = cum
-    const dd = (peak - cum) / peak
-    if (dd > maxDD) maxDD = dd
-  }
-  return { annReturn: Number((annReturn*100).toFixed(2)), annVol: Number((annVol*100).toFixed(2)), sharpe: Number(sharpe.toFixed(2)), maxDD: Number((maxDD*100).toFixed(2)) }
-}
-function computePortfolioBacktest(klineMap: Record<string, number[]>, weights: Record<string, number>): { annReturn: number; annVol: number; sharpe: number; maxDD: number } | null {
-  const codes = Object.keys(klineMap)
-  if (!codes.length) return null
-  const len = Math.min(...codes.map(c=> klineMap[c]!.length))
-  if (len < 10) return null
-  const norm: Record<string, number[]> = {}
-  for (const c of codes) {
-    const arr = klineMap[c]!.slice(-len)
-    const first = arr[0] || 1
-    norm[c] = arr.map(v=> v / first)
-  }
-  const wSum = codes.reduce((s,c)=> s + (weights[c] ?? 0),0) || 1
-  const port: number[] = []
-  for (let i=0;i<len;i++) {
-    let v = 0
-    for (const c of codes) v += (norm[c]![i]! * (weights[c] ?? 0) / wSum)
-    port.push(v)
-  }
-  const rets: number[] = []
-  for (let i=1;i<port.length;i++) rets.push((port[i]! - port[i-1]!) / port[i-1]!)
-  return calcBacktestMetrics(rets)
-}
-function buildPortfolioHtmlReport(data: { holdings: any[]; totalValue: number; totalCost: number; risk: any; attribution: any[]; backtest: any; sandboxW: Record<string, number> | null }): string {
-  const now = new Date().toLocaleString()
-  const rows = data.holdings.map((h:any)=> `<tr><td>${h.code}</td><td>${h.name||''}</td><td>${h.type}</td><td>${h.quantity}</td><td>${h.avgCost}</td><td>${h.currentPrice??''}</td><td>${h.profit?.toFixed(0)??''}</td></tr>`).join('')
-  const attr = data.attribution.slice(0,5).map((a:any)=> `<li>${a.name} 贡献 ${a.contribution>0?'+':''}${a.contribution}% (权重${a.weight?.toFixed(1)}% 涨跌${a.changePercent?.toFixed(2)}%)</li>`).join('')
-  const bt = data.backtest ? `<p>年化收益 ${data.backtest.annReturn}% · 年化波动 ${data.backtest.annVol}% · 夏普 ${data.backtest.sharpe} · 最大回撤 ${data.backtest.maxDD}% <span style="color:#999">(基于近60日日K回测，不构成预测)</span></p>` : '<p>暂无回测（需同步K线）</p>'
-  return `<!doctype html><html><head><meta charset="utf-8"><title>DSN 组合报告 ${now}</title><style>body{font-family:system-ui, sans-serif; max-width:800px; margin:32px auto; padding:0 16px; color:#111} h1{font-size:22px} h2{font-size:16px; margin-top:24px; border-bottom:1px solid #eee; padding-bottom:6px} table{width:100%; border-collapse:collapse; font-size:13px} th,td{border:1px solid #ddd; padding:6px 8px; text-align:left} th{background:#f5f6f7} .muted{color:#888; font-size:12px} .tag{font-size:11px; padding:1px 6px; border-radius:4px; background:#f0f0f0}</style></head><body>
-<h1>DSN 组合报告 <span class="muted">${now}</span></h1>
-<p class="muted">持仓 ${data.holdings.length} 只 · 市值 ${data.totalValue.toFixed(0)} · 成本 ${data.totalCost.toFixed(0)} · 盈亏 ${(data.totalValue-data.totalCost).toFixed(0)} · HHI ${data.risk.hhi} · 最大权重 ${data.risk.top1}%</p>
-${bt}
-<h2>持仓明细</h2>
-<table><tr><th>代码</th><th>名称</th><th>类型</th><th>数量</th><th>成本</th><th>现价</th><th>盈亏</th></tr>${rows}</table>
-<h2>今日归因 Top</h2>
-<ul>${attr}</ul>
-<h2>风险分布</h2>
-<p>按类型：${JSON.stringify(data.risk.byType)} · 按市场：${JSON.stringify(data.risk.byMarket)}</p>
-<p class="muted">免责声明：本报告基于公开行情与本地历史回测生成，仅供研究参考，不构成投资建议。周/月K为本地日K聚合，模拟权重为本地预览。</p>
-</body></html>`
-}
 function Sparkline(props: { data?: number[]; color: string; w?: number }) {
   const data = props.data
   const w = props.w ?? 72
@@ -589,38 +513,6 @@ function HoldingsView(props: {
     const norm = ws.map(v=> v/sum*100)
     return norm.reduce((s,v)=> s + (v/100)**2, 0)
   })() : hhi
-  const [groupGen, setGroupGen] = useState(false)
-  const [groupProgress, setGroupProgress] = useState(0)
-  const [groupStep, setGroupStep] = useState('')
-  const [klineMap, setKlineMap] = useState<Record<string, number[]>>({})
-  const [backtest, setBacktest] = useState<{ annReturn: number; annVol: number; sharpe: number; maxDD: number } | null>(null)
-  const [btLoading, setBtLoading] = useState(false)
-  useEffect(()=> {
-    if (!sandboxActive) { setBacktest(null); return }
-    let cancelled = false
-    setBtLoading(true)
-    const codes = weights.map(w=> w.code)
-    Promise.all(codes.map(async c=>{
-      try {
-        const r = await apiGet<{ ok: boolean; kline?: Array<{ close: number }> }>(`/kline?code=${encodeURIComponent(c)}&period=daily`)
-        if (r.ok && r.kline?.length) return [c, r.kline.map(b=> b.close)] as const
-      } catch {}
-      return [c, [] as number[]] as const
-    })).then(pairs=>{
-      if (cancelled) return
-      const map: Record<string, number[]> = {}
-      for (const [c, arr] of pairs) if (arr.length) map[c]=arr
-      setKlineMap(map)
-      const curW: Record<string, number> = {}
-      const simW: Record<string, number> = {}
-      for (const w of weights) { curW[w.code]=w.w; simW[w.code]= sandboxW[`${w.type}:${w.code}`] ?? w.w }
-      const curBt = computePortfolioBacktest(map, curW)
-      const simBt = computePortfolioBacktest(map, simW)
-      setBacktest(simBt ?? curBt)
-      setBtLoading(false)
-    }).catch(()=> { if(!cancelled) setBtLoading(false) })
-    return ()=> { cancelled = true }
-  }, [sandboxActive, JSON.stringify(sandboxW), weights.map(w=>w.code).join(',')])
 
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 14 } },
     // 顶部：今日归因 + 总览
@@ -713,63 +605,21 @@ function HoldingsView(props: {
             onChange: (e: any)=> setSandboxW(s=> ({...s, [`${w.type}:${w.code}`]: Number(e.target.value)}))
           }),
           h('span', { style: { width: 44, textAlign: 'right', fontSize: 12 } }, `${(sandboxW[`${w.type}:${w.code}`] ?? w.w).toFixed(0)}%`))),
-        h('div', { style: { ...S.muted, fontSize: 11 } }, '合规提示：模拟结果基于历史权重推算，不构成投资建议。满意后可在对话说“按模拟权重帮我改持仓”。'),
-        h('div', { style: { marginTop: 8, padding: '8px', background: '#f0f5ff', borderRadius: 8, border: '1px solid #d9e7ff' } },
-          h('div', { style: { fontWeight: 600, fontSize: 12 } }, '沙盘回测 · 近60日'),
-          btLoading ? h('div', { style: S.muted }, '计算中…需先同步K线') :
-          backtest ? h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 4, fontSize: 12 } },
-            h('span', null, `年化 ${backtest.annReturn>0?'+':''}${backtest.annReturn}%`),
-            h('span', null, `波动 ${backtest.annVol}%`),
-            h('span', null, `夏普 ${backtest.sharpe}`),
-            h('span', { style: { color: backtest.maxDD>10 ? '#d1403f' : '#666' } }, `最大回撤 ${backtest.maxDD}%`)
-          ) : h('div', { style: S.muted }, '暂无回测：请先在K线页同步持仓代码的日K'),
-          h('div', { style: { ...S.muted, fontSize: 10, marginTop: 4 } }, '基于本地日K按权重合成组合净值，252交易日年化；仅历史回测，不代表未来。')
-        )
+        h('div', { style: { ...S.muted, fontSize: 11 } }, '合规提示：模拟结果基于历史权重推算，不构成投资建议。满意后可在对话说“按模拟权重帮我改持仓”。')
       ) : null,
       h('div', { style: { display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' } },
         h('button', { style: { ...S.btn, padding: '4px 8px', background: BRAND, color: '#fff', borderColor: BRAND }, onClick: ()=> {
           const leader = todayAttribution[0]; if (leader) props.onOpen({ code: leader.code, type: leader.type, name: leader.name })
         } }, '🔍 诊断今日波动'),
-        h('button', { style: S.btn, onClick: async ()=> {
-          const codes = data.holdings.map(h=> h.code)
-          if (!codes.length) { alert('暂无持仓'); return }
-          if ((window as any).__groupEs) { try{ (window as any).__groupEs.close() }catch{} }
-          setGroupGen(true); setGroupProgress(8); setGroupStep('正在触发5视角并行…')
-          try {
-            const r = await apiPost<{ ok: boolean; status?: string; error?: string }>('/research/group', { codes, mode: 'full' })
-            if (!r.ok) { setGroupGen(false); alert('触发失败：'+(r.error||'未知')); return }
-            const qs = `?codes=${encodeURIComponent(codes.join(','))}`
-            const es = new EventSource(API + '/research/stream' + qs)
-            ;(window as any).__groupEs = es
-            setGroupStep('子智能体并行收集中…')
-            es.addEventListener('progress', (ev: MessageEvent)=>{
-              try{ const d=JSON.parse((ev as any).data); if(typeof d.progress==='number') setGroupProgress(d.progress); if(d.step) setGroupStep(d.step + (d.doneCount? ` (${d.doneCount}/${codes.length} 已归档)`:'')) }catch{}
-            })
-            es.addEventListener('done', ()=>{
-              setGroupProgress(100); setGroupStep('组团研究已完成，去对话查看汇总')
-              es.close(); setTimeout(()=> setGroupGen(false), 3000)
-            })
-            es.onerror = ()=> { setGroupStep('连接中断，仍可在对话查看'); es.close() }
-            setTimeout(()=> { try{ es.close() }catch{}; setGroupGen(false) }, 6*60*1000)
-          } catch(e:any){ setGroupGen(false); alert('触发失败：'+(e.message||e)) }
-        } }, groupGen ? `⏳ ${groupProgress}%` : '👥 一键组团研究'),
         h('button', { style: S.btn, onClick: ()=> {
-          const html = buildPortfolioHtmlReport({ holdings: data.holdings.map(h=> {
-            const q = quoteBy.get(`${h.type}:${h.code}`)
-            return { ...h, currentPrice: q?.price, name: q?.name||h.name, profit: q?.price ? (q.price - h.avgCost)*h.quantity : undefined }
-          }), totalValue, totalCost, risk: { hhi: hhi.toFixed(2), top1: top1.toFixed(0), byType, byMarket }, attribution: todayAttribution, backtest, sandboxW: sandboxActive ? sandboxW : null })
-          const blob = new Blob([html], { type: 'text/html' })
-          const url = URL.createObjectURL(blob)
-          window.open(url, '_blank')
-        } }, '📄 生成HTML报告')
-      ),
-      groupGen ? h('div', { style: { marginTop: 8, padding: '8px', background: '#f0f5ff', borderRadius: 8, border: '1px solid #d9e7ff' } },
-        h('div', { style: { display: 'flex', height: 6, borderRadius: 999, overflow: 'hidden', background: '#eef0f3' } },
-          h('div', { style: { width: `${groupProgress}%`, background: groupProgress>=100 ? DOWN : '#722ed1', transition: 'width 0.6s' } })),
-        h('div', { style: { ...S.muted, fontSize: 11, marginTop: 4, display: 'flex', justifyContent: 'space-between' } },
-          h('span', null, groupStep || '组团研究中…'),
-          h('span', { style: { fontWeight: 600, color: groupProgress>=100 ? DOWN : '#722ed1' } }, `${groupProgress}%`))
-      ) : null
+          // 一键组团研究：让模型并行研究持仓
+          const codes = data.holdings.map(h=> h.code).join('、')
+          const prompt = `请对我的持仓 ${codes} 做一次组团深研：基本面/技术/宏观/舆情 4个视角并行，最后汇总成一份中文 Markdown 报告并调用 save_position_analysis。`
+          // 通过在对话输入框注入？此处通过复制到剪贴板引导
+          try{ navigator.clipboard.writeText(prompt); }catch{}
+          alert('已复制组团研究指令，去对话粘贴发送即可：\n'+prompt)
+        } }, '👥 组团深研')
+      )
     ) : null,
 
     // 目标进度（wealth-goalcalc 场景化）
@@ -1564,59 +1414,6 @@ function PanelBody(props: {
     if (h < 15) return '下午 · 收盘前'
     return '晚 · 盘后梳理'
   })()
-  // 对话内嵌卡片：监听 dsn://portfolio 链接并替换为可交互卡片（面板联动）
-  useEffect(()=> {
-    const renderCard = (el: Element, info: { code: string; type: AssetType; name?: string }) => {
-      if ((el as any).__dsnPatched) return
-      ;(el as any).__dsnPatched = true
-      const q = quoteBy.get(`${info.type}:${info.code}`)
-      const card = document.createElement('div')
-      card.style.cssText = 'border:1px solid var(--dsw-alias-border-l2,#e5e5e5); border-radius:10px; padding:8px 10px; display:flex; align-items:center; gap:8px; background:#fff; cursor:pointer; margin:6px 0; max-width: 380px;'
-      const left = document.createElement('div')
-      left.style.flex = '1'
-      left.style.minWidth = '0'
-      const price = q?.price !== undefined ? q.price.toFixed(info.type==='fund'?4:2) : '—'
-      const pct = q?.changePercent !== undefined ? `${q.changePercent>=0?'+':''}${q.changePercent.toFixed(2)}%` : ''
-      const pctColor = q?.changePercent !== undefined ? (q.changePercent>=0 ? '#d1403f' : '#2ba471') : '#999'
-      left.innerHTML = `<div style="font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${q?.name || info.name || info.code} <span style="font-size:10px; color:#888; border:1px solid #eee; border-radius:4px; padding:0 4px; margin-left:6px">${q?.market || (info.type==='fund'?'基金':'股票')}</span></div><div style="font-size:11px; color:#999; display:flex; gap:6px"><span>${info.code}</span><span style="color:${pctColor}">${pct}</span><span>${price}</span></div>`
-      const btns = document.createElement('div')
-      btns.style.display = 'flex'
-      btns.style.gap = '6px'
-      const btnView = document.createElement('button')
-      btnView.textContent = '查看'
-      btnView.style.cssText = 'font:inherit; cursor:pointer; border:1px solid #4b7bec; background:#4b7bec; color:#fff; border-radius:8px; padding:4px 10px; font-size:12px'
-      btnView.onclick = (e)=> { e.stopPropagation(); props.onOpenAnalysis({ code: info.code, type: info.type, name: q?.name || info.name }) }
-      const btnAdd = document.createElement('button')
-      btnAdd.textContent = '加自选'
-      btnAdd.style.cssText = 'font:inherit; cursor:pointer; border:1px solid #ddd; background:#fff; border-radius:8px; padding:4px 8px; font-size:12px'
-      btnAdd.onclick = async (e)=> {
-        e.stopPropagation()
-        try { await fetch(API + '/mutate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'addWatch', payload: { code: info.code, type: info.type, name: info.name } }) }); btnAdd.textContent='已加'; (btnAdd as any).style.color='#2ba471' } catch {}
-      }
-      btns.appendChild(btnView); btns.appendChild(btnAdd)
-      card.appendChild(left); card.appendChild(btns)
-      card.onclick = ()=> props.onOpenAnalysis({ code: info.code, type: info.type, name: q?.name || info.name })
-      const parent = el.parentElement
-      if (parent) {
-        const target = el.tagName === 'IMG' && parent.tagName === 'A' && (parent as HTMLAnchorElement).href.startsWith('dsn:') ? parent : el
-        try { (target as any).replaceWith(card) } catch { try{ el.replaceWith(card) }catch{} }
-      } else {
-        try { el.replaceWith(card) } catch {}
-      }
-    }
-    const scan = ()=> {
-      document.querySelectorAll('a[href^="dsn://"], img[src^="dsn://"]').forEach(el=>{
-        const href = (el as HTMLAnchorElement).href || (el as HTMLImageElement).src || el.getAttribute('href') || el.getAttribute('src') || ''
-        const info = parseDsnUrl(href)
-        if (info) renderCard(el, info)
-      })
-    }
-    scan()
-    const obs = new MutationObserver(scan)
-    obs.observe(document.body, { childList: true, subtree: true })
-    const iv = setInterval(scan, 2000)
-    return ()=> { obs.disconnect(); clearInterval(iv) }
-  }, [quoteBy, props.onOpenAnalysis])
   return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
     h('div', { style: S.header },
       h(IconChart, { size: 16 }),
