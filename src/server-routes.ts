@@ -7,6 +7,7 @@ import type { McpManager } from './mcp/manager.js'
 import type { SkillManager } from './skills.js'
 import type { HistoryStore } from './history/store.js'
 import { syncHistory, type SymbolKind } from './history/sync.js'
+import { aggregateToWeekly, aggregateToMonthly } from './history/aggregate.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
 import type { AssetType } from './types.js'
 
@@ -368,10 +369,27 @@ export function registerRoutes(
           const kind = url.searchParams.get('kind') as SymbolKind | null
           if (!code) return sendJson(res, 400, { ok: false, error: 'code is required' })
           const resolvedKind: SymbolKind = kind && HISTORY_KINDS.includes(kind) ? kind : (/^[A-Za-z]/.test(code) ? 'us' : /^\d{4,5}$/.test(code) ? 'hk' : 'a')
-          // 优先用 history 中的日K，若请求非 daily 则实时拉取
-          if (history && period === 'daily') {
-            const h = await history.read(code)
-            if (h && h.kline.length) return sendJson(res, 200, { ok: true, code, period, kline: h.kline, events: h.events, provider: 'local-history' })
+          // 本地计算：若有本地日K历史，优先本地聚合周/月K，避免重复拉取且可离线
+          if (history) {
+            try {
+              const h = await history.read(code)
+              if (h && h.kline.length) {
+                if (period === 'daily') return sendJson(res, 200, { ok: true, code, period, kline: h.kline, events: h.events, provider: 'local-history' })
+                if (period === 'weekly') {
+                  const w = aggregateToWeekly(h.kline)
+                  if (w.length) return sendJson(res, 200, { ok: true, code, period, kline: w, events: h.events, provider: 'local-weekly' })
+                }
+                if (period === 'monthly' || period === 'month') {
+                  const m = aggregateToMonthly(h.kline)
+                  if (m.length) return sendJson(res, 200, { ok: true, code, period, kline: m, events: h.events, provider: 'local-monthly' })
+                }
+                // 兼容 weekly/month 别名
+                if (period === 'weekly' || period === 'week') {
+                  const w = aggregateToWeekly(h.kline)
+                  if (w.length) return sendJson(res, 200, { ok: true, code, period, kline: w, events: h.events, provider: 'local-weekly' })
+                }
+              }
+            } catch {}
           }
           const resK = resolvedKind === 'hk' ? await finance.getHkKline(code, period as any)
             : resolvedKind === 'us' ? await finance.getUsKline(code, period as any)
@@ -382,6 +400,71 @@ export function registerRoutes(
           let events: any[] = []
           if (history) { try { const h = await history.read(code); events = h?.events ?? [] } catch {} }
           return sendJson(res, 200, { ok: true, code, period, provider: resK.provider, kline: resK.data, events })
+        }
+        if (req.method === 'GET' && (sub === '/analysis/stream' || sub === '/narrative/stream')) {
+          const code = String(url.searchParams.get('code') ?? '').trim() || undefined
+          const type = url.searchParams.get('type') === 'fund' ? 'fund' as const : code ? 'stock' as const : undefined
+          const isNarrative = sub === '/narrative/stream'
+          // SSE headers
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          })
+          // 立即发送 open 事件
+          res.write(`event: open\ndata: ${JSON.stringify({ at: new Date().toISOString(), code, type, isNarrative })}\n\n`)
+          let progress = 8
+          let ticks = 0
+          const startedAt = Date.now()
+          const key = code ? `${type}:${code}` : 'narrative:MARKET'
+          const pendingKey = isNarrative && code ? `${type}:${code}` : key
+          // 心跳
+          const heartbeat = setInterval(()=> { try { res.write(`: heartbeat ${Date.now()}\n\n`) } catch {} }, 15000)
+          const timer = setInterval(()=> {
+            ticks++
+            const elapsed = Date.now() - startedAt
+            // 模拟进度：前2分钟快速到70%，之后缓慢到90%
+            if (elapsed < 30000) progress = Math.min(65, 10 + elapsed/500)
+            else if (elapsed < 120000) progress = Math.min(85, 65 + (elapsed-30000)/6000)
+            else progress = Math.min(92, 85 + (elapsed-120000)/20000)
+            // 检查是否已完成（仅对有 code 的走 AnalysisStore）
+            if (code && type) {
+              try {
+                const found = analyses.get(code, type)
+                if (found) {
+                  progress = 100
+                  res.write(`event: progress\ndata: ${JSON.stringify({ progress: 100, step: '报告已生成', status: 'ready' })}\n\n`)
+                  res.write(`event: done\ndata: ${JSON.stringify({ ok: true, found: true, analysis: found })}\n\n`)
+                  clearInterval(timer); clearInterval(heartbeat)
+                  try { res.end() } catch {}
+                  return
+                }
+              } catch {}
+            }
+            // 超时 5 分钟
+            if (elapsed > 5*60*1000) {
+              res.write(`event: timeout\ndata: ${JSON.stringify({ ok: false, error: 'timeout' })}\n\n`)
+              clearInterval(timer); clearInterval(heartbeat)
+              try { res.end() } catch {}
+              return
+            }
+            const step = progress < 30 ? '正在收集行情与K线…' : progress < 60 ? '正在分析技术与基本面…' : progress < 85 ? '正在结合叙事归因…' : '正在合成报告…'
+            // 是否仍在 pending
+            const pendingAt = pendingAnalyses.get(pendingKey)
+            const isPending = pendingAt && Date.now() - pendingAt < 10*60*1000
+            if (!isPending && ticks > 5 && !code) {
+              // 市场级叙事无缓存，提示去对话查看
+              if (progress > 70) {
+                res.write(`event: progress\ndata: ${JSON.stringify({ progress: Math.min(95, progress), step: '模型正在对话中输出报告…' })}\n\n`)
+                return
+              }
+            }
+            res.write(`event: progress\ndata: ${JSON.stringify({ progress: Math.round(progress), step, status: isPending ? 'generating' : 'waiting' })}\n\n`)
+          }, 1000)
+          req.on('close', ()=> { clearInterval(timer); clearInterval(heartbeat) })
+          req.on('error', ()=> { clearInterval(timer); clearInterval(heartbeat) })
+          return
         }
         if (req.method === 'POST' && sub === '/mutate') {
           const body = await readBody(req)

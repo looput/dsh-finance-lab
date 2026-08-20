@@ -1005,15 +1005,47 @@ function NarrativeView(props: { active: boolean; data: LiveData; quoteBy: Map<st
     } catch { /* */ } finally { setLoading(false) }
   }, [props.data.holdings])
   useEffect(()=> { if (props.active && !events.length) void load() }, [props.active])
+  const [sseProgress, setSseProgress] = useState<number>(0)
+  const [sseStep, setSseStep] = useState<string>('')
+  const sseRef = useRef<EventSource | null>(null)
   const trigger = async (code?: string, type?: AssetType) => {
     const key = code ? `${type}:${code}` : 'MARKET'
-    setGenerating(key); setGenHint('')
+    setGenerating(key); setGenHint(''); setSseProgress(8); setSseStep('正在触发模型…')
+    // 关闭旧 SSE
+    try { sseRef.current?.close() } catch {}
     try {
       const r = await apiPost<{ ok: boolean; status?: string; error?: string }>('/narrative/analyze', { code, type, events: events.slice(0,12) })
-      if (r.ok) setGenHint(r.status==='generating' ? `已触发 ${code || '全市场'} 叙事解读，模型正在对话中生成…` : '已生成')
-      else setGenHint(r.error || '触发失败')
-    } catch (e:any) { setGenHint(e.message || '触发失败') } finally { setTimeout(()=> setGenerating(null), 3000) }
+      if (!r.ok) { setGenHint(r.error || '触发失败'); setGenerating(null); return }
+      setGenHint(`已触发 ${code || '全市场'} 叙事解读，实时进度如下…`)
+      // 开启 SSE 实时进度
+      const qs = code ? `?code=${encodeURIComponent(code)}&type=${type}` : ''
+      const es = new EventSource(API + '/narrative/stream' + qs)
+      sseRef.current = es
+      es.addEventListener('progress', (ev: MessageEvent) => {
+        try {
+          const d = JSON.parse((ev as any).data)
+          if (typeof d.progress === 'number') setSseProgress(d.progress)
+          if (d.step) setSseStep(d.step)
+        } catch {}
+      })
+      es.addEventListener('done', (ev: MessageEvent) => {
+        try {
+          const d = JSON.parse((ev as any).data)
+          setSseProgress(100); setSseStep('报告已生成')
+          if (d.analysis) setGenHint(`报告已生成：${code || '全市场'} · ${new Date(d.analysis.generatedAt).toLocaleTimeString()}`)
+          else setGenHint('模型已在对话中输出报告，请切换到对话查看')
+        } catch { setGenHint('已完成') }
+        es.close(); setGenerating(null)
+        // 若为单标的，3秒后自动刷新叙事线或可跳转持仓
+        if (code && props.onOpen) setTimeout(()=> props.onOpen!({ code: code!, type: type as any }), 1500)
+      })
+      es.addEventListener('open', () => setSseStep('连接已建立，等待模型…'))
+      es.onerror = () => { setSseStep('连接中断，仍可在对话查看进度'); es.close() }
+      // 5分钟后自动关闭
+      setTimeout(()=> { try{ es.close() }catch{}; setGenerating(null) }, 5*60*1000)
+    } catch (e:any) { setGenHint(e.message || '触发失败'); setGenerating(null) }
   }
+  useEffect(()=> ()=> { try{ sseRef.current?.close() }catch{} }, [])
   const icon = (k: string) => k==='flash' ? '⚡' : k==='macro' ? '🏛' : k==='kline' ? '📈' : '📰'
   const greeting = (() => {
     const h = new Date().getHours()
@@ -1032,6 +1064,14 @@ function NarrativeView(props: { active: boolean; data: LiveData; quoteBy: Map<st
         h('button', { style: { ...S.btn, background: '#722ed1', color: '#fff', borderColor: '#722ed1' }, disabled: !!generating, onClick: ()=> void trigger(undefined, undefined) }, generating==='MARKET' ? '生成中…' : '📄 一键生成今日叙事报告'),
         h('button', { style: S.btn, onClick: ()=> { const codes = props.data.holdings.map(h=> h.code).join('、') || '暂无持仓'; const txt=`请结合叙事时间线解读持仓：${codes}`; try{ navigator.clipboard.writeText(txt)}catch{}; setGenHint('已复制持仓叙事提示') } }, '复制持仓提示')),
       genHint ? h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6, color: generating ? BRAND : S.muted.color } }, genHint) : null,
+      generating ? h('div', { style: { marginTop: 8, padding: '8px', background: '#f8f9fb', borderRadius: 8, border: `1px solid ${V('--dsw-alias-border-l2','#eee')}` } },
+        h('div', { style: { display: 'flex', height: 6, borderRadius: 999, overflow: 'hidden', background: '#eef0f3' } },
+          h('div', { style: { width: `${sseProgress}%`, background: sseProgress>=100 ? DOWN : BRAND, transition: 'width 0.6s ease' } })),
+        h('div', { style: { ...S.muted, fontSize: 11, marginTop: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+          h('span', null, `${sseStep || '等待模型响应…'} `),
+          h('span', { style: { fontWeight: 600, color: sseProgress>=100 ? DOWN : BRAND } }, `${sseProgress}%`)),
+        h('div', { style: { ...S.muted, fontSize: 10, marginTop: 2 } }, `任务 ${generating} · 实时 SSE 推送 · 完成后可在对话或持仓缓存查看`)
+      ) : null,
       h('div', { style: { ...S.muted, fontSize: 10, marginTop: 4 } }, '一键生成会让当前 Harness 会话的模型结合时间线做归因，报告可在对话中查看；若指定标的则同时写入持仓解读缓存。')
     ),
     events.length===0 ? h('div', { style: S.muted }, loading ? '聚合中…' : '暂无叙事，先同步K线或等待快讯') :
