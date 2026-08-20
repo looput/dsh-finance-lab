@@ -796,43 +796,123 @@ interface HistBar { date: string; open: number; high: number; low: number; close
 interface HistEvent { date: string; type: string; label: string; value?: number }
 const EVENT_COLOR = (t: string) => (t === '财报' ? BRAND : t === '分红' ? DOWN : '#e6a23c')
 
-function KlineChart(props: { kline: HistBar[]; events: HistEvent[] }) {
+// ---- 专业 K线：蜡烛 + 影线 + 成交量 + MA + 事件 + 十字线 Tooltip ----
+function calcMA(closes: number[], period: number): (number|undefined)[] {
+  const out: (number|undefined)[] = []
+  for (let i=0;i<closes.length;i++) {
+    if (i < period-1) { out.push(undefined); continue }
+    let s=0; for(let j=i-period+1;j<=i;j++) s+=closes[j]!; out.push(Number((s/period).toFixed(2)))
+  }
+  return out
+}
+function ProKlineChart(props: { kline: HistBar[]; events: HistEvent[]; ma5?: boolean; ma20?: boolean; ma60?: boolean; height?: number }) {
   const { kline, events } = props
-  const W = 372, H = 168, padTop = 16, padBot = 18
-  if (kline.length < 2) return h('div', { style: S.muted }, '暂无K线，先点「同步」')
-  const closes = kline.map((b) => b.close)
-  const min = Math.min(...closes), max = Math.max(...closes)
+  const showMA5 = props.ma5 !== false, showMA20 = props.ma20 !== false, showMA60 = !!props.ma60
+  const W = 372, H = props.height ?? 220, padTop = 16, padBot = 42, volH = 36
+  const priceH = H - padTop - padBot
+  const [hover, setHover] = useState<number | null>(null)
+  if (kline.length < 2) return h('div', { style: S.muted }, '暂无K线，先点「同步」或切换周期')
+  const N = kline.length
+  const visible = kline.slice(-Math.min(N, 120)) // 最多120根，保持可读
+  const n = visible.length
+  const closes = visible.map(b=> b.close), opens = visible.map(b=> b.open), highs = visible.map(b=> b.high), lows = visible.map(b=> b.low), vols = visible.map(b=> b.volume)
+  const min = Math.min(...lows), max = Math.max(...highs)
   const span = max - min || 1
-  const x = (i: number) => (i / (kline.length - 1)) * (W - 8) + 4
-  const y = (v: number) => padTop + (1 - (v - min) / span) * (H - padTop - padBot)
-  const points = closes.map((c, i) => `${x(i).toFixed(1)},${y(c).toFixed(1)}`).join(' ')
+  const volMax = Math.max(...vols, 1)
+  const ma5 = calcMA(closes, 5), ma20 = calcMA(closes, 20), ma60 = calcMA(closes, 60)
+  const candleW = Math.max(2, Math.min(6, (W-16)/n -1))
+  const gap = (W-16)/n
+  const x = (i:number)=> 8 + i*gap + gap/2
+  const y = (v:number)=> padTop + (1 - (v - min)/span)*priceH
+  const yVol = (v:number)=> padTop + priceH + 8 + (1 - v/volMax)*(volH-4)
   const idxByDate = (d: string) => {
-    let idx = kline.findIndex((b) => b.date >= d)
-    if (idx < 0) idx = kline.length - 1
+    let idx = visible.findIndex(b => b.date >= d)
+    if (idx < 0) idx = n-1
     return idx
   }
-  const marks = events.filter((e) => e.date >= kline[0]!.date).map((e) => ({ e, xi: x(idxByDate(e.date)) }))
-  return h('svg', { width: '100%', viewBox: `0 0 ${W} ${H}`, style: { display: 'block' } },
-    h('polyline', { points, fill: 'none', stroke: BRAND, strokeWidth: 1.5 }),
-    ...marks.map((m, i) => h('g', { key: i },
-      h('line', { x1: m.xi, y1: padTop, x2: m.xi, y2: H - padBot, stroke: EVENT_COLOR(m.e.type), strokeWidth: 1, strokeDasharray: '3 3', opacity: 0.7 }),
-      h('circle', { cx: m.xi, cy: padTop, r: 3, fill: EVENT_COLOR(m.e.type) }))),
-    h('text', { x: 4, y: 11, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${max.toFixed(2)}`),
-    h('text', { x: 4, y: H - 4, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${min.toFixed(2)} · ${kline[0]!.date}→${kline[kline.length - 1]!.date}`))
+  const hoverIdx = hover!==null ? Math.max(0, Math.min(n-1, hover)) : null
+  const hoverBar = hoverIdx!==null ? visible[hoverIdx] : null
+  const hoverMA5 = hoverIdx!==null ? ma5[hoverIdx] : undefined
+  const hoverMA20 = hoverIdx!==null ? ma20[hoverIdx] : undefined
+  const handleMove = (e: any) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const cx = e.clientX - rect.left
+    const idx = Math.floor((cx - 8)/gap)
+    setHover(Math.max(0, Math.min(n-1, idx)))
+  }
+  return h('div', { style: { position: 'relative' } },
+    h('div', { style: { display: 'flex', gap: 8, ...S.muted, fontSize: 10, marginBottom: 2, flexWrap: 'wrap' } },
+      h('span', null, `H ${max.toFixed(2)} L ${min.toFixed(2)}`),
+      showMA5 ? h('span', { style: { color: '#e67e22' } }, `MA5 ${ma5[n-1]?.toFixed(2) ?? '—'}`) : null,
+      showMA20 ? h('span', { style: { color: '#2980b9' } }, `MA20 ${ma20[n-1]?.toFixed(2) ?? '—'}`) : null,
+      showMA60 ? h('span', { style: { color: '#8e44ad' } }, `MA60 ${ma60[n-1]?.toFixed(2) ?? '—'}`) : null,
+      h('span', { style: { marginLeft: 'auto' } }, `${visible[0]!.date.slice(5)} → ${visible[n-1]!.date.slice(5)} · ${n}根`)),
+    h('svg', { width: '100%', viewBox: `0 0 ${W} ${H}`, style: { display: 'block', background: V('--dsw-alias-bg-layer-3','#fff'), borderRadius: 6, border: `1px solid ${V('--dsw-alias-border-l2','#eee')}` }, onMouseMove: handleMove, onMouseLeave: ()=> setHover(null) },
+      // 网格
+      ...[0,0.25,0.5,0.75,1].map(p=> h('line', { key: `g-${p}`, x1: 0, x2: W, y1: padTop + priceH*p, y2: padTop + priceH*p, stroke: V('--dsw-alias-border-l2','#f0f0f0'), strokeWidth: 0.5 })),
+      // 成交量柱
+      ...visible.map((b,i)=> {
+        const isUp = b.close >= b.open
+        return h('rect', { key: `v-${i}`, x: x(i)-candleW/2, y: yVol(b.volume), width: candleW, height: Math.max(1, (padTop+priceH+volH) - yVol(b.volume)), fill: isUp ? 'rgba(209,64,63,0.35)' : 'rgba(43,164,113,0.35)' })
+      }),
+      // 蜡烛
+      ...visible.map((b,i)=> {
+        const isUp = b.close >= b.open
+        const col = isUp ? UP : DOWN
+        const bodyTop = y(Math.max(b.open, b.close)), bodyBot = y(Math.min(b.open, b.close)), bodyH = Math.max(1, bodyBot - bodyTop)
+        return h('g', { key: `c-${i}` },
+          h('line', { x1: x(i), x2: x(i), y1: y(b.high), y2: y(b.low), stroke: col, strokeWidth: 1 }),
+          h('rect', { x: x(i)-candleW/2, y: bodyTop, width: candleW, height: bodyH, fill: col, stroke: col }))
+      }),
+      // MA 线
+      showMA5 ? h('polyline', { points: ma5.map((v,i)=> v===undefined? '' : `${x(i).toFixed(1)},${y(v).toFixed(1)}`).filter(Boolean).join(' '), fill: 'none', stroke: '#e67e22', strokeWidth: 1, opacity: 0.9 }) : null,
+      showMA20 ? h('polyline', { points: ma20.map((v,i)=> v===undefined? '' : `${x(i).toFixed(1)},${y(v).toFixed(1)}`).filter(Boolean).join(' '), fill: 'none', stroke: '#2980b9', strokeWidth: 1, opacity: 0.9 }) : null,
+      showMA60 && ma60 ? h('polyline', { points: ma60.map((v,i)=> v===undefined? '' : `${x(i).toFixed(1)},${y(v).toFixed(1)}`).filter(Boolean).join(' '), fill: 'none', stroke: '#8e44ad', strokeWidth: 1, opacity: 0.8 }) : null,
+      // 事件虚线
+      ...events.filter(e=> e.date >= visible[0]!.date).map((e,i)=> {
+        const xi = x(idxByDate(e.date))
+        return h('g', { key: `e-${i}` },
+          h('line', { x1: xi, y1: padTop, x2: xi, y2: padTop+priceH, stroke: EVENT_COLOR(e.type), strokeWidth: 1, strokeDasharray: '3 3', opacity: 0.7 }),
+          h('circle', { cx: xi, cy: padTop-3, r: 3.5, fill: EVENT_COLOR(e.type), stroke: '#fff', strokeWidth: 1 }),
+          h('text', { x: xi+4, y: padTop-4, fontSize: 7, fill: EVENT_COLOR(e.type) }, e.type))
+      }),
+      // 十字线
+      hoverIdx!==null ? h('g', null,
+        h('line', { x1: x(hoverIdx), x2: x(hoverIdx), y1: padTop, y2: H-4, stroke: '#999', strokeWidth: 0.7, strokeDasharray: '2 2', opacity: 0.6 }),
+        hoverBar ? h('rect', { x: Math.min(W-112, Math.max(0, x(hoverIdx)-56)), y: H-14, width: 112, height: 12, rx: 4, fill: 'rgba(0,0,0,0.75)' }) : null,
+        hoverBar ? h('text', { x: Math.min(W-56, Math.max(56, x(hoverIdx))), y: H-6, fontSize: 7, fill: '#fff', textAnchor: 'middle' }, `${hoverBar.date} O${hoverBar.open.toFixed(2)} H${hoverBar.high.toFixed(2)} L${hoverBar.low.toFixed(2)} C${hoverBar.close.toFixed(2)}`) : null
+      ) : null,
+      // 边界价格
+      h('text', { x: 4, y: padTop+8, fontSize: 8, fill: DOWN, opacity: 0.8 }, max.toFixed(2)),
+      h('text', { x: 4, y: padTop+priceH-2, fontSize: 8, fill: UP, opacity: 0.8 }, min.toFixed(2)),
+      h('text', { x: W-2, y: padTop+priceH+8, fontSize: 7, fill: V('--dsw-alias-label-tertiary','#999'), textAnchor: 'end' }, `VOL`),
+      h('text', { x: W-2, y: H-2, fontSize: 7, fill: V('--dsw-alias-label-tertiary','#999'), textAnchor: 'end' }, hoverBar ? `V ${(hoverBar.volume/10000).toFixed(1)}万 · MA5 ${hoverMA5?.toFixed(2) ?? '—'} MA20 ${hoverMA20?.toFixed(2) ?? '—'}` : `量 ${volMax>10000 ? (volMax/10000).toFixed(1)+'万' : volMax}`)
+    ),
+    hoverBar ? h('div', { style: { ...S.muted, fontSize: 10, marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap' } },
+      h('span', { style: { color: hoverBar.close >= hoverBar.open ? UP : DOWN } }, `${hoverBar.date} ${hoverBar.close >= hoverBar.open ? '↑' : '↓'} ${((hoverBar.close-hoverBar.open)/hoverBar.open*100).toFixed(2)}%`),
+      h('span', null, `开${hoverBar.open.toFixed(2)} 收${hoverBar.close.toFixed(2)} 高${hoverBar.high.toFixed(2)} 低${hoverBar.low.toFixed(2)}`)
+    ) : null
+  )
 }
 
-function KlineView(props: { data: LiveData }) {
+function KlineView(props: { data: LiveData; onOpen?: (item: { code: string; type: AssetType; name?: string }) => void }) {
   const [code, setCode] = useState('')
   const [kind, setKind] = useState('a')
-  const [hist, setHist] = useState<{ kline: HistBar[]; events: HistEvent[]; updatedAt?: string } | null>(null)
+  const [period, setPeriod] = useState<'daily'|'weekly'|'monthly'>('daily')
+  const [ma, setMa] = useState({ ma5: true, ma20: true, ma60: false })
+  const [hist, setHist] = useState<{ kline: HistBar[]; events: HistEvent[]; updatedAt?: string; provider?: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [hint, setHint] = useState('')
   const picks = [...props.data.holdings, ...props.data.watchlist].slice(0, 8)
-  const load = async (c: string) => {
+  const load = async (c: string, per: string = period) => {
     if (!c) return
     try {
-      const r = await apiGet<{ ok: boolean; kline?: HistBar[]; events?: HistEvent[]; updatedAt?: string }>(`/history?code=${encodeURIComponent(c)}`)
-      setHist(r.ok ? { kline: r.kline ?? [], events: r.events ?? [], updatedAt: r.updatedAt } : { kline: [], events: [] })
+      // 优先走本地历史+实时聚合接口，支持多周期
+      const r = await apiGet<{ ok: boolean; kline?: HistBar[]; events?: HistEvent[]; updatedAt?: string; provider?: string }>(`/kline?code=${encodeURIComponent(c)}&period=${per}&kind=${kind}`)
+      if (r.ok && r.kline?.length) { setHist({ kline: r.kline, events: r.events ?? [], updatedAt: r.updatedAt, provider: r.provider }); setHint(`来源 ${r.provider ?? ''} · ${r.kline.length}根`); return }
+      const h = await apiGet<{ ok: boolean; kline?: HistBar[]; events?: HistEvent[]; updatedAt?: string }>(`/history?code=${encodeURIComponent(c)}`)
+      setHist(h.ok ? { kline: h.kline ?? [], events: h.events ?? [], updatedAt: h.updatedAt } : { kline: [], events: [] })
+      if (!h.ok) setHint('暂无本地历史，试试「同步」')
     } catch { setHist({ kline: [], events: [] }) }
   }
   const sync = async () => {
@@ -845,36 +925,61 @@ function KlineView(props: { data: LiveData }) {
     } catch { setHint('同步失败') } finally { setBusy(false) }
   }
   useEffect(() => { if (code) void load(code) }, [])
-  return h('div', { style: S.section },
-    h('div', { style: S.title }, 'K线与事件'),
-    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-      h('input', { style: { ...S.input, flex: 1, minWidth: 90 }, placeholder: '代码 600519', value: code, onChange: (e: { target: { value: string } }) => setCode(e.target.value) }),
-      h('select', { style: { ...S.input, width: 70 }, value: kind, onChange: (e: { target: { value: string } }) => setKind(e.target.value) },
-        h('option', { value: 'a' }, 'A股'), h('option', { value: 'hk' }, '港股'), h('option', { value: 'us' }, '美股'), h('option', { value: 'fund' }, '基金')),
-      h('button', { style: S.btn, disabled: busy, onClick: () => void sync() }, busy ? '同步中…' : '同步'),
-      h('button', { style: S.btn, onClick: () => void load(code.trim()) }, '查看')),
-    picks.length ? h('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } }, picks.map((p) => h('button', {
-      key: keyOf(p.code, p.type ?? 'stock'), style: { ...S.btn, padding: '2px 6px', fontSize: 11 },
-      onClick: () => { setCode(p.code); setKind(p.type === 'fund' ? 'fund' : 'a'); void load(p.code) },
-    }, p.name || p.code))) : null,
-    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
-    hist ? h(KlineChart, { kline: hist.kline, events: hist.events }) : h('div', { style: S.muted }, '输入代码后「同步」拉取并本地保存历史'),
-    hist && hist.events.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 } },
-      h('div', { style: { ...S.muted, fontWeight: 600 } }, `事件标记 (${hist.events.length})`),
-      hist.events.slice(-12).reverse().map((e, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center' } },
-        h('span', { style: { width: 8, height: 8, borderRadius: 999, background: EVENT_COLOR(e.type), flex: '0 0 auto' } }),
-        h('span', { style: { ...S.muted, width: 82, flex: '0 0 auto' } }, e.date),
-        h('span', { style: { flex: 1 } }, e.label)))) : null)
+  const last = hist?.kline?.[hist.kline.length-1]
+  const prev = hist?.kline?.[hist.kline.length-2]
+  const chg = last && prev ? ((last.close - prev.close)/prev.close*100) : undefined
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+    h('div', { style: S.section },
+      h('div', { style: S.title }, 'K线 · 专业蜡烛', h('span', { style: { ...S.muted, fontWeight: 400, marginLeft: 6, fontSize: 11 } }, '蜡烛+均线+量+事件 同屏')),
+      h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
+        h('input', { style: { ...S.input, flex: 1, minWidth: 90 }, placeholder: '代码 600519', value: code, onChange: (e: { target: { value: string } }) => setCode(e.target.value) }),
+        h('select', { style: { ...S.input, width: 70 }, value: kind, onChange: (e: { target: { value: string } }) => setKind(e.target.value) },
+          h('option', { value: 'a' }, 'A股'), h('option', { value: 'hk' }, '港股'), h('option', { value: 'us' }, '美股'), h('option', { value: 'fund' }, '基金')),
+        h('select', { style: { ...S.input, width: 78 }, value: period, onChange: (e: { target: { value: string } }) => { const v = e.target.value as any; setPeriod(v); if (code) void load(code, v) } },
+          h('option', { value: 'daily' }, '日K'), h('option', { value: 'weekly' }, '周K'), h('option', { value: 'monthly' }, '月K')),
+        h('button', { style: S.btn, disabled: busy, onClick: () => void sync() }, busy ? '同步中…' : '同步'),
+        h('button', { style: S.btn, onClick: () => void load(code.trim()) }, '查看')),
+      picks.length ? h('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } }, picks.map((p) => h('button', {
+        key: keyOf(p.code, p.type ?? 'stock'), style: { ...S.btn, padding: '2px 6px', fontSize: 11 },
+        onClick: () => { setCode(p.code); setKind(p.type === 'fund' ? 'fund' : 'a'); void load(p.code) },
+      }, p.name || p.code))) : null,
+      h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 4 } },
+        h('span', { style: S.muted }, '均线'),
+        h('button', { style: { ...S.btn, padding: '2px 8px', background: ma.ma5 ? '#e67e22' : S.btn.background, color: ma.ma5 ? '#fff' : S.btn.color, borderColor: ma.ma5 ? '#e67e22' : S.btn.border as any }, onClick: ()=> setMa(s=> ({...s, ma5: !s.ma5})) }, 'MA5'),
+        h('button', { style: { ...S.btn, padding: '2px 8px', background: ma.ma20 ? '#2980b9' : S.btn.background, color: ma.ma20 ? '#fff' : S.btn.color, borderColor: ma.ma20 ? '#2980b9' : S.btn.border as any }, onClick: ()=> setMa(s=> ({...s, ma20: !s.ma20})) }, 'MA20'),
+        h('button', { style: { ...S.btn, padding: '2px 8px', background: ma.ma60 ? '#8e44ad' : S.btn.background, color: ma.ma60 ? '#fff' : S.btn.color, borderColor: ma.ma60 ? '#8e44ad' : S.btn.border as any }, onClick: ()=> setMa(s=> ({...s, ma60: !s.ma60})) }, 'MA60'),
+        last ? h('span', { style: { ...S.muted, marginLeft: 'auto' } }, `${last.date} 收${last.close.toFixed(2)} ${chg!==undefined ? (chg>=0?'+':'')+chg.toFixed(2)+'%' : ''}`) : null),
+      hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
+      hist ? h(ProKlineChart, { kline: hist.kline, events: hist.events, ma5: ma.ma5, ma20: ma.ma20, ma60: ma.ma60, height: 240 }) : h('div', { style: S.muted }, '输入代码后「同步」拉取并本地保存历史，支持日/周/月与均线叠加'),
+      hist && last ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 } },
+        h('button', { style: { ...S.btn, background: BRAND, color: '#fff', borderColor: BRAND }, onClick: ()=> props.onOpen?.({ code, type: kind==='fund'?'fund':'stock', name: code }) }, '📄 生成此标的叙事解读'),
+        h('button', { style: S.btn, onClick: ()=> { try{ navigator.clipboard.writeText(code); }catch{}; setHint('已复制代码 '+code) } }, '复制代码'),
+        hist.provider ? h('span', { style: { ...S.muted, fontSize: 11, alignSelf: 'center' } }, `数据源 ${hist.provider} · 事件 ${hist.events.length}个`) : null
+      ) : null,
+      hist && hist.events.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 } },
+        h('div', { style: { ...S.muted, fontWeight: 600, fontSize: 11 } }, `事件标记 (${hist.events.length}) · 蓝=财报 绿=分红`),
+        hist.events.slice(-6).reverse().map((e, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 } },
+          h('span', { style: { width: 8, height: 8, borderRadius: 999, background: EVENT_COLOR(e.type), flex: '0 0 auto' } }),
+          h('span', { style: { ...S.muted, width: 82, flex: '0 0 auto' } }, e.date),
+          h('span', { style: { flex: 1 } }, e.label)))) : null)
+  )
 }
 
-// ---- 叙事 tab：K线事件 + 市场快讯 + 宏观 + 持仓新闻 同屏时间轴（金融叙事核心）----
+// ---- 叙事 tab：后端聚合 + 一键闭环（快讯/宏观/事件 → 报告）----
 interface NarrativeEvent { time: string; kind: 'kline'|'news'|'macro'|'flash'; label: string; detail?: string; color: string; code?: string }
-function NarrativeView(props: { active: boolean; data: LiveData; quoteBy: Map<string, LiveQuote> }) {
+function NarrativeView(props: { active: boolean; data: LiveData; quoteBy: Map<string, LiveQuote>; onOpen?: (item: { code: string; type: AssetType; name?: string }) => void }) {
   const [events, setEvents] = useState<NarrativeEvent[]>([])
   const [loading, setLoading] = useState(false)
+  const [generating, setGenerating] = useState<string | null>(null)
+  const [genHint, setGenHint] = useState('')
   const load = useCallback(async () => {
     setLoading(true)
     try {
+      // 优先后端聚合，失败回退前端聚合
+      try {
+        const r = await apiGet<{ ok: boolean; events: NarrativeEvent[] }>('/narrative')
+        if (r.ok && r.events.length) { setEvents(r.events); return }
+      } catch {}
       const [newsR, macroR] = await Promise.all([
         apiGet<{ news: Array<{ title: string; time?: string; url?: string }> }>('/news').catch(()=> ({ news: [] } as any)),
         apiGet<{ series: Array<{ series: string; label?: string; latest?: { time: string; value?: number }; error?: string }> }>('/macro').catch(()=> ({ series: [] } as any)),
@@ -887,7 +992,6 @@ function NarrativeView(props: { active: boolean; data: LiveData; quoteBy: Map<st
         if (s.error || !s.latest?.time) continue
         list.push({ time: s.latest.time, kind: 'macro', label: `${s.label || s.series} ${s.latest.value}`, detail: s.series, color: '#722ed1' })
       }
-      // 持仓相关K线事件（本地历史）
       for (const hd of props.data.holdings.slice(0,3)) {
         try {
           const h = await apiGet<{ ok: boolean; events?: Array<{ date: string; type: string; label: string }> }>(`/history?code=${encodeURIComponent(hd.code)}`)
@@ -900,7 +1004,16 @@ function NarrativeView(props: { active: boolean; data: LiveData; quoteBy: Map<st
       setEvents(list.slice(0,20))
     } catch { /* */ } finally { setLoading(false) }
   }, [props.data.holdings])
-  useEffect(()=> { if (props.active && !events.length) void load() }, [props.active]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=> { if (props.active && !events.length) void load() }, [props.active])
+  const trigger = async (code?: string, type?: AssetType) => {
+    const key = code ? `${type}:${code}` : 'MARKET'
+    setGenerating(key); setGenHint('')
+    try {
+      const r = await apiPost<{ ok: boolean; status?: string; error?: string }>('/narrative/analyze', { code, type, events: events.slice(0,12) })
+      if (r.ok) setGenHint(r.status==='generating' ? `已触发 ${code || '全市场'} 叙事解读，模型正在对话中生成…` : '已生成')
+      else setGenHint(r.error || '触发失败')
+    } catch (e:any) { setGenHint(e.message || '触发失败') } finally { setTimeout(()=> setGenerating(null), 3000) }
+  }
   const icon = (k: string) => k==='flash' ? '⚡' : k==='macro' ? '🏛' : k==='kline' ? '📈' : '📰'
   const greeting = (() => {
     const h = new Date().getHours()
@@ -911,28 +1024,40 @@ function NarrativeView(props: { active: boolean; data: LiveData; quoteBy: Map<st
     return '盘后 · 梳理今日叙事'
   })()
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
-    h('div', { style: S.card, background: 'linear-gradient(135deg, #f0f5ff 0%, #f6ffed 100%)', borderColor: '#d9e7ff' },
-      h('div', { style: { fontWeight: 700 } }, greeting),
-      h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, `已聚合 ${events.length} 条  ·  市场快讯 + 宏观指标 + 持仓事件同屏时间轴，帮你回答“今天为什么涨/跌”`),
-      h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6, background: BRAND, color: '#fff', borderColor: BRAND }, onClick: ()=> void load(), disabled: loading }, loading ? '聚合中…' : '刷新叙事线')),
+    h('div', { style: { ...S.card, background: 'linear-gradient(135deg, #f0f5ff 0%, #f6ffed 100%)', borderColor: '#d9e7ff' } },
+      h('div', { style: { fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 } }, greeting, h('span', { style: { ...S.tag, background: '#fff', border: `1px solid ${V('--dsw-alias-border-l2','#e5e5e5')}` } }, `${events.length}条`)),
+      h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, `已聚合 市场快讯 + 宏观指标 + 持仓事件 同屏时间轴，帮你回答“今天为什么涨/跌”`),
+      h('div', { style: { display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' } },
+        h('button', { style: { ...S.btn, background: BRAND, color: '#fff', borderColor: BRAND }, onClick: ()=> void load(), disabled: loading }, loading ? '聚合中…' : '刷新叙事线'),
+        h('button', { style: { ...S.btn, background: '#722ed1', color: '#fff', borderColor: '#722ed1' }, disabled: !!generating, onClick: ()=> void trigger(undefined, undefined) }, generating==='MARKET' ? '生成中…' : '📄 一键生成今日叙事报告'),
+        h('button', { style: S.btn, onClick: ()=> { const codes = props.data.holdings.map(h=> h.code).join('、') || '暂无持仓'; const txt=`请结合叙事时间线解读持仓：${codes}`; try{ navigator.clipboard.writeText(txt)}catch{}; setGenHint('已复制持仓叙事提示') } }, '复制持仓提示')),
+      genHint ? h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6, color: generating ? BRAND : S.muted.color } }, genHint) : null,
+      h('div', { style: { ...S.muted, fontSize: 10, marginTop: 4 } }, '一键生成会让当前 Harness 会话的模型结合时间线做归因，报告可在对话中查看；若指定标的则同时写入持仓解读缓存。')
+    ),
     events.length===0 ? h('div', { style: S.muted }, loading ? '聚合中…' : '暂无叙事，先同步K线或等待快讯') :
       h('div', { style: { display: 'flex', flexDirection: 'column', gap: 0, position: 'relative', paddingLeft: 14, borderLeft: `2px solid ${V('--dsw-alias-border-l2', '#eee')}` } },
-        events.map((e,i)=> h('div', { key: i, style: { display: 'flex', gap: 8, padding: '7px 0', borderTop: i? `1px solid ${V('--dsw-alias-border-l2', '#f5f5f5')}` : 'none' } },
+        events.map((e,i)=> h('div', { key: i, style: { display: 'flex', gap: 8, padding: '7px 0', borderTop: i? `1px solid ${V('--dsw-alias-border-l2', '#f5f5f5')}` : 'none', alignItems: 'center' } },
           h('span', { style: { width: 22, height: 22, borderRadius: 999, background: e.color, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, flex: '0 0 auto' } }, icon(e.kind)),
           h('div', { style: { flex: 1, minWidth: 0 } },
             h('div', { style: { fontSize: 12, fontWeight: 500, lineHeight: 1.4 } }, e.label),
-            h('div', { style: { ...S.muted, fontSize: 11, display: 'flex', gap: 6 } },
+            h('div', { style: { ...S.muted, fontSize: 11, display: 'flex', gap: 6, flexWrap: 'wrap' } },
               h('span', null, e.time.slice(0,10)),
               h('span', { style: S.tag }, e.kind==='flash'?'快讯': e.kind==='macro'?'宏观': e.kind==='kline'?'事件':'新闻'),
               e.code ? h('span', { style: S.tag }, e.code) : null)),
-          e.detail && e.detail.startsWith('http') ? h('button', { style: { ...S.btn, padding: '2px 6px', flex: '0 0 auto' }, onClick: ()=> window.open(e.detail, '_blank') }, '看') : null))
+          h('div', { style: { display: 'flex', gap: 4, flex: '0 0 auto' } },
+            e.code ? h('button', { style: { ...S.btn, padding: '2px 6px', fontSize: 11 }, disabled: generating===`${e.code.includes('HK')?'stock': e.kind==='kline' ? 'stock':'stock'}:${e.code}` , onClick: ()=> {
+              const isFund = props.data.holdings.find(h=> h.code===e.code)?.type === 'fund' || props.data.watchlist.find(w=> w.code===e.code)?.type==='fund'
+              void trigger(e.code, isFund ? 'fund' : 'stock')
+            } }, '解读') : null,
+            e.detail && e.detail.startsWith('http') ? h('button', { style: { ...S.btn, padding: '2px 6px', fontSize: 11 }, onClick: ()=> window.open(e.detail, '_blank') }, '看') : null,
+            e.code && props.onOpen ? h('button', { style: { ...S.btn, padding: '2px 6px', fontSize: 11 }, onClick: ()=> props.onOpen!({ code: e.code!, type: 'stock' }) }, 'K线') : null)))
       ),
     h('div', { style: { ...S.card, background: '#fffbe6', borderColor: '#ffe58f' } },
-      h('div', { style: { fontWeight: 600, fontSize: 12 } }, '💡 如何用叙事'),
+      h('div', { style: { fontWeight: 600, fontSize: 12 } }, '💡 闭环用法'),
       h('div', { style: { ...S.muted, fontSize: 11, lineHeight: 1.6 } },
-        '· 看到持仓异动，先来叙事页看同日是否有快讯/宏观/财报事件；', h('br', null),
-        '· 点击事件→可让模型“结合今日叙事解读持仓波动”生成报告；', h('br', null),
-        '· 盘前看宏观日历，盘中看快讯，盘后看事件——同一时间轴自动聚合。'))
+        '· 看到持仓异动→叙事页看同日事件→点“解读”一键让模型结合叙事归因；', h('br', null),
+        '· 盘前点“今日叙事报告”让模型先跑，盘中直接看结论；', h('br', null),
+        '· 报告生成后可在「持仓」卡片点进查看缓存，或直接在对话追问“那我该怎么调？”'))
   )
 }
 
@@ -1263,11 +1388,11 @@ function PanelBody(props: {
       tab === 'quotes' ? h(QuotesView, { data, quoteBy, loading, mutate, onOpen: props.onOpenAnalysis }) : null,
       tab === 'market' ? h(MarketView, { active: tab === 'market' }) : null,
       tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate, onOpen: props.onOpenAnalysis }) : null,
-      tab === 'narrative' ? h(NarrativeView, { active: tab === 'narrative', data, quoteBy }) : null,
+      tab === 'narrative' ? h(NarrativeView, { active: tab === 'narrative', data, quoteBy, onOpen: props.onOpenAnalysis }) : null,
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
-      tab === 'kline' ? h(KlineView, { data }) : null,
+      tab === 'kline' ? h(KlineView, { data, onOpen: props.onOpenAnalysis }) : null,
       tab === 'sources' ? h(SourcesView, null) : null,
       tab === 'skills' ? h(SkillsView, null) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))

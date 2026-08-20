@@ -111,6 +111,28 @@ function analysisPrompt(
   ].join('\n')
 }
 
+function narrativeAnalysisPrompt(
+  code: string | undefined,
+  type: AssetType | undefined,
+  events: Array<{ time: string; kind: string; label: string; code?: string }>,
+  holding?: { name?: string; quantity: number; avgCost: number },
+): string {
+  const target = code ? `${type === 'fund' ? '基金' : '股票'} ${code}${holding?.name ? `(${holding.name})` : ''}` : '今日市场整体'
+  const position = holding && code ? `这是当前持仓 ${code}，数量 ${holding.quantity}，成本 ${holding.avgCost}。` : code ? `这是自选标的 ${code}，不要编造持仓。` : '这是基于今日叙事时间线的市场解读，不要编造持仓。'
+  const timeline = events.slice(0, 12).map((e, i) => `${i + 1}. [${e.time.slice(0, 10)} ${e.kind}] ${e.label}${e.code ? ` (${e.code})` : ''}`).join('\n')
+  return [
+    `用户在 DSN Finance「叙事」时间轴点击了一键生成报告，目标：${target}。`,
+    position,
+    `以下是已聚合的叙事时间线（快讯/宏观/事件，已按时间倒序）：`,
+    timeline || '(暂无叙事事件)',
+    `请结合上述叙事时间线，重点回答“为什么涨/跌”：`,
+    `- 先调用相关行情与K线工具验证价格表现（若为单标的：get_realtime_quote/get_stock_kline/calculate_technical_indicators；若为市场：get_market_overview/get_sector_board）`,
+    `- 再结合时间线中的快讯与宏观事件做归因，区分“事件驱动 vs 技术 vs 宏观”`,
+    `- 必须基于工具真实数据，不要编造未在时间线或工具返回中的事件`,
+    code ? `完成报告后必须调用 save_position_analysis，参数 code="${code}"、type="${type ?? 'stock'}"，将完整报告放入 report。报告标题包含“叙事解读”。` : `直接在回复中输出完整 Markdown 报告，标题为“今日市场叙事解读”，包含：一句话结论、叙事时间线复盘、指数与板块表现、宏观背景、持仓相关性、后续观察清单。`,
+  ].join('\n')
+}
+
 /**
  * Register the finance panel's HTTP API on ctx.webServer. Live quotes are computed on demand
  * and returned to the client (held in React state) — never written to plugin config.
@@ -272,6 +294,94 @@ export function registerRoutes(
             pendingAnalyses.delete(key)
             return sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
           }
+        }
+        if (req.method === 'GET' && sub === '/narrative') {
+          // 聚合叙事：快讯 + 宏观 + 持仓历史事件
+          const [flashR, macroR] = await Promise.all([
+            finance.getNewsFlash(15).catch(() => ({ ok: false, data: [] } as any)),
+            Promise.all(['cpi','ppi','pmi','gdp','money_supply'].map(s => finance.getMacro(s).catch(()=> ({ ok:false } as any)))),
+          ])
+          const events: Array<{ time: string; kind: string; label: string; detail?: string; color: string; code?: string }> = []
+          if (flashR.ok && Array.isArray(flashR.data)) {
+            for (const n of (flashR.data as any[]).slice(0,8)) {
+              const time = (n.time || n.datetime || new Date().toISOString()) as string
+              events.push({ time, kind: 'flash', label: String(n.title || n.content || '').slice(0,80), detail: n.url, color: '#4b7bec' })
+            }
+          }
+          const macroData = macroR as any[]
+          for (const md of macroData) {
+            if (md?.ok && md.data?.latest?.time) {
+              events.push({ time: md.data.latest.time, kind: 'macro', label: `${md.data.label || md.data.series} ${md.data.latest.value}${md.data.unit||''}`, detail: md.data.series, color: '#722ed1' })
+            }
+          }
+          if (history) {
+            const { holdings } = store.get()
+            for (const hd of holdings.slice(0,3)) {
+              try { const h = await history.read(hd.code); for (const e of h?.events?.slice(-2) ?? []) events.push({ time: e.date, kind: 'kline', label: `${hd.code} ${e.type}：${e.label}`, detail: e.type, color: e.type==='财报'?'#4b7bec':'#2ba471', code: hd.code }) } catch {}
+            }
+            // 也聚合自选的最近事件
+            const { watchlist } = store.get()
+            for (const w of watchlist.slice(0,2)) {
+              try { const h = await history.read(w.code); for (const e of h?.events?.slice(-1) ?? []) events.push({ time: e.date, kind: 'kline', label: `${w.code} ${e.type}：${e.label}`, detail: e.type, color: '#722ed1', code: w.code }) } catch {}
+            }
+          }
+          events.sort((a,b)=> b.time.localeCompare(a.time))
+          return sendJson(res, 200, { ok: true, at: new Date().toISOString(), events: events.slice(0,20) })
+        }
+        if (req.method === 'POST' && sub === '/narrative/analyze') {
+          const body = await readBody(req)
+          const code = body.code ? String(body.code).trim() : undefined
+          const type = body.type === 'fund' ? 'fund' as const : code ? 'stock' as const : undefined
+          const events = Array.isArray(body.events) ? body.events as Array<{ time: string; kind: string; label: string; code?: string }> : []
+          // 若前端未传 events，则后端聚合一次
+          let timeline = events
+          if (!timeline.length) {
+            try {
+              const flashR = await finance.getNewsFlash(10)
+              if (flashR.ok && Array.isArray(flashR.data)) timeline = (flashR.data as any[]).slice(0,6).map((n:any)=> ({ time: n.time||new Date().toISOString(), kind: 'flash', label: String(n.title).slice(0,60) }))
+            } catch {}
+          }
+          const key = code ? `narrative:${type}:${code}` : 'narrative:MARKET'
+          const pendingAt = pendingAnalyses.get(key)
+          if (pendingAt && Date.now() - pendingAt < 10*60_000) return sendJson(res, 202, { ok: true, status: 'generating', key })
+          const agent = currentAgent(modelContext)
+          if (!agent) return sendJson(res, 503, { ok: false, error: 'current Harness session is unavailable' })
+          const holding = code ? store.get().holdings.find(h=> h.code===code && h.type===type) : undefined
+          pendingAnalyses.set(key, Date.now())
+          try {
+            const prompt = narrativeAnalysisPrompt(code, type, timeline, holding)
+            agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })
+            // 若有 code，复用 analysis 缓存 key 以便面板轮询到
+            if (code && type) {
+              // 将 narrative 触发也视为 analysis 生成，复用同 key 的 pending
+              pendingAnalyses.set(`${type}:${code}`, Date.now())
+            }
+            return sendJson(res, 202, { ok: true, status: 'generating', key, code, type })
+          } catch (err) {
+            pendingAnalyses.delete(key)
+            return sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
+          }
+        }
+        if (req.method === 'GET' && sub === '/kline') {
+          const code = String(url.searchParams.get('code') ?? '').trim()
+          const period = String(url.searchParams.get('period') ?? 'daily')
+          const kind = url.searchParams.get('kind') as SymbolKind | null
+          if (!code) return sendJson(res, 400, { ok: false, error: 'code is required' })
+          const resolvedKind: SymbolKind = kind && HISTORY_KINDS.includes(kind) ? kind : (/^[A-Za-z]/.test(code) ? 'us' : /^\d{4,5}$/.test(code) ? 'hk' : 'a')
+          // 优先用 history 中的日K，若请求非 daily 则实时拉取
+          if (history && period === 'daily') {
+            const h = await history.read(code)
+            if (h && h.kline.length) return sendJson(res, 200, { ok: true, code, period, kline: h.kline, events: h.events, provider: 'local-history' })
+          }
+          const resK = resolvedKind === 'hk' ? await finance.getHkKline(code, period as any)
+            : resolvedKind === 'us' ? await finance.getUsKline(code, period as any)
+            : resolvedKind === 'fund' ? await finance.getFundKline(code)
+            : await finance.getKline(code, period as any)
+          if (!resK.ok || !Array.isArray(resK.data)) return sendJson(res, 200, { ok: false, code, error: resK.error, attempts: resK.attempts })
+          // 若有历史，尝试合并事件
+          let events: any[] = []
+          if (history) { try { const h = await history.read(code); events = h?.events ?? [] } catch {} }
+          return sendJson(res, 200, { ok: true, code, period, provider: resK.provider, kline: resK.data, events })
         }
         if (req.method === 'POST' && sub === '/mutate') {
           const body = await readBody(req)
