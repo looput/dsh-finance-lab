@@ -23,18 +23,24 @@ interface WebServerLike {
   }): () => void
 }
 
+interface UserFollowup {
+  id: string
+  role: 'user'
+  content: [{ type: 'text'; text: string }]
+  source: { kind: 'user' }
+}
+
 interface ModelAgentLike {
-  followup(message: {
-    id: string
-    role: 'user'
-    content: [{ type: 'text'; text: string }]
-    source: { kind: 'user' }
-  }): void
+  followup(message: UserFollowup): void
+}
+
+interface AgentRegistryLike {
+  roots?(): unknown[]
 }
 
 interface ModelContextLike {
   agent?: unknown
-  agents?: { roots(): unknown[] }
+  agents?: unknown
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -79,7 +85,8 @@ function currentAgent(context: ModelContextLike): ModelAgentLike | undefined {
   if (context.agent && typeof (context.agent as ModelAgentLike).followup === 'function') {
     return context.agent as ModelAgentLike
   }
-  const root = context.agents?.roots?.()[0] as ModelAgentLike | undefined
+  const registry = context.agents as AgentRegistryLike | undefined
+  const root = registry?.roots?.()[0] as ModelAgentLike | undefined
   return root && typeof root.followup === 'function' ? root : undefined
 }
 
@@ -128,6 +135,18 @@ export function registerRoutes(
   toolController?: FinanceToolController,
 ): () => void {
   const pendingAnalyses = new Map<string, number>()
+
+  /**
+   * Send the analysis prompt to the current Harness session. (An isolated
+   * subagent session was explored, but the agent factory does not drive a
+   * plugin-created session to completion from this HTTP context, so the
+   * reliable current-session dispatch is used.)
+   */
+  function dispatchAnalysis(message: UserFollowup): 'current' | undefined {
+    const parent = currentAgent(modelContext)
+    if (parent) { parent.followup(message); return 'current' }
+    return undefined
+  }
   return webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -274,20 +293,20 @@ export function registerRoutes(
           if (pendingAt && Date.now() - pendingAt < 10 * 60_000) {
             return sendJson(res, 202, { ok: true, status: 'generating', code, type })
           }
-          const agent = currentAgent(modelContext)
-          if (!agent) {
-            return sendJson(res, 503, { ok: false, error: 'current Harness session is unavailable' })
-          }
           const holding = store.get().holdings.find((h) => h.code === code && h.type === type)
           pendingAnalyses.set(key, Date.now())
           try {
-            agent.followup({
+            const dispatched = dispatchAnalysis({
               id: randomUUID(),
               role: 'user',
               content: [{ type: 'text', text: analysisPrompt(code, type, holding) }],
               source: { kind: 'user' },
             })
-            return sendJson(res, 202, { ok: true, status: 'generating', code, type })
+            if (!dispatched) {
+              pendingAnalyses.delete(key)
+              return sendJson(res, 503, { ok: false, error: 'current Harness session is unavailable' })
+            }
+            return sendJson(res, 202, { ok: true, status: 'generating', session: dispatched, code, type })
           } catch (err) {
             pendingAnalyses.delete(key)
             return sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })

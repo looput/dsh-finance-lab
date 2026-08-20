@@ -179,6 +179,13 @@ function Sparkline(props: { data?: number[]; color: string; w?: number }) {
     h('polyline', { points: pts, fill: 'none', stroke: props.color, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }))
 }
 
+function Spinner(props: { size?: number }) {
+  const s = props.size ?? 16
+  return h('svg', { width: s, height: s, viewBox: '0 0 24 24', style: { flex: '0 0 auto' } },
+    h('circle', { cx: 12, cy: 12, r: 9, fill: 'none', stroke: BRAND, strokeWidth: 3, strokeLinecap: 'round', strokeDasharray: '38 22' },
+      h('animateTransform', { attributeName: 'transform', type: 'rotate', from: '0 12 12', to: '360 12 12', dur: '0.9s', repeatCount: 'indefinite' })))
+}
+
 function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => void; onSelect?: () => void }) {
   const q = props.q
   const pct = q.changePercent
@@ -983,13 +990,13 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
         analysis ? h('button', { style: S.btn, onClick: () => void generate(true), disabled: status === 'generating' }, '重新生成') : null),
       h('div', { style: { overflowY: 'auto', padding: '18px 22px', flex: 1 } },
         status === 'loading' ? h('div', { style: S.muted }, '读取缓存…') : null,
-        status === 'generating' ? h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600 } }, '正在生成 AI 解读'),
-          h('div', { style: S.muted }, '模型正在当前 Harness 会话中收集行情、基本面、新闻和风险数据。完成后本页会自动刷新。')) : null,
+        status === 'generating' ? h('div', { style: { ...S.card, borderColor: BRAND } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600 } }, h(Spinner, null), '正在生成 AI 解读'),
+          h('div', { style: S.muted }, '模型正在收集行情、基本面、新闻与风险数据；完成后本页自动刷新，报告直接呈现在此，无需回看对话。')) : null,
         status === 'empty' ? h('div', { style: S.card },
           h('div', { style: { fontWeight: 600 } }, '还没有解读缓存'),
-          h('div', { style: S.muted }, '只有你主动点击后才会调用当前会话模型生成报告。'),
-          h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6 }, onClick: () => void generate(false) }, '生成 AI 解读')) : null,
+          h('div', { style: S.muted }, '点击后调用模型生成完整解读报告，结果直接展示在本页。'),
+          h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6, background: BRAND, color: '#fff' }, onClick: () => void generate(false) }, '生成 AI 解读')) : null,
         status === 'error' ? h('div', { style: S.card },
           h('div', { style: { fontWeight: 600 } }, '解读请求失败'),
           h('div', { style: S.muted }, error || '请稍后重试'),
