@@ -141,7 +141,12 @@ export function registerRoutes(
           return sendJson(res, 200, { sources: mcp?.status() ?? [] })
         }
         if (req.method === 'GET' && sub === '/providers') {
-          return sendJson(res, 200, { catalog: finance.getProviderCatalog() })
+          return sendJson(res, 200, finance.getProviderCatalog())
+        }
+        if (req.method === 'GET' && sub === '/info') {
+          const code = url.searchParams.get('code') ?? ''
+          const r = await finance.getStockInfo(code)
+          return sendJson(res, 200, { ok: r.ok, provider: r.provider, info: r.ok ? r.data : undefined, error: r.ok ? undefined : r.error })
         }
         if (skills && req.method === 'GET' && sub === '/skills') {
           return sendJson(res, 200, skills.catalog())
@@ -180,8 +185,18 @@ export function registerRoutes(
         if (req.method === 'POST' && sub === '/providers') {
           const body = await readBody(req)
           const policy = (body.policy ?? {}) as Record<string, string[]>
-          const catalog = await finance.setProviderPolicy(policy)
-          return sendJson(res, 200, { ok: true, catalog })
+          return sendJson(res, 200, { ok: true, ...(await finance.setProviderPolicy(policy)) })
+        }
+        if (req.method === 'POST' && sub === '/providers/public') {
+          const body = await readBody(req)
+          return sendJson(res, 200, { ok: true, ...(await finance.setPublicEnabled(body.enabled !== false)) })
+        }
+        if (mcp && req.method === 'POST' && sub === '/mcp/source') {
+          const body = await readBody(req)
+          const name = String(body.name ?? '').trim()
+          if (!name) return sendJson(res, 400, { ok: false, error: 'missing name' })
+          await mcp.setEnabled(name, body.enabled !== false)
+          return sendJson(res, 200, { ok: true, sources: mcp.status() })
         }
         if (req.method === 'POST' && sub === '/mcp/token') {
           if (!mcp) return sendJson(res, 400, { ok: false, error: 'mcp disabled' })
