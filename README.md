@@ -18,7 +18,7 @@ DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 
 ## 核心体验
 
-### 一个面板，七个视角
+### 一个面板，十个视角
 
 从侧边栏打开 **📈 金融面板**，可在以下标签页之间切换：
 
@@ -28,11 +28,30 @@ DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 | 市场 | 领涨/领跌行业板块，快速定位当日风险 |
 | 持仓 | 持仓盈亏、组合市值、股票/基金配置和集中度 |
 | 基金 | 开放式基金排行、净值和加入自选 |
+| K线 | 本地历史库日 K 线，财报/分红/自定义事件标记 |
 | 宏观 | CPI、PPI、PMI、GDP、货币供应量及趋势 |
 | 快讯 | 全球财经电报，以及按持仓/自选筛选的个股新闻 |
-| 接口 | 数据源健康状态与当前 provider |
+| 数据源 | 按 capability 选择 provider，选择顺序即调用优先级 |
+| 技能 | 本地 playbook 与盈米金融场景 skill 的启停管理 |
+| 接口 | 数据源健康状态与当前 provider、MCP 外部源开关 |
 
 持仓截图也可以交给 Agent 识别，再通过 `import_holdings` 批量写入本地文件；面板会自动刷新。点击持仓或自选中的股票/基金即可打开完整 AI 解读，首次主动点击后才生成，报告会缓存到本地并支持重新生成。插件只修改本地持仓数据，不执行真实交易。
+
+### 面板与对话双向通道
+
+面板与模型之间是双向实时的：
+
+- **面板 → 对话**：点击持仓/自选触发解读时，面板把任务注入当前 Harness 会话。
+- **对话 → 面板**：工具对持仓、自选、解读缓存、数据源策略、技能开关的修改，经服务端事件总线（`GET api/events`，SSE）即时推送到面板，无需等待轮询；模型还可以调用 `panel_navigate` 把面板切到指定标签页、聚焦某只股票的 K 线，或直接打开 AI 解读。
+- 60 秒轮询保留为兜底；SSE 断线时 EventSource 自动重连。
+
+### What-if 再平衡模拟
+
+`simulate_rebalance` 基于本地持仓做**纯模拟**推演，不修改持仓文件、不下单：
+
+- **trades 模式**：给定买卖列表（先卖后买、现金约束、超卖自动截断）；
+- **targets 模式**：给定目标权重（占「持仓市值 + 可用现金」的百分比），自动折算为交易；
+- 输出前后对比：总市值、现金、权重、top1/top3、HHI、分币种敞口，以及全部警告与口径说明（按最新价成交、不计滑点费用、跨币种未折算汇率等）。
 
 ### 面向模型的金融工具
 
@@ -47,6 +66,8 @@ DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 | 研究 | `calculate_technical_indicators` · `get_macro_china` | MA/MACD/RSI/KDJ 与中国宏观序列 |
 | 新闻 | `get_market_news` · `get_stock_news` · `web_search` | 市场快讯、个股新闻、免费网页搜索 |
 | 组合 | `get_portfolio` · `analyze_portfolio` · `upsert_holding` · `import_holdings` · `remove_holding` · `save_position_analysis` | 持仓 CRUD、批量导入、盈亏、风险分析和解读缓存 |
+| 模拟 | `simulate_rebalance` | What-if 再平衡推演（交易列表或目标权重），前后权重/HHI/分币种对比 |
+| 面板 | `panel_navigate` | 对话中把金融面板切到指定标签页、聚焦代码或打开 AI 解读 |
 | 自选 | `add_watchlist` · `remove_watchlist` · `get_portfolio_file` | 自选股/基金和本地文件管理 |
 | 运维 | `probe_finance_sources` | 串行探测端点并生成 provider 降级顺序 |
 
@@ -177,6 +198,8 @@ Token 解析优先级：环境变量（`apiKeyEnv`，如 `EM_API_KEY`）→ 本�
 
 ```text
 src/                  插件服务、provider、模型工具和金融面板
+src/panel-bus.ts      面板 ↔ 对话双向通道的事件总线（SSE 推送）
+src/rebalance.ts      What-if 再平衡模拟引擎（纯函数，不改持仓）
 src/mcp/              外部 MCP 数据源桥接（妙想 HTTP / 盈米 CLI）+ token 热重载
 src/history/          本地历史库（K线/财报/分红）与同步
 skills/               财务分析、组合、策略、风控与研究团队 playbook

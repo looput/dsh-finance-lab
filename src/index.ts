@@ -10,6 +10,7 @@ import '@deepseek-ai/dsh-host-webserver'
 import { Config, name as pluginName } from './config.js'
 import { ProviderRegistry } from './data/registry.js'
 import { FinanceDataService } from './data/service.js'
+import { PanelBus } from './panel-bus.js'
 import { PortfolioStore } from './store.js'
 import { registerTools } from './tools/register.js'
 import { registerSkills } from './skills.js'
@@ -53,6 +54,22 @@ export function apply(ctx: Context, config: Config) {
   const analyses = new AnalysisStore(path.join(packageRoot, 'data/analysis-cache.json'))
   void analyses.load()
 
+  // Bidirectional channel: store mutations (from tools, routes, or the agent) are
+  // pushed to connected panel clients over SSE instead of waiting for the 60s poll.
+  const bus = new PanelBus()
+  store.onChange((file) => bus.publish({
+    kind: 'portfolio',
+    holdings: file.holdings,
+    watchlist: file.watchlist,
+    portfolioPath: store.path,
+  }))
+  analyses.onChange((analysis) => bus.publish({
+    kind: 'analysis',
+    code: analysis.code,
+    type: analysis.type,
+    generatedAt: analysis.generatedAt,
+  }))
+
   const finance = new FinanceDataService(
     registry,
     () => store.get().holdings,
@@ -62,12 +79,12 @@ export function apply(ctx: Context, config: Config) {
   const history = new HistoryStore(path.join(packageRoot, 'data/history'))
 
   ctx.provide('financeData', finance)
-  registerTools(ctx, finance, store, analyses)
-  registerHistoryTools(ctx, finance, history)
+  registerTools(ctx, finance, store, analyses, bus)
+  registerHistoryTools(ctx, finance, history, bus)
   const yingmiCommand = (current().mcpSources ?? []).find((s) => s.kind === 'cli' && s.enabled)?.command || undefined
   const skills = registerSkills(ctx, packageRoot, yingmiCommand)
   const mcp = registerMcpSources(ctx, current().mcpSources ?? [], packageRoot)
-  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, ctx)
+  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, ctx, bus)
 
   // Replace the default (key-gated) web search with free meta search (Python ddgs → Brave/Bing/Google).
   ctx.web.registerSearchProvider(createWebSearchProvider((q, signal) => finance.webSearch(q, signal)))
@@ -82,6 +99,8 @@ export function apply(ctx: Context, config: Config) {
       '- Market data uses direct HTTP endpoints (Eastmoney / Tencent), not akshare. If a market tool fails, call probe_finance_sources first.',
       '- Holdings CRUD works without quotes; P&L enrichment needs a healthy quote provider.',
       '- 历史K线/财报/分红可用 sync_history 落地到本地库，再用 get_history 读取（含事件标记）。',
+      '- 对话中想引导用户看面板时调用 panel_navigate（tab 必填，可带 code 聚焦；tab=kline 用 kind 指定市场，open_analysis 可同时打开 AI 解读）。',
+      '- 调仓推演用 simulate_rebalance：trades（买卖列表）或 targets（目标权重%）二选一，返回前后权重/HHI/分币种敞口对比；纯模拟，不改持仓。',
       '- Use type:"fund" for funds (基金, 6-digit code) and type:"stock" for stocks (A股/港股/美股).',
       '- When the panel sends an active position-analysis request, gather the requested data with finance tools and finish by calling save_position_analysis with the complete Markdown report.',
     ].join('\n'),

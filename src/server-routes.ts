@@ -4,11 +4,15 @@ import type { AnalysisStore } from './analysis-store.js'
 import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
 import type { McpManager } from './mcp/manager.js'
+import type { PanelBus } from './panel-bus.js'
 import type { SkillManager } from './skills.js'
 import type { HistoryStore } from './history/store.js'
 import { syncHistory, type SymbolKind } from './history/sync.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
 import type { AssetType } from './types.js'
+
+/** Keep SSE connections alive through proxies/idle timeouts. */
+const SSE_HEARTBEAT_MS = 20_000
 
 const HISTORY_KINDS: SymbolKind[] = ['a', 'hk', 'us', 'fund']
 
@@ -114,6 +118,9 @@ function analysisPrompt(
 /**
  * Register the finance panel's HTTP API on ctx.webServer. Live quotes are computed on demand
  * and returned to the client (held in React state) — never written to plugin config.
+ *
+ * Bidirectional channel: `GET /events` streams bus events (SSE) so panel clients react to
+ * agent-side mutations instantly instead of waiting for the 60s poll; the poll stays as fallback.
  */
 export function registerRoutes(
   webServer: WebServerLike,
@@ -124,6 +131,7 @@ export function registerRoutes(
   skills: SkillManager | undefined,
   analyses: AnalysisStore,
   modelContext: ModelContextLike,
+  bus: PanelBus,
 ): () => void {
   const pendingAnalyses = new Map<string, number>()
   return webServer.register({
@@ -133,6 +141,30 @@ export function registerRoutes(
       const url = new URL(req.url ?? '', 'http://localhost')
       const sub = url.pathname.slice(API_PREFIX.length) || '/'
       try {
+        if (req.method === 'GET' && sub === '/events') {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          })
+          res.write(': connected\n\n')
+          const unsubscribe = bus.subscribe((event) => {
+            try {
+              res.write(`data: ${JSON.stringify(event)}\n\n`)
+            } catch { /* client already gone; close handler cleans up */ }
+          })
+          const beat = setInterval(() => {
+            try {
+              res.write(': ping\n\n')
+            } catch { /* ignore */ }
+          }, SSE_HEARTBEAT_MS)
+          req.on('close', () => {
+            clearInterval(beat)
+            unsubscribe()
+          })
+          return
+        }
         if (req.method === 'GET' && (sub === '/state' || sub === '/')) {
           const { holdings, watchlist } = store.get()
           return sendJson(res, 200, { holdings, watchlist, portfolioPath: store.path })
@@ -150,7 +182,9 @@ export function registerRoutes(
           const body = await readBody(req)
           const local = Array.isArray(body.local) ? (body.local as string[]) : undefined
           const yingmi = Array.isArray(body.yingmi) ? (body.yingmi as string[]) : undefined
-          return sendJson(res, 200, { ok: true, ...(await skills.setEnabled(local, yingmi)) })
+          const result = await skills.setEnabled(local, yingmi)
+          bus.publish({ kind: 'skills' })
+          return sendJson(res, 200, { ok: true, ...result })
         }
         if (history && req.method === 'GET' && sub === '/history/list') {
           return sendJson(res, 200, { symbols: await history.list() })
@@ -167,6 +201,7 @@ export function registerRoutes(
           if (!code) return sendJson(res, 400, { ok: false, error: 'missing code' })
           const kind = (HISTORY_KINDS.includes(body.kind as SymbolKind) ? body.kind : 'a') as SymbolKind
           const result = await syncHistory(finance, history, code, kind)
+          bus.publish({ kind: 'history', code, bars: result.bars, addedBars: result.addedBars })
           return sendJson(res, 200, result)
         }
         if (history && req.method === 'POST' && sub === '/history/event') {
@@ -181,6 +216,7 @@ export function registerRoutes(
           const body = await readBody(req)
           const policy = (body.policy ?? {}) as Record<string, string[]>
           const catalog = await finance.setProviderPolicy(policy)
+          bus.publish({ kind: 'providers' })
           return sendJson(res, 200, { ok: true, catalog })
         }
         if (req.method === 'POST' && sub === '/mcp/token') {
@@ -189,6 +225,7 @@ export function registerRoutes(
           const name = String(body.name ?? '').trim()
           if (!name) return sendJson(res, 400, { ok: false, error: 'missing name' })
           await mcp.setToken(name, String(body.token ?? ''))
+          bus.publish({ kind: 'mcp' })
           return sendJson(res, 200, { ok: true, sources: mcp.status() })
         }
         if (req.method === 'GET' && sub === '/live') {

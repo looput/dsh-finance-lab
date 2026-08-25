@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import type { FinanceDataService } from '../data/service.js'
+import type { PanelBus } from '../panel-bus.js'
 import type { HistoryStore } from './store.js'
 import { syncHistory, type SymbolKind } from './sync.js'
 
@@ -14,7 +15,7 @@ const jsonOut = {
 const KINDS: SymbolKind[] = ['a', 'hk', 'us', 'fund']
 
 /** Register local-history tools: sync (append/update), read, add event, list. */
-export function registerHistoryTools(ctx: Context, finance: FinanceDataService, store: HistoryStore) {
+export function registerHistoryTools(ctx: Context, finance: FinanceDataService, store: HistoryStore, bus: PanelBus) {
   ctx.tools.register(defineTool({
     name: 'sync_history',
     description: '抓取日K线（及股票财报日期）并追加/更新到本地历史库（data/history）。kind：a=A股 hk=港股 us=美股 fund=基金。',
@@ -25,7 +26,10 @@ export function registerHistoryTools(ctx: Context, finance: FinanceDataService, 
     output: jsonOut,
     async execute(args, exec) {
       const kind = (KINDS.includes(args.kind as SymbolKind) ? args.kind : 'a') as SymbolKind
-      return asJson(await syncHistory(finance, store, String(args.code), kind, exec.signal))
+      const code = String(args.code)
+      const result = await syncHistory(finance, store, code, kind, exec.signal)
+      bus.publish({ kind: 'history', code, bars: result.bars, addedBars: result.addedBars })
+      return asJson(result)
     },
   }))
 

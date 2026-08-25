@@ -282,9 +282,11 @@ export class FinanceDataService {
     const markets: string[] = []
     let quoteOk = false
     for (const h of holdings) {
-      const item: Holding = { ...h, type: h.type ?? 'stock' }
-      const quote = await this.getAutoQuote(h.code, signal, item.type)
-      markets.push(quote.market ?? (item.type === 'fund' ? '基金' : 'A股'))
+    const item: Holding = { ...h, type: h.type ?? 'stock' }
+    const quote = await this.getAutoQuote(h.code, signal, item.type)
+    const market = quote.market ?? (item.type === 'fund' ? '基金' : 'A股')
+    markets.push(market)
+    item.market = market
       if (quote.ok && quote.data?.price != null) {
         quoteOk = true
         item.currentPrice = quote.data.price
