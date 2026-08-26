@@ -12,8 +12,9 @@ const jsonOut = {
   render: (_a: unknown, v: unknown) => [{ type: 'text' as const, text: JSON.stringify(v, null, 2) }],
 }
 const KINDS: SymbolKind[] = ['a', 'hk', 'us', 'fund']
+const CHART_API = '/plugins/dsn-finance/api/chart'
 
-/** Register local-history tools: sync (append/update), read, add event, list. */
+/** Register local-history tools: sync (append/update), read, add event, list, render chart image. */
 export function registerHistoryTools(ctx: Context, finance: FinanceDataService, store: HistoryStore) {
   ctx.tools.register(defineTool({
     name: 'sync_history',
@@ -68,5 +69,36 @@ export function registerHistoryTools(ctx: Context, finance: FinanceDataService, 
     parameters: {},
     output: jsonOut,
     async execute() { return asJson({ ok: true, symbols: await store.list() }) },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'render_kline_chart',
+    description: '生成某代码的日K线图（含财报/分红事件竖线标注）并在对话中以 Markdown 图片展示。本地无历史会先自动同步。kind：a/hk/us/fund。返回里含 Markdown 图片，请在回复中原样保留该图片语法，让用户直接看到图。',
+    parameters: {
+      code: { type: 'string', required: true, description: '代码，如 600519 / 00700 / AAPL / 110022' },
+      kind: { type: 'string', enum: KINDS, description: '市场类型，默认 a' },
+      limit: { type: 'number', description: '最多绘制最近多少根K线，默认 160' },
+    },
+    output: {
+      schema: { type: 'json' as const },
+      render: (_a: unknown, v: unknown) => [{ type: 'text' as const, text: (v as { markdown?: string }).markdown ?? '' }],
+    },
+    async execute(args, exec) {
+      const code = String(args.code)
+      const kind = (KINDS.includes(args.kind as SymbolKind) ? args.kind : 'a') as SymbolKind
+      let h = await store.read(code)
+      if (!h || h.kline.length < 2) {
+        await syncHistory(finance, store, code, kind, exec.signal)
+        h = await store.read(code)
+      }
+      if (!h || h.kline.length < 2) return asJson({ ok: false, markdown: `无法获取 ${code} 的K线数据` })
+      const limit = Math.max(20, Math.min(Number(args.limit) || 160, h.kline.length))
+      const bars = h.kline.slice(-limit)
+      const closes = bars.map((b) => b.close)
+      const chartUrl = `${CHART_API}?code=${encodeURIComponent(code)}&kind=${kind}&limit=${limit}`
+      const summary = `${code} 日K线 ${bars.length} 根（${bars[0]!.date}→${bars[bars.length - 1]!.date}），收盘 ${closes[closes.length - 1]}，区间 ${Math.min(...closes)}~${Math.max(...closes)}，事件标记 ${h.events.length} 个（财报=蓝、分红=绿竖线）。`
+      const markdown = `![${code} K线](${chartUrl})\n\n${summary}`
+      return asJson({ ok: true, code, bars: bars.length, chartUrl, markdown })
+    },
   }))
 }

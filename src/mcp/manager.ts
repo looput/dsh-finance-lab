@@ -24,6 +24,8 @@ export interface McpManager {
   status(): (SourceStatus & { toolCount: number })[]
   /** Persist a token to data/mcp-secrets.json (empty clears it) and hot-reload sources. */
   setToken(name: string, token: string): Promise<void>
+  /** Enable/disable a source at runtime (persisted) and hot-reload. */
+  setEnabled(name: string, enabled: boolean): Promise<void>
   reload(): Promise<void>
 }
 
@@ -42,14 +44,21 @@ async function resolveToken(source: McpSource, secretsPath: string): Promise<str
 /** Connect enabled sources, bridge their tools onto ctx.tools, and support hot reload. */
 export function registerMcpSources(ctx: Context, sources: McpSource[], packageRoot: string): McpManager {
   const secretsPath = path.join(packageRoot, 'data/mcp-secrets.json')
+  const statePath = path.join(packageRoot, 'data/mcp-sources-state.json')
   const statuses = new Map<string, SourceStatus>()
   let handles: Disposable[] = []
+  let overrides: Record<string, boolean> = {}
+
+  async function readState(): Promise<Record<string, boolean>> {
+    try { return JSON.parse(await readFile(statePath, 'utf8')) as Record<string, boolean> } catch { return {} }
+  }
 
   async function loadOne(source: McpSource): Promise<void> {
     const label = source.label || source.name
-    const base: SourceStatus = { name: source.name, kind: source.kind, label, enabled: source.enabled, tokenPresent: false, state: 'disabled' }
+    const enabled = overrides[source.name] ?? source.enabled
+    const base: SourceStatus = { name: source.name, kind: source.kind, label, enabled, tokenPresent: false, state: 'disabled' }
     statuses.set(source.name, base)
-    if (!source.enabled) return
+    if (!enabled) return
 
     const token = await resolveToken(source, secretsPath)
     base.tokenPresent = !!token
@@ -81,6 +90,7 @@ export function registerMcpSources(ctx: Context, sources: McpSource[], packageRo
   }
 
   async function load(): Promise<void> {
+    overrides = await readState()
     for (const source of sources) await loadOne(source)
   }
 
@@ -114,6 +124,13 @@ export function registerMcpSources(ctx: Context, sources: McpSource[], packageRo
       else delete map[name]
       await mkdir(path.dirname(secretsPath), { recursive: true })
       await writeFile(secretsPath, JSON.stringify(map, null, 2) + '\n', 'utf8')
+      await reload()
+    },
+    async setEnabled(name, enabled) {
+      const map = await readState()
+      map[name] = enabled
+      await mkdir(path.dirname(statePath), { recursive: true })
+      await writeFile(statePath, JSON.stringify(map, null, 2) + '\n', 'utf8')
       await reload()
     },
   }

@@ -179,7 +179,14 @@ function Sparkline(props: { data?: number[]; color: string; w?: number }) {
     h('polyline', { points: pts, fill: 'none', stroke: props.color, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }))
 }
 
-function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => void; onClick?: () => void }) {
+function Spinner(props: { size?: number }) {
+  const s = props.size ?? 16
+  return h('svg', { width: s, height: s, viewBox: '0 0 24 24', style: { flex: '0 0 auto' } },
+    h('circle', { cx: 12, cy: 12, r: 9, fill: 'none', stroke: BRAND, strokeWidth: 3, strokeLinecap: 'round', strokeDasharray: '38 22' },
+      h('animateTransform', { attributeName: 'transform', type: 'rotate', from: '0 12 12', to: '360 12 12', dur: '0.9s', repeatCount: 'indefinite' })))
+}
+
+function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => void; onSelect?: () => void }) {
   const q = props.q
   const pct = q.changePercent
   const sparkColor = q.spark && q.spark.length >= 2 ? (q.spark[q.spark.length - 1]! >= q.spark[0]! ? UP : DOWN) : colorOf(pct)
@@ -192,8 +199,8 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
     const limited = /429|限流|rate.?limit|timeout|超时/i.test(err)
     return h('span', { style: S.muted, title: err || '暂无行情' }, limited ? '限流' : '获取失败')
   })()
-  return h('div', { style: { ...S.row, cursor: props.onClick ? 'pointer' : 'default' }, onClick: props.onClick },
-    h('div', { style: { flex: 1, minWidth: 0 } },
+  return h('div', { style: S.row },
+    h('div', { style: { flex: 1, minWidth: 0, cursor: props.onSelect ? 'pointer' : 'default' }, title: props.onSelect ? '查看详情/K线' : undefined, onClick: props.onSelect },
       h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, q.name || q.code),
       h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center' } },
         h('span', { style: S.tag }, q.market || (q.type === 'fund' ? '基金' : '股票')), q.code)),
@@ -266,10 +273,12 @@ function useLive() {
   const [loading, setLoading] = useState(false)
   const inflight = useRef(false)
   const again = useRef(false)
+  const lastRev = useRef('')
 
   const loadState = useCallback(async () => {
     try {
-      const s = await apiGet<Partial<LiveData>>('/state')
+      const s = await apiGet<Partial<LiveData> & { updatedAt?: string }>('/state')
+      if (s.updatedAt) lastRev.current = s.updatedAt
       setData((d) => ({ ...d, holdings: s.holdings ?? [], watchlist: s.watchlist ?? [], portfolioPath: s.portfolioPath }))
     } catch { /* keep prior */ }
   }, [])
@@ -301,11 +310,25 @@ function useLive() {
     void loadLive()
   }, [loadLive])
 
+  // Detect chat-driven holdings/watchlist changes (agent tools write the same store)
+  // and refresh promptly, so the panel stays aligned with the conversation.
+  const watchState = useCallback(async () => {
+    try {
+      const s = await apiGet<Partial<LiveData> & { updatedAt?: string }>('/state')
+      if (s.updatedAt && s.updatedAt !== lastRev.current) {
+        lastRev.current = s.updatedAt
+        setData((d) => ({ ...d, holdings: s.holdings ?? d.holdings, watchlist: s.watchlist ?? d.watchlist }))
+        void loadLive()
+      }
+    } catch { /* keep prior */ }
+  }, [loadLive])
+
   useEffect(() => {
     void loadState().then(loadLive)
-    const t = window.setInterval(loadLive, 60_000)
-    return () => window.clearInterval(t)
-  }, [loadState, loadLive])
+    const live = window.setInterval(loadLive, 60_000)
+    const watch = window.setInterval(watchState, 6_000)
+    return () => { window.clearInterval(live); window.clearInterval(watch) }
+  }, [loadState, loadLive, watchState])
 
   return { data, loading, loadLive, mutate }
 }
@@ -376,11 +399,14 @@ function QuotesView(props: {
   const { data, quoteBy, loading, mutate } = props
   const [wCode, setWCode] = useState('')
   const [wType, setWType] = useState<AssetType>('stock')
+  const [sel, setSel] = useState<{ code: string; name?: string; type?: AssetType; market?: string; price?: number; changePercent?: number } | null>(null)
   const watchQuotes: LiveQuote[] = data.watchlist.map((w) => quoteBy.get(keyOf(w.code, w.type)) ?? { code: w.code, type: w.type, name: w.name })
   function addWatch() {
     const c = wCode.trim(); if (!c) return
     mutate('addWatch', { code: c, type: wType }); setWCode('')
   }
+  if (sel) return h(SymbolDetail, { ...sel, onBack: () => setSel(null), onAnalyze: () => props.onOpen({ code: sel.code, type: sel.type ?? 'stock', name: sel.name }) })
+  const openDetail = (q: LiveQuote) => setSel({ code: q.code, name: q.name, type: q.type, market: q.market, price: q.price, changePercent: q.changePercent })
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
     h('div', { style: S.section },
       h('div', { style: S.title }, '市场总览'),
@@ -391,14 +417,8 @@ function QuotesView(props: {
             h('span', { style: { fontSize: 11 } }, ix.name),
             h('span', { style: { color: colorOf(ix.changePercent), fontWeight: 600 } }, `${fmt(ix.price)} ${pctStr(ix.changePercent)}`))))),
     h('div', { style: S.section },
-      h('div', { style: S.title }, '自选 · 行情走势'),
-      watchQuotes.length === 0 ? h('div', { style: S.muted }, '暂无自选，在下方添加') : watchQuotes.map((q) => h(QuoteRow, {
-        key: `w-${q.type}-${q.code}`,
-        q,
-        loading,
-        onClick: () => props.onOpen({ code: q.code, type: q.type ?? 'stock', name: q.name }),
-        onRemove: () => mutate('removeWatch', { code: q.code, type: q.type }),
-      })),
+      h('div', { style: S.title }, '自选 · 行情走势', h('span', { style: { ...S.muted, fontWeight: 400, fontSize: 11, marginLeft: 6 } }, '点名称看详情/K线')),
+      watchQuotes.length === 0 ? h('div', { style: S.muted }, '暂无自选，在下方添加') : watchQuotes.map((q) => h(QuoteRow, { key: `w-${q.type}-${q.code}`, q, loading, onSelect: () => openDetail(q), onRemove: () => mutate('removeWatch', { code: q.code, type: q.type }) })),
       data.at ? h('div', { style: S.muted }, `更新于 ${new Date(data.at).toLocaleTimeString()}`) : null,
       h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
         h('input', { style: { ...S.input, flex: 1 }, placeholder: '代码，如 600519 / 00700 / AAPL / 110022', value: wCode, onChange: (e: any) => setWCode(e.target.value), onKeyDown: onEnterCommit(addWatch) }),
@@ -660,47 +680,87 @@ function KlineChart(props: { kline: HistBar[]; events: HistEvent[] }) {
     h('text', { x: 4, y: H - 4, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${min.toFixed(2)} · ${kline[0]!.date}→${kline[kline.length - 1]!.date}`))
 }
 
-function KlineView(props: { data: LiveData }) {
-  const [code, setCode] = useState('')
-  const [kind, setKind] = useState('a')
-  const [hist, setHist] = useState<{ kline: HistBar[]; events: HistEvent[]; updatedAt?: string } | null>(null)
+interface StockInfoData { name?: string; market?: string; price?: number; change?: number; changePercent?: number; open?: number; high?: number; low?: number; prevClose?: number; volume?: number; turnover?: number; marketCap?: number; floatMarketCap?: number }
+function inferKind(type?: AssetType, market?: string): string {
+  if (type === 'fund') return 'fund'
+  const m = market ?? ''
+  if (m.includes('港')) return 'hk'
+  if (m.includes('美')) return 'us'
+  return 'a'
+}
+function bigNum(n?: number): string {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '—'
+  if (n >= 1e12) return `${(n / 1e12).toFixed(2)}万亿`
+  if (n >= 1e8) return `${(n / 1e8).toFixed(2)}亿`
+  if (n >= 1e4) return `${(n / 1e4).toFixed(2)}万`
+  return String(n)
+}
+
+/** 行情详情：点击个股后展示基本信息 + 本地 K 线（含事件标注）。 */
+function SymbolDetail(props: { code: string; name?: string; type?: AssetType; market?: string; price?: number; changePercent?: number; onBack: () => void; onAnalyze?: () => void }) {
+  const { code, type, market, onBack } = props
+  const [kind, setKind] = useState(inferKind(type, market))
+  const [info, setInfo] = useState<StockInfoData | null>(null)
+  const [hist, setHist] = useState<{ kline: HistBar[]; events: HistEvent[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [hint, setHint] = useState('')
-  const picks = [...props.data.holdings, ...props.data.watchlist].slice(0, 8)
-  const load = async (c: string) => {
-    if (!c) return
+  const [sent, setSent] = useState('')
+  const askChat = async (text: string) => {
+    setSent('发送中…')
     try {
-      const r = await apiGet<{ ok: boolean; kline?: HistBar[]; events?: HistEvent[]; updatedAt?: string }>(`/history?code=${encodeURIComponent(c)}`)
-      setHist(r.ok ? { kline: r.kline ?? [], events: r.events ?? [], updatedAt: r.updatedAt } : { kline: [], events: [] })
+      const r = await apiPost<{ ok: boolean; error?: string }>('/chat/ask', { text })
+      setSent(r.ok ? '已发送到对话，请查看主界面' : (r.error || '发送失败'))
+    } catch { setSent('发送失败') }
+    window.setTimeout(() => setSent(''), 5000)
+  }
+  const loadHist = async () => {
+    try {
+      const r = await apiGet<{ ok: boolean; kline?: HistBar[]; events?: HistEvent[] }>(`/history?code=${encodeURIComponent(code)}`)
+      setHist(r.ok ? { kline: r.kline ?? [], events: r.events ?? [] } : { kline: [], events: [] })
     } catch { setHist({ kline: [], events: [] }) }
   }
+  const loadInfo = async () => {
+    try { const r = await apiGet<{ ok: boolean; info?: StockInfoData }>(`/info?code=${encodeURIComponent(code)}`); if (r.ok && r.info) setInfo(r.info) } catch { /* */ }
+  }
   const sync = async () => {
-    const c = code.trim(); if (!c) { setHint('请输入代码'); return }
     setBusy(true); setHint('')
     try {
-      const r = await apiPost<{ ok: boolean; bars: number; addedBars: number; addedEvents: number; provider?: string; klineError?: string }>('/history/sync', { code: c, kind })
-      setHint(r.ok ? `同步完成：${r.bars} 根K线（新增 ${r.addedBars}），事件 +${r.addedEvents}｜${r.provider ?? ''}` : `同步失败：${r.klineError ?? ''}`)
-      await load(c)
+      const r = await apiPost<{ ok: boolean; bars: number; addedBars: number; addedEvents: number; provider?: string; klineError?: string }>('/history/sync', { code, kind })
+      setHint(r.ok ? `同步 ${r.bars} 根K线（新增 ${r.addedBars}）· 事件 +${r.addedEvents} · ${r.provider ?? ''}` : `同步失败：${r.klineError ?? ''}`)
+      await loadHist()
     } catch { setHint('同步失败') } finally { setBusy(false) }
   }
-  useEffect(() => { if (code) void load(code) }, [])
+  useEffect(() => { setInfo(null); setHist(null); void loadInfo(); void loadHist() }, [code])
+  const price = info?.price ?? props.price
+  const pct = info?.changePercent ?? props.changePercent
+  const infoRow = (label: string, val: string, color?: string) => h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8, width: '48%' } },
+    h('span', { style: S.muted }, label), h('span', { style: { color: color ?? 'inherit' } }, val))
   return h('div', { style: S.section },
-    h('div', { style: S.title }, 'K线与事件'),
-    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-      h('input', { style: { ...S.input, flex: 1, minWidth: 90 }, placeholder: '代码 600519', value: code, onChange: (e: { target: { value: string } }) => setCode(e.target.value) }),
-      h('select', { style: { ...S.input, width: 70 }, value: kind, onChange: (e: { target: { value: string } }) => setKind(e.target.value) },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+      h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: onBack }, '← 返回'),
+      h('div', { style: { fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${info?.name || props.name || code}`, h('span', { style: { ...S.muted, marginLeft: 6 } }, code)),
+      h('button', { style: { ...S.btn, padding: '2px 8px' }, title: '让对话里的 AI 画出K线并解读', onClick: () => void askChat(`请调用 render_kline_chart 画出 ${info?.name || props.name || code}(${code}) 的K线图（kind=${kind}），并结合图中财报/分红标记简要解读近期走势与风险。`) }, '问AI·K线'),
+      props.onAnalyze ? h('button', { style: { ...S.btn, padding: '2px 8px' }, title: 'AI 持仓/个股分析', onClick: props.onAnalyze }, 'AI 分析') : null,
+      h('span', { style: S.tag }, info?.market || market || '')),
+    sent ? h('div', { style: { ...S.muted, fontSize: 11, color: BRAND } }, sent) : null,
+    (typeof price === 'number') ? h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10 } },
+      h('span', { style: { fontSize: 22, fontWeight: 700, color: colorOf(pct) } }, fmt(price, type === 'fund' ? 4 : 2)),
+      h('span', { style: { color: colorOf(pct) } }, `${info?.change != null ? fmt(info.change) : ''} ${pctStr(pct)}`)) : h('div', { style: S.muted }, '加载信息中…'),
+    info ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '2px 4%' } },
+      infoRow('今开', fmt(info.open)), infoRow('昨收', fmt(info.prevClose)),
+      infoRow('最高', fmt(info.high), UP), infoRow('最低', fmt(info.low), DOWN),
+      infoRow('成交量', bigNum(info.volume)), infoRow('成交额', bigNum(info.turnover)),
+      infoRow('总市值', bigNum(info.marketCap)), infoRow('流通市值', bigNum(info.floatMarketCap))) : null,
+    h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 } },
+      h('div', { style: { ...S.muted, fontWeight: 600, flex: 1 } }, 'K线与事件'),
+      h('select', { style: { ...S.input, width: 66, padding: '2px 4px' }, value: kind, onChange: (e: { target: { value: string } }) => setKind(e.target.value) },
         h('option', { value: 'a' }, 'A股'), h('option', { value: 'hk' }, '港股'), h('option', { value: 'us' }, '美股'), h('option', { value: 'fund' }, '基金')),
-      h('button', { style: S.btn, disabled: busy, onClick: () => void sync() }, busy ? '同步中…' : '同步'),
-      h('button', { style: S.btn, onClick: () => void load(code.trim()) }, '查看')),
-    picks.length ? h('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } }, picks.map((p) => h('button', {
-      key: keyOf(p.code, p.type ?? 'stock'), style: { ...S.btn, padding: '2px 6px', fontSize: 11 },
-      onClick: () => { setCode(p.code); setKind(p.type === 'fund' ? 'fund' : 'a'); void load(p.code) },
-    }, p.name || p.code))) : null,
+      h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: busy, onClick: () => void sync() }, busy ? '同步中…' : '同步')),
     hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
-    hist ? h(KlineChart, { kline: hist.kline, events: hist.events }) : h('div', { style: S.muted }, '输入代码后「同步」拉取并本地保存历史'),
+    hist && hist.kline.length >= 2 ? h(KlineChart, { kline: hist.kline, events: hist.events }) : h('div', { style: S.muted }, '暂无本地K线，点「同步」拉取'),
     hist && hist.events.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 } },
       h('div', { style: { ...S.muted, fontWeight: 600 } }, `事件标记 (${hist.events.length})`),
-      hist.events.slice(-12).reverse().map((e, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center' } },
+      hist.events.slice(-10).reverse().map((e, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center' } },
         h('span', { style: { width: 8, height: 8, borderRadius: 999, background: EVENT_COLOR(e.type), flex: '0 0 auto' } }),
         h('span', { style: { ...S.muted, width: 82, flex: '0 0 auto' } }, e.date),
         h('span', { style: { flex: 1 } }, e.label)))) : null)
@@ -756,51 +816,78 @@ const CAP_LABEL: Record<string, string> = {
 interface CapProvider { id: string; source: string; endpointRef: string; ok?: boolean; selected: boolean }
 interface CapCatalog { capability: string; selected: string[]; hasPolicy: boolean; providers: CapProvider[] }
 
+interface McpSourceLite { name: string; label: string; enabled: boolean; state: string; toolCount?: number }
+
 function SourcesView() {
+  const [pub, setPub] = useState(true)
+  const [dataTools, setDataTools] = useState(0)
   const [catalog, setCatalog] = useState<CapCatalog[]>([])
   const [sel, setSel] = useState<Record<string, string[]>>({})
+  const [srcs, setSrcs] = useState<McpSourceLite[]>([])
   const [busy, setBusy] = useState(false)
   const [hint, setHint] = useState('')
-  const apply = (cat: CapCatalog[]) => {
-    setCatalog(cat)
+  const applyCat = (c: { publicEnabled: boolean; capabilities: CapCatalog[]; dataToolCount?: number }) => {
+    setPub(c.publicEnabled)
+    if (typeof c.dataToolCount === 'number') setDataTools(c.dataToolCount)
+    setCatalog(c.capabilities ?? [])
     const s: Record<string, string[]> = {}
-    for (const c of cat) s[c.capability] = c.providers.filter((p) => p.selected).map((p) => p.id)
+    for (const x of c.capabilities ?? []) s[x.capability] = x.providers.filter((p) => p.selected).map((p) => p.id)
     setSel(s)
   }
-  useEffect(() => { void apiGet<{ catalog: CapCatalog[] }>('/providers').then((r) => apply(r.catalog ?? [])).catch(() => { /* */ }) }, [])
-  const toggle = (cap: string, id: string) => setSel((s) => {
+  const loadSrcs = () => apiGet<{ sources: McpSourceLite[] }>('/mcp').then((r) => setSrcs(r.sources ?? [])).catch(() => { /* */ })
+  useEffect(() => { void apiGet<{ publicEnabled: boolean; capabilities: CapCatalog[]; dataToolCount?: number }>('/providers').then(applyCat).catch(() => { /* */ }); void loadSrcs() }, [])
+  const togglePublic = async () => {
+    setBusy(true); setHint('')
+    try { const r = await apiPost<{ ok: boolean; publicEnabled: boolean; capabilities: CapCatalog[]; dataToolCount?: number }>('/providers/public', { enabled: !pub }); if (r.ok) applyCat(r) } finally { setBusy(false) }
+  }
+  const toggleSrc = async (name: string, enabled: boolean) => {
+    setBusy(true); setHint('')
+    try { const r = await apiPost<{ ok: boolean; sources: McpSourceLite[] }>('/mcp/source', { name, enabled }); if (r.ok) setSrcs(r.sources ?? []) } finally { setBusy(false) }
+  }
+  const toggleProvider = (cap: string, id: string) => setSel((s) => {
     const cur = new Set(s[cap] ?? [])
     if (cur.has(id)) cur.delete(id); else cur.add(id)
     const ordered = (catalog.find((c) => c.capability === cap)?.providers ?? []).filter((p) => cur.has(p.id)).map((p) => p.id)
     return { ...s, [cap]: ordered }
   })
-  const save = async (policy: Record<string, string[]>) => {
+  const savePolicy = async (policy: Record<string, string[]>) => {
     setBusy(true); setHint('')
-    try { const r = await apiPost<{ ok: boolean; catalog: CapCatalog[] }>('/providers', { policy }); if (r.ok) { apply(r.catalog ?? []); setHint('已保存并即时生效') } }
+    try { const r = await apiPost<{ ok: boolean; publicEnabled: boolean; capabilities: CapCatalog[] }>('/providers', { policy }); if (r.ok) { applyCat(r); setHint('已保存并即时生效') } }
     catch { setHint('保存失败') } finally { setBusy(false) }
   }
-  const multi = catalog.filter((c) => c.providers.length > 1)
-  const single = catalog.filter((c) => c.providers.length <= 1)
+  const srcBtn = (label: string, on: boolean, onClick: () => void, extra?: string) => h('button', {
+    onClick, disabled: busy, style: { ...S.btn, padding: '5px 10px', display: 'inline-flex', alignItems: 'center', gap: 6, background: on ? BRAND : S.btn.background, color: on ? '#fff' : S.btn.color },
+  }, h('span', { style: { width: 7, height: 7, borderRadius: 999, background: on ? '#fff' : '#bbb' } }), label, extra ? h('span', { style: { opacity: 0.85, fontSize: 11 } }, extra) : null)
   const chip = (cap: string, p: CapProvider) => {
     const on = (sel[cap] ?? []).includes(p.id)
     return h('button', {
-      key: p.id, title: p.endpointRef, onClick: () => toggle(cap, p.id),
+      key: p.id, title: p.endpointRef, onClick: () => toggleProvider(cap, p.id),
       style: { ...S.btn, padding: '2px 8px', display: 'inline-flex', alignItems: 'center', gap: 5, background: on ? BRAND : S.btn.background, color: on ? '#fff' : S.btn.color },
     }, p.ok === false ? h('span', { style: { width: 6, height: 6, borderRadius: 999, background: UP } }) : (p.ok ? h('span', { style: { width: 6, height: 6, borderRadius: 999, background: DOWN } }) : null), p.source)
   }
   const capRow = (c: CapCatalog) => h('div', { key: c.capability, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' } },
     h('span', { style: { width: 76, flex: '0 0 auto', fontWeight: 500 } }, CAP_LABEL[c.capability] ?? c.capability),
     h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 } }, c.providers.map((p) => chip(c.capability, p))))
+  const multi = catalog.filter((c) => c.providers.length > 1)
+  const single = catalog.filter((c) => c.providers.length <= 1)
   return h('div', { style: S.section },
-    h('div', { style: S.title }, '数据源选择',
-      h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, disabled: busy, onClick: () => void save(sel) }, busy ? '…' : '保存'),
-      h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: busy, title: '清空自定义，回到探测顺序', onClick: () => void save({}) }, '重置')),
-    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
-    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, '多来源能力（可多选/切换优先级）'),
-    multi.map(capRow),
-    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, '单一来源能力（可启用/停用）'),
-    single.map(capRow),
-    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6 } }, '绿点=探测可用，红点=探测失败；选择按钮顺序即调用优先级。妙想/盈米在「接口」页作为整体数据源开关。'))
+    h('div', { style: S.title }, '数据来源'),
+    h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+      srcBtn('公开数据', pub, () => void togglePublic(), pub ? `${dataTools}工具` : '东财/腾讯/Yahoo/DDG'),
+      ...srcs.map((s) => srcBtn(s.label || s.name, s.enabled, () => void toggleSrc(s.name, !s.enabled), s.enabled ? (s.state === 'ready' ? `${s.toolCount ?? 0}工具` : (MCP_STATE_LABEL[s.state] ?? s.state)) : undefined))),
+    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 4 } }, '开关控制“给模型的工具”（即时同步），不影响面板数据——面板始终更新。可只用某一来源或混用。'),
+    pub ? h('div', { style: { marginTop: 6 } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        h('div', { style: { ...S.muted, fontWeight: 600, flex: 1 } }, '公开数据 · 按能力选择 provider'),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: busy, onClick: () => void savePolicy(sel) }, busy ? '…' : '保存'),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: busy, title: '清空自定义，回到探测顺序', onClick: () => void savePolicy({}) }, '重置')),
+      hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
+      h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, '多来源能力（多选，顺序即优先级）'),
+      multi.map(capRow),
+      h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, '单一来源能力（启用/停用）'),
+      single.map(capRow),
+      h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6 } }, '绿点=探测可用，红点=探测失败。'),
+    ) : h('div', { style: { ...S.muted, marginTop: 8 } }, '公开数据已关闭：模型不再获得公开行情/K线等工具（改用所选外部来源）；但金融面板数据仍持续更新。'))
 }
 
 // ---- 接口 tab ----
@@ -930,13 +1017,13 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
         analysis ? h('button', { style: S.btn, onClick: () => void generate(true), disabled: status === 'generating' }, '重新生成') : null),
       h('div', { style: { overflowY: 'auto', padding: '18px 22px', flex: 1 } },
         status === 'loading' ? h('div', { style: S.muted }, '读取缓存…') : null,
-        status === 'generating' ? h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600 } }, '正在生成 AI 解读'),
-          h('div', { style: S.muted }, '模型正在当前 Harness 会话中收集行情、基本面、新闻和风险数据。完成后本页会自动刷新。')) : null,
+        status === 'generating' ? h('div', { style: { ...S.card, borderColor: BRAND } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600 } }, h(Spinner, null), '正在生成 AI 解读'),
+          h('div', { style: S.muted }, '模型正在收集行情、基本面、新闻与风险数据；完成后本页自动刷新，报告直接呈现在此，无需回看对话。')) : null,
         status === 'empty' ? h('div', { style: S.card },
           h('div', { style: { fontWeight: 600 } }, '还没有解读缓存'),
-          h('div', { style: S.muted }, '只有你主动点击后才会调用当前会话模型生成报告。'),
-          h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6 }, onClick: () => void generate(false) }, '生成 AI 解读')) : null,
+          h('div', { style: S.muted }, '点击后调用模型生成完整解读报告，结果直接展示在本页。'),
+          h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6, background: BRAND, color: '#fff' }, onClick: () => void generate(false) }, '生成 AI 解读')) : null,
         status === 'error' ? h('div', { style: S.card },
           h('div', { style: { fontWeight: 600 } }, '解读请求失败'),
           h('div', { style: S.muted }, error || '请稍后重试'),
@@ -950,7 +1037,7 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
 
 const TABS: Array<{ id: string; label: string }> = [
   { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
-  { id: 'funds', label: '基金' }, { id: 'kline', label: 'K线' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
+  { id: 'funds', label: '基金' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
   { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
 ]
 
@@ -1026,7 +1113,6 @@ function PanelBody(props: {
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
-      tab === 'kline' ? h(KlineView, { data }) : null,
       tab === 'sources' ? h(SourcesView, null) : null,
       tab === 'skills' ? h(SkillsView, null) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))

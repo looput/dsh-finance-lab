@@ -5,8 +5,10 @@ import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
 import type { McpManager } from './mcp/manager.js'
 import type { SkillManager } from './skills.js'
+import type { FinanceToolController } from './tools/register.js'
 import type { HistoryStore } from './history/store.js'
 import { syncHistory, type SymbolKind } from './history/sync.js'
+import { renderKlinePng } from './history/chart.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
 import type { AssetType } from './types.js'
 
@@ -22,18 +24,24 @@ interface WebServerLike {
   }): () => void
 }
 
+interface UserFollowup {
+  id: string
+  role: 'user'
+  content: [{ type: 'text'; text: string }]
+  source: { kind: 'user' }
+}
+
 interface ModelAgentLike {
-  followup(message: {
-    id: string
-    role: 'user'
-    content: [{ type: 'text'; text: string }]
-    source: { kind: 'user' }
-  }): void
+  followup(message: UserFollowup): void
+}
+
+interface AgentRegistryLike {
+  roots?(): unknown[]
 }
 
 interface ModelContextLike {
   agent?: unknown
-  agents?: { roots(): unknown[] }
+  agents?: unknown
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -78,7 +86,8 @@ function currentAgent(context: ModelContextLike): ModelAgentLike | undefined {
   if (context.agent && typeof (context.agent as ModelAgentLike).followup === 'function') {
     return context.agent as ModelAgentLike
   }
-  const root = context.agents?.roots?.()[0] as ModelAgentLike | undefined
+  const registry = context.agents as AgentRegistryLike | undefined
+  const root = registry?.roots?.()[0] as ModelAgentLike | undefined
   return root && typeof root.followup === 'function' ? root : undefined
 }
 
@@ -124,8 +133,21 @@ export function registerRoutes(
   skills: SkillManager | undefined,
   analyses: AnalysisStore,
   modelContext: ModelContextLike,
+  toolController?: FinanceToolController,
 ): () => void {
   const pendingAnalyses = new Map<string, number>()
+
+  /**
+   * Send a user message to the current Harness chat session (panel → chat link).
+   * Used by the on-demand analysis and by the panel's "问 AI" buttons. (An isolated
+   * subagent session was explored but the agent factory does not drive a
+   * plugin-created session to completion from this HTTP context.)
+   */
+  function dispatchToChat(message: UserFollowup): 'current' | undefined {
+    const parent = currentAgent(modelContext)
+    if (parent) { parent.followup(message); return 'current' }
+    return undefined
+  }
   return webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -134,14 +156,32 @@ export function registerRoutes(
       const sub = url.pathname.slice(API_PREFIX.length) || '/'
       try {
         if (req.method === 'GET' && (sub === '/state' || sub === '/')) {
-          const { holdings, watchlist } = store.get()
-          return sendJson(res, 200, { holdings, watchlist, portfolioPath: store.path })
+          const { holdings, watchlist, updatedAt } = store.get()
+          return sendJson(res, 200, { holdings, watchlist, portfolioPath: store.path, updatedAt })
+        }
+        if (req.method === 'POST' && sub === '/chat/ask') {
+          const body = await readBody(req)
+          const textInput = String(body.text ?? '').trim()
+          if (!textInput) return sendJson(res, 400, { ok: false, error: 'missing text' })
+          const dispatched = dispatchToChat({
+            id: randomUUID(),
+            role: 'user',
+            content: [{ type: 'text', text: textInput }],
+            source: { kind: 'user' },
+          })
+          if (!dispatched) return sendJson(res, 503, { ok: false, error: '当前没有活跃的对话会话，请先在主界面开始一个对话' })
+          return sendJson(res, 200, { ok: true })
         }
         if (req.method === 'GET' && sub === '/mcp') {
           return sendJson(res, 200, { sources: mcp?.status() ?? [] })
         }
         if (req.method === 'GET' && sub === '/providers') {
-          return sendJson(res, 200, { catalog: finance.getProviderCatalog() })
+          return sendJson(res, 200, { ...finance.getProviderCatalog(), dataToolCount: toolController?.activeDataToolCount() ?? 0 })
+        }
+        if (req.method === 'GET' && sub === '/info') {
+          const code = url.searchParams.get('code') ?? ''
+          const r = await finance.getStockInfo(code)
+          return sendJson(res, 200, { ok: r.ok, provider: r.provider, info: r.ok ? r.data : undefined, error: r.ok ? undefined : r.error })
         }
         if (skills && req.method === 'GET' && sub === '/skills') {
           return sendJson(res, 200, skills.catalog())
@@ -151,6 +191,19 @@ export function registerRoutes(
           const local = Array.isArray(body.local) ? (body.local as string[]) : undefined
           const yingmi = Array.isArray(body.yingmi) ? (body.yingmi as string[]) : undefined
           return sendJson(res, 200, { ok: true, ...(await skills.setEnabled(local, yingmi)) })
+        }
+        if (history && req.method === 'GET' && sub === '/chart') {
+          const code = (url.searchParams.get('code') ?? '').trim()
+          if (!code) return sendJson(res, 400, { ok: false, error: 'missing code' })
+          const kind = (HISTORY_KINDS.includes(url.searchParams.get('kind') as SymbolKind) ? url.searchParams.get('kind') : 'a') as SymbolKind
+          const limit = Math.max(20, Math.min(Number(url.searchParams.get('limit')) || 160, 1000))
+          let h = await history.read(code)
+          if (!h || h.kline.length < 2) { await syncHistory(finance, history, code, kind); h = await history.read(code) }
+          if (!h || h.kline.length < 2) return sendJson(res, 404, { ok: false, error: 'no kline' })
+          const png = renderKlinePng(h.kline.slice(-limit), h.events)
+          res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' })
+          res.end(Buffer.from(png.data))
+          return
         }
         if (history && req.method === 'GET' && sub === '/history/list') {
           return sendJson(res, 200, { symbols: await history.list() })
@@ -180,8 +233,21 @@ export function registerRoutes(
         if (req.method === 'POST' && sub === '/providers') {
           const body = await readBody(req)
           const policy = (body.policy ?? {}) as Record<string, string[]>
-          const catalog = await finance.setProviderPolicy(policy)
-          return sendJson(res, 200, { ok: true, catalog })
+          return sendJson(res, 200, { ok: true, ...(await finance.setProviderPolicy(policy)) })
+        }
+        if (req.method === 'POST' && sub === '/providers/public') {
+          const body = await readBody(req)
+          const enabled = body.enabled !== false
+          const catalog = await finance.setPublicEnabled(enabled)
+          toolController?.setDataToolsEnabled(enabled) // sync the model's public tool list
+          return sendJson(res, 200, { ok: true, ...catalog, dataToolCount: toolController?.activeDataToolCount() ?? 0 })
+        }
+        if (mcp && req.method === 'POST' && sub === '/mcp/source') {
+          const body = await readBody(req)
+          const name = String(body.name ?? '').trim()
+          if (!name) return sendJson(res, 400, { ok: false, error: 'missing name' })
+          await mcp.setEnabled(name, body.enabled !== false)
+          return sendJson(res, 200, { ok: true, sources: mcp.status() })
         }
         if (req.method === 'POST' && sub === '/mcp/token') {
           if (!mcp) return sendJson(res, 400, { ok: false, error: 'mcp disabled' })
@@ -254,20 +320,20 @@ export function registerRoutes(
           if (pendingAt && Date.now() - pendingAt < 10 * 60_000) {
             return sendJson(res, 202, { ok: true, status: 'generating', code, type })
           }
-          const agent = currentAgent(modelContext)
-          if (!agent) {
-            return sendJson(res, 503, { ok: false, error: 'current Harness session is unavailable' })
-          }
           const holding = store.get().holdings.find((h) => h.code === code && h.type === type)
           pendingAnalyses.set(key, Date.now())
           try {
-            agent.followup({
+            const dispatched = dispatchToChat({
               id: randomUUID(),
               role: 'user',
               content: [{ type: 'text', text: analysisPrompt(code, type, holding) }],
               source: { kind: 'user' },
             })
-            return sendJson(res, 202, { ok: true, status: 'generating', code, type })
+            if (!dispatched) {
+              pendingAnalyses.delete(key)
+              return sendJson(res, 503, { ok: false, error: 'current Harness session is unavailable' })
+            }
+            return sendJson(res, 202, { ok: true, status: 'generating', session: dispatched, code, type })
           } catch (err) {
             pendingAnalyses.delete(key)
             return sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
