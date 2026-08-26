@@ -157,6 +157,13 @@ npm run test:avail -- --group us
 
 Token 解析优先级：环境变量（`apiKeyEnv`，如 `EM_API_KEY`）→ 本地 `data/mcp-secrets.json`（不提交，见 `data/mcp-secrets.example.json`）→ 配置内联 `apiKey`。也可在面板「接口」页点 🔑 直接填写 token：写入 `data/mcp-secrets.json` 并**即时热重载**（断开旧连接、重新桥接工具，无需重启）。
 
+## Chat 与面板联动
+
+- **对话改持仓/自选，面板实时同步**：Agent 用 `upsert_holding`/`import_holdings`/`add_watchlist` 等工具修改本地库后，面板每 ~6 秒比对 `updatedAt` 自动刷新，无需手动刷新即可看到变化。
+- **面板按钮联动对话**：个股详情页「问AI·K线」等按钮通过 `POST api/chat/ask` 把请求发到当前对话，交给模型处理（复用当前会话）。
+- **对话中生成 K 线图**：`render_kline_chart` 工具生成日 K 线图（含财报/分红竖线），返回 Markdown 图片，图片由 `GET api/chart?code=…` 即时渲染（无依赖 PNG 编码，见 `src/history/chart.ts`）。
+  - 说明：当前提供的模型走纯文本 chat-completions 适配器，工具结果里的原生图片会被适配器拒绝并中断该轮；聊天 UI 也不内联渲染 Markdown 图片。因此图表以 URL/链接交付、并在**金融面板内原生渲染**；若接入视觉模型，可进一步在对话内内联。
+
 ## 数据源选择（多来源策略）
 
 面板「数据源」页控制的是**给模型的工具**，不影响面板自身数据——即使关闭全部来源，金融面板各标签页仍持续更新。分两层：
