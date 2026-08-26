@@ -64,6 +64,9 @@ export class HistoryStore {
   /** Merge K-line bars by date (upsert), keeping ascending order. Returns added count. */
   async mergeKline(code: string, kind: string, bars: KlineBar[]): Promise<number> {
     const cur = (await this.read(code)) ?? { code, kind, updatedAt: '', kline: [], events: [] }
+    // A code re-synced under a different market kind is a different price series
+    // (e.g. A-share price vs fund NAV) — reset instead of merging incompatible scales.
+    if (cur.kind && cur.kind !== kind) { cur.kline = []; cur.events = [] }
     const byDate = new Map(cur.kline.map((b) => [b.date, b]))
     const before = byDate.size
     for (const b of bars) if (b?.date) byDate.set(b.date, b)

@@ -8,6 +8,7 @@ import type { SkillManager } from './skills.js'
 import type { FinanceToolController } from './tools/register.js'
 import type { HistoryStore } from './history/store.js'
 import { syncHistory, type SymbolKind } from './history/sync.js'
+import { renderKlinePng } from './history/chart.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
 import type { AssetType } from './types.js'
 
@@ -190,6 +191,19 @@ export function registerRoutes(
           const local = Array.isArray(body.local) ? (body.local as string[]) : undefined
           const yingmi = Array.isArray(body.yingmi) ? (body.yingmi as string[]) : undefined
           return sendJson(res, 200, { ok: true, ...(await skills.setEnabled(local, yingmi)) })
+        }
+        if (history && req.method === 'GET' && sub === '/chart') {
+          const code = (url.searchParams.get('code') ?? '').trim()
+          if (!code) return sendJson(res, 400, { ok: false, error: 'missing code' })
+          const kind = (HISTORY_KINDS.includes(url.searchParams.get('kind') as SymbolKind) ? url.searchParams.get('kind') : 'a') as SymbolKind
+          const limit = Math.max(20, Math.min(Number(url.searchParams.get('limit')) || 160, 1000))
+          let h = await history.read(code)
+          if (!h || h.kline.length < 2) { await syncHistory(finance, history, code, kind); h = await history.read(code) }
+          if (!h || h.kline.length < 2) return sendJson(res, 404, { ok: false, error: 'no kline' })
+          const png = renderKlinePng(h.kline.slice(-limit), h.events)
+          res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' })
+          res.end(Buffer.from(png.data))
+          return
         }
         if (history && req.method === 'GET' && sub === '/history/list') {
           return sendJson(res, 200, { symbols: await history.list() })
