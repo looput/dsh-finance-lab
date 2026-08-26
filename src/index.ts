@@ -83,6 +83,8 @@ export function apply(ctx: Context, config: Config) {
       '- Market data uses direct HTTP endpoints (Eastmoney / Tencent), not akshare. If a market tool fails, call probe_finance_sources first.',
       '- Holdings CRUD works without quotes; P&L enrichment needs a healthy quote provider.',
       '- 历史K线/财报/分红可用 sync_history 落地到本地库，再用 get_history 读取（含事件标记）。',
+      '- 需要在对话中直接展示K线图时，调用 render_kline_chart（会内联一张图片，含财报/分红竖线标注）。',
+      '- 用户可能通过面板按钮把请求发到对话（如“让 AI 画K线并解读”）；也可用 upsert_holding/import_holdings/add_watchlist 等按对话内容改持仓与自选，面板会实时刷新。',
       '- Use type:"fund" for funds (基金, 6-digit code) and type:"stock" for stocks (A股/港股/美股).',
       '- When the panel sends an active position-analysis request, gather the requested data with finance tools and finish by calling save_position_analysis with the complete Markdown report.',
     ].join('\n'),

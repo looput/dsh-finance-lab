@@ -273,10 +273,12 @@ function useLive() {
   const [loading, setLoading] = useState(false)
   const inflight = useRef(false)
   const again = useRef(false)
+  const lastRev = useRef('')
 
   const loadState = useCallback(async () => {
     try {
-      const s = await apiGet<Partial<LiveData>>('/state')
+      const s = await apiGet<Partial<LiveData> & { updatedAt?: string }>('/state')
+      if (s.updatedAt) lastRev.current = s.updatedAt
       setData((d) => ({ ...d, holdings: s.holdings ?? [], watchlist: s.watchlist ?? [], portfolioPath: s.portfolioPath }))
     } catch { /* keep prior */ }
   }, [])
@@ -308,11 +310,25 @@ function useLive() {
     void loadLive()
   }, [loadLive])
 
+  // Detect chat-driven holdings/watchlist changes (agent tools write the same store)
+  // and refresh promptly, so the panel stays aligned with the conversation.
+  const watchState = useCallback(async () => {
+    try {
+      const s = await apiGet<Partial<LiveData> & { updatedAt?: string }>('/state')
+      if (s.updatedAt && s.updatedAt !== lastRev.current) {
+        lastRev.current = s.updatedAt
+        setData((d) => ({ ...d, holdings: s.holdings ?? d.holdings, watchlist: s.watchlist ?? d.watchlist }))
+        void loadLive()
+      }
+    } catch { /* keep prior */ }
+  }, [loadLive])
+
   useEffect(() => {
     void loadState().then(loadLive)
-    const t = window.setInterval(loadLive, 60_000)
-    return () => window.clearInterval(t)
-  }, [loadState, loadLive])
+    const live = window.setInterval(loadLive, 60_000)
+    const watch = window.setInterval(watchState, 6_000)
+    return () => { window.clearInterval(live); window.clearInterval(watch) }
+  }, [loadState, loadLive, watchState])
 
   return { data, loading, loadLive, mutate }
 }
@@ -688,6 +704,15 @@ function SymbolDetail(props: { code: string; name?: string; type?: AssetType; ma
   const [hist, setHist] = useState<{ kline: HistBar[]; events: HistEvent[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [hint, setHint] = useState('')
+  const [sent, setSent] = useState('')
+  const askChat = async (text: string) => {
+    setSent('发送中…')
+    try {
+      const r = await apiPost<{ ok: boolean; error?: string }>('/chat/ask', { text })
+      setSent(r.ok ? '已发送到对话，请查看主界面' : (r.error || '发送失败'))
+    } catch { setSent('发送失败') }
+    window.setTimeout(() => setSent(''), 5000)
+  }
   const loadHist = async () => {
     try {
       const r = await apiGet<{ ok: boolean; kline?: HistBar[]; events?: HistEvent[] }>(`/history?code=${encodeURIComponent(code)}`)
@@ -713,9 +738,11 @@ function SymbolDetail(props: { code: string; name?: string; type?: AssetType; ma
   return h('div', { style: S.section },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
       h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: onBack }, '← 返回'),
-      h('div', { style: { fontWeight: 600, flex: 1 } }, `${info?.name || props.name || code}`, h('span', { style: { ...S.muted, marginLeft: 6 } }, code)),
+      h('div', { style: { fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${info?.name || props.name || code}`, h('span', { style: { ...S.muted, marginLeft: 6 } }, code)),
+      h('button', { style: { ...S.btn, padding: '2px 8px' }, title: '让对话里的 AI 画出K线并解读', onClick: () => void askChat(`请调用 render_kline_chart 画出 ${info?.name || props.name || code}(${code}) 的K线图（kind=${kind}），并结合图中财报/分红标记简要解读近期走势与风险。`) }, '问AI·K线'),
       props.onAnalyze ? h('button', { style: { ...S.btn, padding: '2px 8px' }, title: 'AI 持仓/个股分析', onClick: props.onAnalyze }, 'AI 分析') : null,
       h('span', { style: S.tag }, info?.market || market || '')),
+    sent ? h('div', { style: { ...S.muted, fontSize: 11, color: BRAND } }, sent) : null,
     (typeof price === 'number') ? h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10 } },
       h('span', { style: { fontSize: 22, fontWeight: 700, color: colorOf(pct) } }, fmt(price, type === 'fund' ? 4 : 2)),
       h('span', { style: { color: colorOf(pct) } }, `${info?.change != null ? fmt(info.change) : ''} ${pctStr(pct)}`)) : h('div', { style: S.muted }, '加载信息中…'),

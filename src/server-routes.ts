@@ -137,12 +137,12 @@ export function registerRoutes(
   const pendingAnalyses = new Map<string, number>()
 
   /**
-   * Send the analysis prompt to the current Harness session. (An isolated
-   * subagent session was explored, but the agent factory does not drive a
-   * plugin-created session to completion from this HTTP context, so the
-   * reliable current-session dispatch is used.)
+   * Send a user message to the current Harness chat session (panel → chat link).
+   * Used by the on-demand analysis and by the panel's "问 AI" buttons. (An isolated
+   * subagent session was explored but the agent factory does not drive a
+   * plugin-created session to completion from this HTTP context.)
    */
-  function dispatchAnalysis(message: UserFollowup): 'current' | undefined {
+  function dispatchToChat(message: UserFollowup): 'current' | undefined {
     const parent = currentAgent(modelContext)
     if (parent) { parent.followup(message); return 'current' }
     return undefined
@@ -155,8 +155,21 @@ export function registerRoutes(
       const sub = url.pathname.slice(API_PREFIX.length) || '/'
       try {
         if (req.method === 'GET' && (sub === '/state' || sub === '/')) {
-          const { holdings, watchlist } = store.get()
-          return sendJson(res, 200, { holdings, watchlist, portfolioPath: store.path })
+          const { holdings, watchlist, updatedAt } = store.get()
+          return sendJson(res, 200, { holdings, watchlist, portfolioPath: store.path, updatedAt })
+        }
+        if (req.method === 'POST' && sub === '/chat/ask') {
+          const body = await readBody(req)
+          const textInput = String(body.text ?? '').trim()
+          if (!textInput) return sendJson(res, 400, { ok: false, error: 'missing text' })
+          const dispatched = dispatchToChat({
+            id: randomUUID(),
+            role: 'user',
+            content: [{ type: 'text', text: textInput }],
+            source: { kind: 'user' },
+          })
+          if (!dispatched) return sendJson(res, 503, { ok: false, error: '当前没有活跃的对话会话，请先在主界面开始一个对话' })
+          return sendJson(res, 200, { ok: true })
         }
         if (req.method === 'GET' && sub === '/mcp') {
           return sendJson(res, 200, { sources: mcp?.status() ?? [] })
@@ -296,7 +309,7 @@ export function registerRoutes(
           const holding = store.get().holdings.find((h) => h.code === code && h.type === type)
           pendingAnalyses.set(key, Date.now())
           try {
-            const dispatched = dispatchAnalysis({
+            const dispatched = dispatchToChat({
               id: randomUUID(),
               role: 'user',
               content: [{ type: 'text', text: analysisPrompt(code, type, holding) }],
