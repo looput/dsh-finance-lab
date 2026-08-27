@@ -4,6 +4,14 @@ import type { HistoryStore, MarketEvent } from './store.js'
 
 export type SymbolKind = 'a' | 'hk' | 'us' | 'fund'
 
+export function inferSymbolKind(code: string, kind: SymbolKind): SymbolKind {
+  if (kind !== 'a') return kind
+  const c = code.trim().toUpperCase()
+  if (/\.HK$|^HK[:.]/.test(c) || /^\d{4,5}$/.test(c)) return 'hk'
+  if (/[A-Z]/.test(c)) return 'us'
+  return kind
+}
+
 function numeric(v: unknown): number | undefined {
   const n = Number(v)
   return Number.isFinite(n) ? n : undefined
@@ -30,15 +38,16 @@ export async function syncHistory(
   kind: SymbolKind,
   signal?: AbortSignal,
 ) {
-  const klineRes = kind === 'hk' ? await finance.getHkKline(code, 'daily', undefined, undefined, signal)
-    : kind === 'us' ? await finance.getUsKline(code, 'daily', undefined, undefined, signal)
-    : kind === 'fund' ? await finance.getFundKline(code, signal)
+  const resolvedKind = inferSymbolKind(code, kind)
+  const klineRes = resolvedKind === 'hk' ? await finance.getHkKline(code, 'daily', undefined, undefined, signal)
+    : resolvedKind === 'us' ? await finance.getUsKline(code, 'daily', undefined, undefined, signal)
+    : resolvedKind === 'fund' ? await finance.getFundKline(code, signal)
     : await finance.getKline(code, 'daily', undefined, undefined, signal)
   const bars: KlineBar[] = klineRes.ok && Array.isArray(klineRes.data) ? klineRes.data as KlineBar[] : []
-  const addedBars = bars.length ? await store.mergeKline(code, kind, bars) : 0
+  const addedBars = bars.length ? await store.mergeKline(code, resolvedKind, bars) : 0
 
   const events: MarketEvent[] = []
-  if (kind !== 'fund') {
+  if (resolvedKind !== 'fund') {
     const fin = await finance.getFinancials(code, signal)
     if (fin.ok && Array.isArray(fin.data)) {
       for (const row of fin.data as Array<Record<string, unknown>>) {
@@ -49,10 +58,11 @@ export async function syncHistory(
       }
     }
   }
-  const addedEvents = events.length ? await store.mergeEvents(code, kind, events) : 0
+  const addedEvents = events.length ? await store.mergeEvents(code, resolvedKind, events) : 0
 
   return {
     ok: bars.length > 0,
+    kind: resolvedKind,
     provider: klineRes.provider,
     bars: bars.length,
     addedBars,

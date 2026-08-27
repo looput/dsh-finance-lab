@@ -633,7 +633,16 @@ function NewsView(props: { active: boolean; data: LiveData; quoteBy: Map<string,
 // ---- K线 tab (local history + event markers) ----
 interface HistBar { date: string; open: number; high: number; low: number; close: number; volume: number }
 interface HistEvent { date: string; type: string; label: string; value?: number }
+type KlineKind = 'a' | 'hk' | 'us' | 'fund'
 const EVENT_COLOR = (t: string) => (t === '财报' ? BRAND : t === '分红' ? DOWN : '#e6a23c')
+
+function inferKlineKind(code: string, type?: AssetType): KlineKind {
+  if (type === 'fund') return 'fund'
+  const c = code.trim().toUpperCase()
+  if (/\.HK$|^HK[:.]/.test(c) || /^\d{4,5}$/.test(c)) return 'hk'
+  if (/[A-Z]/.test(c)) return 'us'
+  return 'a'
+}
 
 function KlineChart(props: { kline: HistBar[]; events: HistEvent[] }) {
   const { kline, events } = props
@@ -687,14 +696,23 @@ function KlineView(props: { data: LiveData }) {
   return h('div', { style: S.section },
     h('div', { style: S.title }, 'K线与事件'),
     h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-      h('input', { style: { ...S.input, flex: 1, minWidth: 90 }, placeholder: '代码 600519', value: code, onChange: (e: { target: { value: string } }) => setCode(e.target.value) }),
+      h('input', {
+        style: { ...S.input, flex: 1, minWidth: 90 },
+        placeholder: '代码 600519',
+        value: code,
+        onChange: (e: { target: { value: string } }) => {
+          const next = e.target.value
+          setCode(next)
+          setKind(inferKlineKind(next))
+        },
+      }),
       h('select', { style: { ...S.input, width: 70 }, value: kind, onChange: (e: { target: { value: string } }) => setKind(e.target.value) },
         h('option', { value: 'a' }, 'A股'), h('option', { value: 'hk' }, '港股'), h('option', { value: 'us' }, '美股'), h('option', { value: 'fund' }, '基金')),
       h('button', { style: S.btn, disabled: busy, onClick: () => void sync() }, busy ? '同步中…' : '同步'),
       h('button', { style: S.btn, onClick: () => void load(code.trim()) }, '查看')),
     picks.length ? h('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } }, picks.map((p) => h('button', {
       key: keyOf(p.code, p.type ?? 'stock'), style: { ...S.btn, padding: '2px 6px', fontSize: 11 },
-      onClick: () => { setCode(p.code); setKind(p.type === 'fund' ? 'fund' : 'a'); void load(p.code) },
+      onClick: () => { setCode(p.code); setKind(inferKlineKind(p.code, p.type)); void load(p.code) },
     }, p.name || p.code))) : null,
     hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
     hist ? h(KlineChart, { kline: hist.kline, events: hist.events }) : h('div', { style: S.muted }, '输入代码后「同步」拉取并本地保存历史'),
