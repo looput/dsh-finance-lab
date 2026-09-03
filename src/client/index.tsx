@@ -261,6 +261,46 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return (await r.json()) as T
 }
 
+// ---- SSE event bus: server → panel push channel (bidirectional bridge) ----
+// The 60s /live poll stays as fallback; events make agent-side mutations show up instantly.
+interface BusMsg { kind: string; [key: string]: unknown }
+const busListeners = new Set<(e: BusMsg) => void>()
+let busSource: EventSource | undefined
+
+function ensureBusSource(): void {
+  if (busSource || typeof EventSource === 'undefined') return
+  const es = new EventSource(API + '/events')
+  es.onmessage = (ev: MessageEvent) => {
+    let msg: BusMsg
+    try {
+      msg = JSON.parse(ev.data as string) as BusMsg
+    } catch {
+      return
+    }
+    for (const fn of [...busListeners]) {
+      try {
+        fn(msg)
+      } catch { /* one broken listener must not starve the rest */ }
+    }
+  }
+  // EventSource reconnects on its own after network errors; no extra handling needed.
+  busSource = es
+}
+
+/** Subscribe to pushed server events; the shared EventSource starts on first use. */
+function useBus(fn: (e: BusMsg) => void): void {
+  const latest = useRef(fn)
+  latest.current = fn
+  useEffect(() => {
+    const listener = (e: BusMsg) => latest.current(e)
+    busListeners.add(listener)
+    ensureBusSource()
+    return () => {
+      busListeners.delete(listener)
+    }
+  }, [])
+}
+
 function useLive() {
   const [data, setData] = useState<LiveData>(EMPTY)
   const [loading, setLoading] = useState(false)
@@ -306,6 +346,19 @@ function useLive() {
     const t = window.setInterval(loadLive, 60_000)
     return () => window.clearInterval(t)
   }, [loadState, loadLive])
+
+  // Agent-side holdings/watchlist mutations arrive instantly via SSE; refresh quotes too.
+  useBus((e) => {
+    if (e.kind !== 'portfolio') return
+    const p = e as BusMsg & { holdings?: PortfolioHolding[]; watchlist?: WatchItem[]; portfolioPath?: string }
+    setData((d) => ({
+      ...d,
+      holdings: p.holdings ?? d.holdings,
+      watchlist: p.watchlist ?? d.watchlist,
+      portfolioPath: p.portfolioPath ?? d.portfolioPath,
+    }))
+    void loadLive()
+  })
 
   return { data, loading, loadLive, mutate }
 }
@@ -669,7 +722,7 @@ function KlineChart(props: { kline: HistBar[]; events: HistEvent[] }) {
     h('text', { x: 4, y: H - 4, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${min.toFixed(2)} · ${kline[0]!.date}→${kline[kline.length - 1]!.date}`))
 }
 
-function KlineView(props: { data: LiveData }) {
+function KlineView(props: { data: LiveData; requested?: { code: string; kind: string; at: number } }) {
   const [code, setCode] = useState('')
   const [kind, setKind] = useState('a')
   const [hist, setHist] = useState<{ kline: HistBar[]; events: HistEvent[]; updatedAt?: string } | null>(null)
@@ -693,6 +746,19 @@ function KlineView(props: { data: LiveData }) {
     } catch { setHint('同步失败') } finally { setBusy(false) }
   }
   useEffect(() => { if (code) void load(code) }, [])
+  // panel_navigate command: focus this view on a code (at-timestamp re-triggers repeats).
+  useEffect(() => {
+    const req = props.requested
+    if (!req) return
+    setCode(req.code)
+    if (['a', 'hk', 'us', 'fund'].includes(req.kind)) setKind(req.kind)
+    setHint('')
+    void load(req.code)
+  }, [props.requested?.at])
+  // History synced elsewhere (tool or panel): refresh chart if it matches.
+  useBus((e) => {
+    if (e.kind === 'history' && (e as BusMsg & { code?: string }).code === code.trim()) void load(code.trim())
+  })
   return h('div', { style: S.section },
     h('div', { style: S.title }, 'K线与事件'),
     h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
@@ -739,7 +805,9 @@ function SkillsView() {
     setLocalSel(c.local.filter((s) => s.enabled).map((s) => s.name))
     setYmSel(c.yingmi.filter((s) => s.enabled).map((s) => s.name))
   }
-  useEffect(() => { void apiGet<SkillCatalog>('/skills').then(apply).catch(() => { /* */ }) }, [])
+  const reload = () => { void apiGet<SkillCatalog>('/skills').then(apply).catch(() => { /* */ }) }
+  useEffect(() => { reload() }, [])
+  useBus((e) => { if (e.kind === 'skills') reload() })
   const save = async () => {
     setBusy(true); setHint('')
     try { const r = await apiPost<{ ok: boolean } & SkillCatalog>('/skills', { local: localSel, yingmi: ymSel }); if (r.ok) { apply(r); setHint('已保存并即时生效') } }
@@ -785,7 +853,10 @@ function SourcesView() {
     for (const c of cat) s[c.capability] = c.providers.filter((p) => p.selected).map((p) => p.id)
     setSel(s)
   }
-  useEffect(() => { void apiGet<{ catalog: CapCatalog[] }>('/providers').then((r) => apply(r.catalog ?? [])).catch(() => { /* */ }) }, [])
+  const reload = () => { void apiGet<{ catalog: CapCatalog[] }>('/providers').then((r) => apply(r.catalog ?? [])).catch(() => { /* */ }) }
+  useEffect(() => { reload() }, [])
+  // Policy changes from the agent (probe tool / provider-policy edits) refetch instantly.
+  useBus((e) => { if (e.kind === 'providers') reload() })
   const toggle = (cap: string, id: string) => setSel((s) => {
     const cur = new Set(s[cap] ?? [])
     if (cur.has(id)) cur.delete(id); else cur.add(id)
@@ -851,13 +922,16 @@ function McpSourceRow(props: { s: McpSource; onSaved: (sources: McpSource[]) => 
 
 function McpSourcesView() {
   const [sources, setSources] = useState<McpSource[]>([])
+  const alive = useRef(true)
+  const load = () => { void apiGet<{ sources: McpSource[] }>('/mcp').then((r) => { if (alive.current) setSources(r.sources ?? []) }).catch(() => { /* */ }) }
   useEffect(() => {
-    let alive = true
-    const load = () => { void apiGet<{ sources: McpSource[] }>('/mcp').then((r) => { if (alive) setSources(r.sources ?? []) }).catch(() => { /* */ }) }
+    alive.current = true
     load()
     const t = window.setInterval(load, 15_000)
-    return () => { alive = false; window.clearInterval(t) }
+    return () => { alive.current = false; window.clearInterval(t) }
   }, [])
+  // Token saves / hot reloads from the agent side surface immediately.
+  useBus((e) => { if (e.kind === 'mcp') load() })
   if (!sources.length) return null
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
     h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, '外部数据源 (MCP)'),
@@ -915,6 +989,13 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
       if (poll.current) window.clearInterval(poll.current)
     }
   }, [refresh])
+
+  // save_position_analysis (agent side) pushes an event — no need to wait for the 2s poll.
+  useBus((e) => {
+    if (e.kind !== 'analysis') return
+    const a = e as BusMsg & { code?: string; type?: string }
+    if (a.code === item.code && (a.type ?? 'stock') === item.type) void refresh()
+  })
 
   async function generate(force: boolean) {
     setError('')
@@ -1026,6 +1107,26 @@ function PanelBody(props: {
     try { return window.localStorage.getItem(TAB_KEY) || 'quotes' } catch { return 'quotes' }
   })
   const selectTab = (id: string) => { setTab(id); try { window.localStorage.setItem(TAB_KEY, id) } catch { /* */ } }
+  const [klineTarget, setKlineTarget] = useState<{ code: string; kind: string; at: number } | undefined>()
+
+  // Agent → panel direction: navigate commands, plus config-change refresh triggers.
+  useBus((e) => {
+    if (e.kind === 'providers' || e.kind === 'skills' || e.kind === 'mcp') {
+      void loadLive()
+      return
+    }
+    if (e.kind !== 'panel') return
+    const cmd = (e as BusMsg & { command?: { action?: string; tab?: string; code?: string; type?: string; kind?: string; openAnalysis?: boolean } }).command
+    if (!cmd || cmd.action !== 'navigate' || !cmd.tab) return
+    if (TABS.some((t) => t.id === cmd.tab)) selectTab(cmd.tab)
+    if (cmd.tab === 'kline' && cmd.code) {
+      setKlineTarget({ code: cmd.code, kind: cmd.kind ?? (cmd.type === 'fund' ? 'fund' : 'a'), at: Date.now() })
+    }
+    if (cmd.openAnalysis && cmd.code) {
+      props.onOpenAnalysis({ code: cmd.code, type: cmd.type === 'fund' ? 'fund' : 'stock' })
+    }
+  })
+
   const quoteBy = new Map<string, LiveQuote>()
   for (const q of data.quotes) quoteBy.set(keyOf(q.code, q.type ?? 'stock'), q)
   rememberNames([...data.watchlist, ...data.holdings, ...data.quotes])
@@ -1044,7 +1145,7 @@ function PanelBody(props: {
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
-      tab === 'kline' ? h(KlineView, { data }) : null,
+      tab === 'kline' ? h(KlineView, { data, requested: klineTarget }) : null,
       tab === 'sources' ? h(SourcesView, null) : null,
       tab === 'skills' ? h(SkillsView, null) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))

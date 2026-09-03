@@ -115,6 +115,8 @@ export interface Holding {
   quantity: number
   avgCost: number
   type: AssetType
+  /** Market label filled by analyzePortfolio (A股/港股/美股/基金). */
+  market?: string
   currentPrice?: number
   marketValue?: number
   profit?: number

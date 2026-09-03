@@ -18,7 +18,7 @@ DSN Finance is a finance plugin for DeepSeek Harness. It brings A-shares, Hong K
 
 ## Core experience
 
-### One panel, seven views
+### One panel, ten views
 
 Open **📈 Finance Panel** from the sidebar:
 
@@ -28,10 +28,29 @@ Open **📈 Finance Panel** from the sidebar:
 | Market | Leading/lagging sectors for a quick view of where risk is building |
 | Holdings | P&L, portfolio value, stock/fund allocation, and concentration |
 | Funds | Open-ended fund ranking, NAV data, and add-to-watchlist actions |
+| K-line | Local history store of daily K-lines with earnings/dividend/custom event markers |
 | Macro | CPI, PPI, PMI, GDP, money supply, and trend lines |
 | News | Global market flashes and stock news for holdings/watchlist symbols |
-| Interfaces | Provider health and the currently selected data source |
+| Sources | Per-capability provider selection; click order is the fallback priority |
+| Skills | Enable/disable local playbooks and Yingmi remote finance skills |
+| Interfaces | Provider health, current sources, and MCP external source toggles |
 You can also give the Agent a holdings screenshot and let it write the recognized positions through `import_holdings`; the panel refreshes afterward. Click any stock or fund in your holdings/watchlist to open a full AI analysis. Generation starts only after that explicit click, the report is cached locally, and you can regenerate it on demand. The plugin only changes local portfolio data. It does not place trades.
+
+### Bidirectional panel ↔ chat channel
+
+The panel and the model stay in sync in both directions:
+
+- **Panel → chat**: clicking a holding/watch item injects the analysis task into the current Harness session.
+- **Chat → panel**: tool-side mutations (holdings, watchlist, analysis cache, provider policy, skill toggles) are pushed to the panel instantly through a server event bus (`GET api/events`, SSE) instead of waiting for polling; the model can also call `panel_navigate` to switch the panel to a tab, focus a symbol on the K-line page, or open an AI analysis directly.
+- The 60s poll remains as a fallback; EventSource reconnects automatically.
+
+### What-if rebalance simulation
+
+`simulate_rebalance` runs a **pure simulation** over local holdings — it never edits the portfolio file or places orders:
+
+- **trades mode**: an explicit buy/sell list (sells first, cash constraints, oversells clamped);
+- **targets mode**: target weights (percent of holdings value + available cash) are converted into trades automatically;
+- Output: before/after total value, cash, weights, top1/top3, HHI, per-currency exposure, plus all warnings and basis caveats (fills at latest price, no slippage/fees, no FX conversion across currencies).
 
 ### Finance tools for models
 
@@ -46,6 +65,8 @@ You can also give the Agent a holdings screenshot and let it write the recognize
 | Research | `calculate_technical_indicators` · `get_macro_china` | MA/MACD/RSI/KDJ and China macro series |
 | News | `get_market_news` · `get_stock_news` · `web_search` | Market flashes, stock news, and free web search |
 | Portfolio | `get_portfolio` · `analyze_portfolio` · `upsert_holding` · `import_holdings` · `remove_holding` · `save_position_analysis` | CRUD, bulk import, P&L, risk analysis, and analysis caching |
+| Simulation | `simulate_rebalance` | What-if rebalancing (trade list or target weights) with before/after weights, HHI, and per-currency exposure |
+| Panel | `panel_navigate` | Switch the finance panel to a tab from chat, focus a symbol, or open its AI analysis |
 | Watchlist | `add_watchlist` · `remove_watchlist` · `get_portfolio_file` | Local stock/fund watchlists and file access |
 | Operations | `probe_finance_sources` | Serial endpoint checks and provider fallback ordering |
 
@@ -142,6 +163,10 @@ npm run test:avail -- --group us
 
 ```text
 src/                  Plugin service, providers, model tools, and finance panel
+src/panel-bus.ts      Event bus behind the bidirectional panel ↔ chat channel (SSE push)
+src/rebalance.ts      What-if rebalance simulation engine (pure, never edits holdings)
+src/mcp/              External MCP source bridging (Miaoxiang HTTP / Yingmi CLI) + token hot reload
+src/history/          Local history store (K-line / earnings / dividends) and sync
 skills/               Finance, portfolio, strategy, risk, and research playbooks
 scripts/              Provider probes, availability tests, and local web launcher
 cordis.patch.yml      Harness registration and default configuration

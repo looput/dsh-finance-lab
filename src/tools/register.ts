@@ -3,8 +3,12 @@ import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import '@deepseek-ai/dsh-tools'
 import type { AnalysisStore } from '../analysis-store.js'
 import type { FinanceDataService } from '../data/service.js'
+import type { PanelBus } from '../panel-bus.js'
+import { simulateRebalance } from '../rebalance.js'
 import type { PortfolioStore } from '../store.js'
 import type { AssetType } from '../types.js'
+
+const PANEL_TABS = ['quotes', 'market', 'holdings', 'funds', 'kline', 'macro', 'news', 'sources', 'skills', 'health'] as const
 
 function text(lines: string | string[]) {
   const body = Array.isArray(lines) ? lines.join('\n') : lines
@@ -20,7 +24,7 @@ const jsonOut = {
   render: (_args: unknown, value: unknown) => text(JSON.stringify(value, null, 2)),
 }
 
-export function registerTools(ctx: Context, finance: FinanceDataService, store: PortfolioStore, analyses: AnalysisStore) {
+export function registerTools(ctx: Context, finance: FinanceDataService, store: PortfolioStore, analyses: AnalysisStore, bus: PanelBus) {
   ctx.tools.register(defineTool({
     name: 'probe_finance_sources',
     description: '逐个探测公开行情 HTTP 端点健康状态（串行、有间隔）。公开源不稳定时应先运行本工具。',
@@ -36,6 +40,7 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
     },
     async execute(_args, exec) {
       const report = await finance.probe(exec.signal)
+      bus.publish({ kind: 'providers' })
       return asJson({
         probedAt: report.probedAt,
         okCount: report.results.filter((r) => r.ok).length,
@@ -530,6 +535,106 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
         dataAsOf: args.dataAsOf ? String(args.dataAsOf) : undefined,
       })
       return asJson({ ok: true, code: analysis.code, type: analysis.type, generatedAt: analysis.generatedAt })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'panel_navigate',
+    description: '把金融面板切换到指定标签页，并可聚焦某只股票/基金（K线页直接打开、可选同时打开 AI 解读）。用于对话中引导用户看面板。',
+    parameters: {
+      tab: {
+        type: 'string',
+        required: true,
+        enum: [...PANEL_TABS],
+        description: '目标标签页：quotes 行情 / market 市场 / holdings 持仓 / funds 基金 / kline K线 / macro 宏观 / news 快讯 / sources 数据源 / skills 技能 / health 接口',
+      },
+      code: { type: 'string', description: '可选，聚焦的代码（如 600519 / 00700 / AAPL / 110022）' },
+      type: { type: 'string', enum: ['stock', 'fund'], description: '资产类型，默认 stock' },
+      kind: { type: 'string', enum: ['a', 'hk', 'us', 'fund'], description: 'K线页市场类型（仅 tab=kline 生效），默认按 type 推断' },
+      open_analysis: { type: 'boolean', description: '同时打开该代码的 AI 解读视图，默认 false' },
+    },
+    output: jsonOut,
+    async execute(args) {
+      const tab = String(args.tab ?? '')
+      if (!(PANEL_TABS as readonly string[]).includes(tab)) {
+        return asJson({ ok: false, error: `unknown tab ${tab}; valid: ${PANEL_TABS.join('/')}` })
+      }
+      const code = args.code ? String(args.code).trim() : undefined
+      const type: AssetType = args.type === 'fund' ? 'fund' : 'stock'
+      const kind = args.kind === 'hk' || args.kind === 'us' || args.kind === 'fund' || args.kind === 'a'
+        ? (args.kind as 'a' | 'hk' | 'us' | 'fund')
+        : (type === 'fund' ? 'fund' : 'a')
+      bus.publish({
+        kind: 'panel',
+        command: { action: 'navigate', tab, code, type, kind, openAnalysis: args.open_analysis === true && !!code },
+      })
+      return asJson({ ok: true, tab, code, kind, openAnalysis: args.open_analysis === true && !!code })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'simulate_rebalance',
+    description: 'What-if 再平衡模拟：基于本地持仓推演交易列表或目标权重执行后的组合变化（权重/HHI/集中度/分币种敞口）。纯模拟，不修改持仓、不下单。两种模式二选一：trades（买卖列表）或 targets（目标权重%）。',
+    parameters: {
+      trades: {
+        type: 'array',
+        description: '交易列表（与 targets 二选一）：按最新价成交，先卖后买',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            code: { type: 'string' },
+            name: { type: 'string' },
+            type: { type: 'string', enum: ['stock', 'fund'] },
+            side: { type: 'string', enum: ['buy', 'sell'] },
+            quantity: { type: 'number' },
+            price: { type: 'number', description: '可选，成交价覆盖；缺省用最新价（持仓外标的必填）' },
+          },
+        },
+      },
+      targets: {
+        type: 'array',
+        description: '目标权重（与 trades 二选一）：占「持仓市值+可用现金」的百分比',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            code: { type: 'string' },
+            name: { type: 'string' },
+            type: { type: 'string', enum: ['stock', 'fund'] },
+            weight: { type: 'number', description: '目标权重（%）' },
+          },
+        },
+      },
+      cash: { type: 'number', description: '可用现金（持仓之外），默认 0；目标权重模式下参与基数与买入' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const pf = await finance.analyzePortfolio(exec.signal)
+      const trades = Array.isArray(args.trades)
+        ? (args.trades as Array<Record<string, unknown>>).map((t) => ({
+          code: String(t.code ?? '').trim(),
+          name: t.name ? String(t.name) : undefined,
+          type: (t.type === 'fund' ? 'fund' : 'stock') as AssetType,
+          side: (t.side === 'sell' ? 'sell' : 'buy') as 'buy' | 'sell',
+          quantity: Number(t.quantity) || 0,
+          price: typeof t.price === 'number' ? t.price : undefined,
+        })).filter((t) => t.code && t.quantity > 0)
+        : undefined
+      const targets = Array.isArray(args.targets)
+        ? (args.targets as Array<Record<string, unknown>>).map((t) => ({
+          code: String(t.code ?? '').trim(),
+          name: t.name ? String(t.name) : undefined,
+          type: (t.type === 'fund' ? 'fund' : 'stock') as AssetType,
+          weight: Number(t.weight) || 0,
+        })).filter((t) => t.code)
+        : undefined
+      return asJson(simulateRebalance({
+        holdings: pf.holdings,
+        trades,
+        targets,
+        cash: typeof args.cash === 'number' ? args.cash : 0,
+      }))
     },
   }))
 }

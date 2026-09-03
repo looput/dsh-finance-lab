@@ -24,11 +24,20 @@ function keyOf(code: string, type: AssetType): string {
 
 export class AnalysisStore {
   private data: AnalysisFile = { analyses: {}, updatedAt: new Date(0).toISOString() }
+  private readonly changeListeners = new Set<(analysis: PositionAnalysis) => void>()
 
   constructor(private readonly file: string) {}
 
   get path(): string {
     return this.file
+  }
+
+  /** Observe saved analyses (fires after persist, e.g. from save_position_analysis). */
+  onChange(fn: (analysis: PositionAnalysis) => void): () => void {
+    this.changeListeners.add(fn)
+    return () => {
+      this.changeListeners.delete(fn)
+    }
   }
 
   async load(): Promise<void> {
@@ -60,6 +69,11 @@ export class AnalysisStore {
     }
     this.data.analyses[keyOf(analysis.code, analysis.type)] = analysis
     await this.persist()
+    for (const fn of [...this.changeListeners]) {
+      try {
+        fn(analysis)
+      } catch { /* listener errors must not break persistence */ }
+    }
     return analysis
   }
 

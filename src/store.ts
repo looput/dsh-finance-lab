@@ -43,11 +43,20 @@ function dedupeWatch(items: WatchItem[]): WatchItem[] {
 export class PortfolioStore {
   private data: PortfolioFile = { holdings: [], watchlist: DEFAULT_WATCHLIST, updatedAt: new Date(0).toISOString() }
   private loaded = false
+  private readonly changeListeners = new Set<(file: PortfolioFile) => void>()
 
   constructor(private readonly file: string) {}
 
   get path(): string {
     return this.file
+  }
+
+  /** Observe persisted mutations (from tools, panel routes, or seed writes). */
+  onChange(fn: (file: PortfolioFile) => void): () => void {
+    this.changeListeners.add(fn)
+    return () => {
+      this.changeListeners.delete(fn)
+    }
   }
 
   async load(): Promise<void> {
@@ -89,6 +98,11 @@ export class PortfolioStore {
     const tmp = `${this.file}.tmp`
     await writeFile(tmp, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8')
     await rename(tmp, this.file)
+    for (const fn of [...this.changeListeners]) {
+      try {
+        fn(this.data)
+      } catch { /* listener errors must not break persistence */ }
+    }
   }
 
   async setHoldings(holdings: PortfolioHolding[]): Promise<PortfolioFile> {
