@@ -29,6 +29,7 @@ DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 
 | 标签页 | 内容 |
 | --- | --- |
+| 面板宽度 | 默认 480px，左边缘可拖动（360–820），自动记忆 |
 | 行情 | 指数、自选股走势、迷你 K 线和实时刷新 |
 | 市场 | 领涨/领跌行业板块，快速定位当日风险 |
 | 持仓 | 持仓盈亏、组合市值、股票/基金配置和集中度 |
@@ -40,7 +41,8 @@ DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 | 发现 | 市场情绪与注意力：涨跌分布、热搜股票/热门板块、机构龙虎榜（WeStock） |
 | 数据源 | 按 capability 选择 provider，选择顺序即调用优先级 |
 | 技能 | 本地 playbook 与盈米金融场景 skill 的启停管理 |
-| 接口 | 数据源健康状态与当前 provider、MCP 外部源开关 |
+| 接口 | 数据源健康状态与当前 provider、数据源性能（缓存命中率/平均耗时/各源成败与耗时/熔断列表）、MCP 外部源开关 |
+| 顶部铃铛 | 观点触发式提醒：行情异动（默认 ±5%）与「观点需复核」（默认 ±8%），点击直达 AI 解读 |
 
 面板开关（`panelOpen` / `panelDocked`）是 volatile 配置：优先写回 profile；若当前 profile 不可写（本版本 `configForms.set` 会返回不可写），客户端自动退回 localStorage（`dsn-finance:panelPrefs`），并在面板顶部提示，保证面板打得开、刷新后状态保留。默认以**浮层抽屉**打开（`dev_web.sh` 生成 `panelDocked: false`；停靠页需要宿主 dock 容器，未选择工作区时可能不渲染），可在面板内一键切换为停靠。
 

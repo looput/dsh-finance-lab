@@ -4,6 +4,7 @@ import type { AnalysisStore } from './analysis-store.js'
 import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
 import type { McpManager } from './mcp/manager.js'
+import type { ReminderOptions, ReminderScanResult, ReminderStore } from './reminders.js'
 import type { PanelBus } from './panel-bus.js'
 import type { SkillManager } from './skills.js'
 import type { HistoryStore } from './history/store.js'
@@ -82,18 +83,61 @@ function snapshotItems(store: PortfolioStore): SnapshotItem[] {
   return items
 }
 
+/**
+ * 找到可以注入「追问」的宿主会话。
+ * 注意顺序：`ctx.agent` 在插件里没有 inject，直接读会抛
+ * `cannot get property "agent" without inject`（cordis 的惰性服务访问），
+ * 所以先走已注入的 `ctx.agents`，再兜底，且每一步都要吞掉读属性本身抛的错。
+ */
 function currentAgent(context: ModelContextLike): ModelAgentLike | undefined {
-  if (context.agent && typeof (context.agent as ModelAgentLike).followup === 'function') {
-    return context.agent as ModelAgentLike
-  }
-  const root = context.agents?.roots?.()[0] as ModelAgentLike | undefined
-  return root && typeof root.followup === 'function' ? root : undefined
+  try {
+    const roots = context.agents?.roots?.() ?? []
+    for (const r of roots) {
+      const a = r as ModelAgentLike | undefined
+      if (a && typeof a.followup === 'function') return a
+    }
+  } catch { /* 服务不可用 */ }
+  try {
+    const a = context.agent as ModelAgentLike | undefined
+    if (a && typeof a.followup === 'function') return a
+  } catch { /* 未注入 */ }
+  return undefined
+}
+
+/**
+ * 投顾视角：把资料库里该标的的既有观点/研报喂给模型，让解读"带记忆"——
+ * 新报告要对照旧观点，指出被验证/被证伪的部分，而不是每次都从零重写。
+ */
+export function advisorMemory(vault: ResearchVault | undefined, code: string): string {
+  if (!vault) return ''
+  let items: Array<{ title: string; kind: string; occurredAt: string; opinion?: string; summary?: string; notes: Array<{ at: string; text: string }> }> = []
+  try {
+    items = vault.list({ code, limit: 6 })
+  } catch { return '' }
+  if (!items.length) return ''
+  const lines = items.flatMap((it) => {
+    const out: string[] = []
+    const label = `${it.occurredAt}｜${it.kind === 'report' ? '研报' : it.kind === 'filing' ? '财报' : it.kind === 'news' ? '资讯' : '观点'}｜${it.title}`
+    if (it.opinion) out.push(`- ${label}：结论「${it.opinion}」`)
+    else if (it.summary) out.push(`- ${label}：摘要「${it.summary}」`)
+    for (const n of it.notes.slice(-2)) out.push(`  · 批注 ${n.at.slice(0, 10)}：${n.text}`)
+    return out
+  })
+  if (!lines.length) return ''
+  return [
+    '',
+    '【投顾视角 · 该标的的历史观点与研报（来自本地资料库，务必纳入推理）】',
+    ...lines.slice(0, 14),
+    '请在报告中新增一节「与我既有观点的对照」：逐条说明上述观点被验证、被证伪还是仍待观察，并给出需要修正的结论。',
+    '如果本次数据与历史结论冲突，明确指出冲突点，不要为了保持一致而回避。',
+  ].join('\n')
 }
 
 function analysisPrompt(
   code: string,
   type: AssetType,
   holding: { name?: string; quantity: number; avgCost: number } | undefined,
+  vault?: ResearchVault,
 ): string {
   const position = holding
     ? `这是当前持仓，数量 ${holding.quantity}，平均成本 ${holding.avgCost}${holding.name ? `，名称 ${holding.name}` : ''}。`
@@ -113,6 +157,7 @@ function analysisPrompt(
     `用户刚刚在 DSN Finance 面板主动点击了${type === 'fund' ? '基金' : '股票'} ${code}，请求生成一次完整中文解读。`,
     position,
     ...dataPlan,
+    advisorMemory(vault, code),
     '请基于工具返回的真实数据写出完整 Markdown 报告，不要编造缺失字段，也不要把研究参考写成确定性买卖建议。',
     '报告至少包含：一句话结论、标的概况、近期表现、趋势/技术或净值分析、基本面或基金画像、消息与宏观、主要风险、后续观察清单、数据时间与数据源。',
     `完成报告后必须调用 save_position_analysis，参数 code="${code}"、type="${type}"，将完整报告放入 report；不要只把报告留在普通回复中。`,
@@ -138,8 +183,15 @@ export function registerRoutes(
   bus: PanelBus,
   vault?: ResearchVault,
   logger?: Logger,
+  reminders?: ReminderStore,
+  /** 手动触发一次提醒扫描（面板/工具调用）。 */
+  scan?: (options?: ReminderOptions) => Promise<ReminderScanResult>,
 ): () => void {
   const pendingAnalyses = new Map<string, number>()
+  // 分析写回后立刻解除「生成中」占位，否则同一个标的 10 分钟内无法重新生成。
+  analyses.onChange((a) => {
+    pendingAnalyses.delete(`${a.type}:${a.code}`)
+  })
   return webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -512,7 +564,10 @@ export function registerRoutes(
           }
           const agent = currentAgent(modelContext)
           if (!agent) {
-            return sendJson(res, 503, { ok: false, error: 'current Harness session is unavailable' })
+            return sendJson(res, 503, {
+              ok: false,
+              error: '当前没有可用的会话，无法生成解读：请先在对话里发一条消息（或新建会话）再点生成。',
+            })
           }
           const holding = store.get().holdings.find((h) => h.code === code && h.type === type)
           pendingAnalyses.set(key, Date.now())
@@ -520,7 +575,7 @@ export function registerRoutes(
             agent.followup({
               id: randomUUID(),
               role: 'user',
-              content: [{ type: 'text', text: analysisPrompt(code, type, holding) }],
+              content: [{ type: 'text', text: analysisPrompt(code, type, holding, vault) }],
               source: { kind: 'user' },
             })
             return sendJson(res, 202, { ok: true, status: 'generating', code, type })
@@ -528,6 +583,29 @@ export function registerRoutes(
             pendingAnalyses.delete(key)
             return sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
           }
+        }
+        // ---- 观点触发式提醒 ----
+        if (reminders && req.method === 'GET' && sub === '/reminders') {
+          await reminders.load()
+          return sendJson(res, 200, { ok: true, items: reminders.list(), unread: reminders.unread() })
+        }
+        if (reminders && req.method === 'POST' && sub === '/reminders/read') {
+          const body = await readBody(req)
+          const ids = Array.isArray(body.ids) ? body.ids.map(String) : undefined
+          const n = await reminders.markRead(ids)
+          bus.publish({ kind: 'reminder', count: reminders.unread(), at: new Date().toISOString() })
+          return sendJson(res, 200, { ok: true, read: n, unread: reminders.unread() })
+        }
+        if (scan && req.method === 'POST' && sub === '/reminders/check') {
+          const body = await readBody(req)
+          const options: ReminderOptions = {}
+          if (typeof body.movePct === 'number') options.movePct = body.movePct
+          if (typeof body.opinionPct === 'number') options.opinionPct = body.opinionPct
+          const result = await scan(options)
+          if (result.added.length) {
+            bus.publish({ kind: 'reminder', count: result.added.length, at: result.at })
+          }
+          return sendJson(res, 200, { ok: true, ...result, unread: reminders?.unread() ?? 0 })
         }
         if (req.method === 'POST' && sub === '/mutate') {
           const body = await readBody(req)

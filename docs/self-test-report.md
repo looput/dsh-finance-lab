@@ -166,7 +166,9 @@ HTTP 验证（均带 Bearer token）：
   同 key 并发请求合并成一次（`coalesced`）；缓存过期后 SWR 先出画面再后台刷新；
   失败结果短期缓存（20s）避免每次刷新重新等死源；连续失败 2 次即熔断 60s（`circuitOpen`）。
 - `getQuotes(codes)`：一次批量 → 缺的按各自市场（含基金）并发补齐；Agent 侧新增 `get_quotes` 工具。
-- 统计外露：`GET /api/stats`（按 provider 的成功/失败/平均耗时）、`/api/live.perf`（命中率/平均耗时）。
+- 统计外露：`GET /api/stats`（按 provider 的成功/失败/平均耗时、熔断列表）、`/api/live.perf`（命中率/平均耗时）。
+- 「接口」页新增「数据源性能」卡片（浏览器实测：`WeStock 0.0.5 · 优先`、`上游调用 25`、`缓存命中 40 (62%)`、`平均 1041.1ms`，
+  下面逐 provider 列出 `✓/✗/平均耗时`），性能问题不再靠猜。
 - 前端呈现：指数卡片网格、行情卡（涨跌色条 + 迷你走势 + 涨跌幅药丸 + 来源徽标 WeStock/东财）、
   骨架屏、「x 秒前更新」+ 手动刷新、页脚显示缓存命中与平均耗时。
 
@@ -235,18 +237,47 @@ HTTP 验证（均带 Bearer token）：
 
 ## 5. 已知限制
 
-1. `web_search` 在本环境不可用（原因见 2.2），需 `pip install ddgs` 或更换检索源。
+1. ~~`web_search` 在本环境不可用~~ —— 已通过「回补数据源」修复：新增 Node 原生 Bing RSS 源 `rss_web_search`（免安装，默认首选），Python `ddgs` 降级为可选增强（见 §7）。
 2. WeStock 研报正文为 Markdown 原文，尚未做「评级/目标价/盈利预测」结构化抽取。
 3. 资料库检索目前是全量扫描 + 子串匹配；资料量大时需引入 FTS5 / 向量索引。
 4. `westock` CLI 未安装时 `research_report`、`ws_*` 能力不可用，registry 会回落到 HTTP 源（行情/资讯/财报仍可用）。
 5. 资料库同步只认「有 `title` + `source` + `date`」的 Markdown：缺来源或时间的手记文件不会被入库（保持「不做孤岛」的约束）。
 6. 递归 `fs.watch` 在网络盘/部分容器上不可用时会退化为 15s 轮询，外部改动最长 15s 后可见。
 
+## 6. 本轮新增的三个能力
+
+### 6.1 观点触发式提醒（reminders）
+
+- 落盘 `.dsh-home/data/reminders.json`，两条规则：
+  - `move`：持仓/自选当日涨跌幅超过阈值（默认 ±5%）→ 行情异动提醒；
+  - `opinion`：资料库里 `status=active` 且带观点的标的，波动超过阈值（默认 ±8%）→ **观点需要复核**（把 `opinion` 当可验证假设）。
+- 去重：同标的同类型 12 小时内只提醒一次；面板铃铛显示未读数，点击直达 AI 解读；支持「全部已读 / 立即检查」。
+- 后端每 10 分钟自动扫描（启动后 20 秒先跑一次），Agent 侧有 `check_reminders` / `list_reminders` 两个工具。
+- 实测：`/reminders/check` 返回 `scanned 12 / added 14`，提示「中际旭创今日 -9.03%」「腾讯控股：观点需要复核」。
+
+### 6.2 投顾视角（advisor）
+
+- `analysisPrompt()` 注入该标的在资料库里的观点与研报（`advisorMemory()`，最多 6 条 + 最近批注）。
+- 报告被要求新增「与我既有观点的对照」一节：逐条说明验证 / 证伪 / 待观察，冲突时明确指出，不再每次从零重写。
+- 离线测试覆盖：命中标的含观点、要求对照结论、无关标的返回空。
+
+### 6.3 回补数据源（backfill）
+
+- 新增 `rss_web_search`（Bing `&format=rss`，Node 原生解析，零 pip 依赖）并设为 `web_search` 默认首选；`py_web_search` 保留为可选增强。
+- 解析为纯函数 `parseBingRss()`（处理 CDATA 与实体转义），有离线测试。
+- 实测：`web_search` 返回 `ok=true provider=rss_web_search`。
+
+### 6.4 面板视觉与交互
+
+- 默认宽度 410 → 480，左边缘可拖动（360–820，写入 localStorage，停靠模式下中栏留白同步）。
+- 分组药丸导航（自选/研究/设置三段）、分组大卡、统一空态、hover 反馈、骨架屏。
+- 修复：`${BRAND}14` 拼成非法 CSS（`var(...)14`）导致选中态失效；`useAgo` 写在短路表达式里导致 React #310 面板整体崩溃。
+
 ## 6. 复现命令
 
 ```bash
 npm run build
-npm run test:offline                 # 功能正确性（离线，144 条，含 12 条性能/路由用例）
+npm run test:offline                 # 功能正确性（离线，158 条）
 npm run westock:install              # 安装 pinned WeStock CLI
 npm run test:westock                 # WeStock 可用性（真实网络，15 条）
 WESTOCK_BIN=$PWD/.dsh-home/bin/westock npm run test:avail   # 全量数据源 + 资料库收集

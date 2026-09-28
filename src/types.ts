@@ -207,7 +207,8 @@ export const DEFAULT_PROVIDER_ORDER: Record<Capability, string[]> = {
   research_report: ['ws_research'],
   symbol_search: ['em_suggest', 'ws_search'],
   stock_info: ['em_stock_info', 'ws_profile'],
-  web_search: ['py_web_search'],
+  // 回补数据源：Node 原生 Bing RSS 免安装排第一，Python ddgs 作为可选增强。
+  web_search: ['rss_web_search', 'py_web_search'],
 
   minute: ['ws_minute'],
   technical: ['ws_technical'],
@@ -336,6 +337,8 @@ export interface SearchResult {
   title: string
   url?: string
   snippet?: string
+  /** 搜索引擎名（Bing / Python ddgs …），面板脚注显示"这条是谁给的"。 */
+  source?: string
 }
 
 /** A resolved security (via eastmoney suggest), across A-share / HK / US. */

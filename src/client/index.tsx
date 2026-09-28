@@ -2,7 +2,7 @@ import { createElement as h, useCallback, useEffect, useLayoutEffect, useReducer
 // Host module table supplies react-dom; types live on the web shell, not this plugin.
 // @ts-expect-error
 import { createPortal } from 'react-dom'
-import type { CSSProperties } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AssetType, IndexQuote, LiveQuote, PortfolioHolding, WatchItem } from '../types.js'
@@ -10,7 +10,79 @@ import type { AssetType, IndexQuote, LiveQuote, PortfolioHolding, WatchItem } fr
 export const name = 'dsn-finance-client'
 export const inject = ['slots', 'configForms', 'conversation', 'sessions']
 
-const PANEL_W = 410
+/** 面板宽度：默认放宽到 480，并支持左边缘拖动（360–820），宽度写入 localStorage。 */
+const PANEL_W = 480
+const PANEL_W_MIN = 360
+const PANEL_W_MAX = 820
+const WIDTH_KEY = 'dsn-finance:width'
+
+function readPanelWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(WIDTH_KEY)
+    const n = raw ? Number(raw) : NaN
+    if (Number.isFinite(n)) return Math.min(PANEL_W_MAX, Math.max(PANEL_W_MIN, n))
+  } catch { /* 隐私模式忽略 */ }
+  return PANEL_W
+}
+
+// 宽度放在模块级 store：面板外壳负责改，停靠模式的中栏留白负责读，两处必须同步。
+let panelWidthState = PANEL_W
+const panelWidthListeners = new Set<() => void>()
+function initPanelWidth(): void {
+  try { panelWidthState = readPanelWidth() } catch { /* ignore */ }
+}
+function setPanelWidth(next: number): void {
+  const clamped = Math.min(PANEL_W_MAX, Math.max(PANEL_W_MIN, Math.round(next)))
+  if (clamped === panelWidthState) return
+  panelWidthState = clamped
+  try { window.localStorage.setItem(WIDTH_KEY, String(clamped)) } catch { /* ignore */ }
+  for (const fn of [...panelWidthListeners]) fn()
+}
+function usePanelWidth(): number {
+  const [, bump] = useReducer((n: number) => n + 1, 0)
+  useEffect(() => {
+    panelWidthListeners.add(bump)
+    return () => { panelWidthListeners.delete(bump) }
+  }, [bump])
+  return panelWidthState
+}
+
+/** 拖动把手：按下时锁定起始宽度，用 pointer 事件跟踪，避免选中文本。 */
+function useResizeDrag(): [(e: ReactPointerEvent) => void, boolean] {
+  const [dragging, setDragging] = useState(false)
+  const start = useRef({ x: 0, w: PANEL_W })
+  const onPointerDown = (e: ReactPointerEvent) => {
+    e.preventDefault()
+    start.current = { x: e.clientX, w: panelWidthState }
+    setDragging(true)
+    const move = (ev: PointerEvent) => {
+      setPanelWidth(start.current.w - (ev.clientX - start.current.x))
+    }
+    const up = () => {
+      setDragging(false)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+  return [onPointerDown, dragging]
+}
+
+function ResizeHandle(props: { onPointerDown: (e: ReactPointerEvent) => void; active: boolean }) {
+  return h('div', {
+    onPointerDown: props.onPointerDown,
+    title: '拖动调整面板宽度',
+    style: {
+      position: 'absolute', top: 0, bottom: 0, left: -3, width: 6, cursor: 'col-resize', zIndex: 2,
+      background: props.active ? `${BRAND}55` : 'transparent',
+    },
+  })
+}
 
 const API = '/plugins/dsn-finance/api'
 const TAB_KEY = 'dsn-finance:tab'
@@ -79,45 +151,119 @@ const UP = '#d1403f'
 const DOWN = '#2ba471'
 const V = (n: string, f: string) => `var(${n}, ${f})`
 const BRAND = V('--dsw-alias-brand-primary', '#4b7bec')
+/** 品牌色低透明底：`var(--x,#4b7bec) + '14'` 是非法 CSS，选中态会静默失效，故显式给 rgba。 */
+const BRAND_SOFT = 'rgba(75,123,236,0.10)'
+/** 涨跌色低透明底（UP/DOWN 是十六进制常量，可直接拼透明度）。 */
+const softOf = (hex: string) => `${hex}1f`
 const panelShell = (extra?: CSSProperties): CSSProperties => ({
   display: 'flex', flexDirection: 'column', background: V('--dsw-alias-bg-layer-3', '#fff'),
   borderLeft: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`,
   color: V('--dsw-alias-label-primary', '#111'), fontSize: 13, ...extra,
 })
+/** 面板专用设计令牌：统一圆角/阴影/层级背景，避免各处手写魔法值。 */
+const R = {
+  sm: 8,
+  md: 12,
+  lg: 16,
+  shadow1: '0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06)',
+  shadow2: '0 4px 12px rgba(16,24,40,0.08), 0 12px 40px rgba(16,24,40,0.16)',
+  // 实测宿主主题把 --dsw-alias-bg-layer-2 也定义成了纯白，用它做分层没有效果；
+  // 这里用半透明中性色，浅色/深色主题下都能透出层次。
+  canvas: 'rgba(120,134,155,0.09)',
+  surface: V('--dsw-alias-bg-layer-3', '#fff'),
+  line: V('--dsw-alias-border-l2', '#e6e8eb'),
+}
 const S = {
-  backdrop: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 40 } as CSSProperties,
-  drawer: {
-    ...panelShell({ boxShadow: '-8px 0 24px rgba(0,0,0,0.12)' }),
-    position: 'fixed', top: 0, right: 0, bottom: 0, width: PANEL_W, maxWidth: '95vw', zIndex: 41,
+  backdrop: { position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.32)', backdropFilter: 'blur(2px)', zIndex: 40 } as CSSProperties,
+  drawer: (w: number) => ({
+    ...panelShell({ boxShadow: R.shadow2 }),
+    position: 'relative', top: 0, right: 0, bottom: 0, width: w, maxWidth: '95vw', zIndex: 41,
+  }) as CSSProperties,
+  docked: (w: number) => ({
+    ...panelShell(), position: 'relative', top: 0, right: 0, bottom: 0, width: w, zIndex: 30,
+  }) as CSSProperties,
+  // 头部：品牌条 + 标题 + 状态，视觉上把面板"钉"成一个产品而不是调试面板。
+  header: {
+    display: 'flex', alignItems: 'center', gap: 9, padding: '11px 14px',
+    borderBottom: `1px solid ${R.line}`,
+    background: `linear-gradient(180deg, ${V('--dsw-alias-bg-layer-3', '#fff')}, ${R.canvas})`,
   } as CSSProperties,
-  docked: {
-    ...panelShell(), position: 'fixed', top: 0, right: 0, bottom: 0, width: PANEL_W, zIndex: 30,
+  brandBadge: {
+    width: 26, height: 26, borderRadius: 8, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    background: `linear-gradient(135deg, ${BRAND}, #7aa2f7)`, color: '#fff', boxShadow: '0 2px 6px rgba(75,123,236,0.35)',
+    flex: '0 0 auto',
   } as CSSProperties,
-  header: { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}` } as CSSProperties,
-  tabs: { display: 'flex', gap: 2, padding: '6px 10px 0', borderBottom: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`, flexWrap: 'wrap' } as CSSProperties,
+  // 导航：药丸选中态 + 横向滚动，12 个入口不再挤成两行换行。
+  tabs: {
+    display: 'flex', gap: 4, padding: '7px 10px', borderBottom: `1px solid ${R.line}`,
+    overflowX: 'auto', overflowY: 'hidden', flexWrap: 'nowrap', scrollbarWidth: 'thin',
+    background: V('--dsw-alias-bg-layer-3', '#fff'),
+  } as CSSProperties,
   tab: (active: boolean) => ({
-    font: 'inherit', cursor: 'pointer', border: 'none', background: 'transparent',
+    font: 'inherit', cursor: 'pointer', border: '1px solid transparent', background: active ? BRAND_SOFT : 'transparent',
     color: active ? BRAND : V('--dsw-alias-label-secondary', '#666'),
-    borderBottom: `2px solid ${active ? BRAND : 'transparent'}`,
-    padding: '6px 10px', fontSize: 13, fontWeight: active ? 600 : 400,
+    borderRadius: 999, padding: '4px 11px', fontSize: 12.5, fontWeight: active ? 600 : 400,
+    whiteSpace: 'nowrap', flexShrink: 0, transition: 'background .15s, color .15s',
   } as CSSProperties),
-  body: { overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 16, flex: 1 } as CSSProperties,
+  tabSep: { width: 1, alignSelf: 'stretch', background: R.line, margin: '2px 3px', flex: '0 0 auto' } as CSSProperties,
+  body: {
+    overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 12, flex: 1,
+    background: R.canvas,
+  } as CSSProperties,
   section: { display: 'flex', flexDirection: 'column', gap: 8 } as CSSProperties,
-  title: { fontSize: 12, fontWeight: 600, color: V('--dsw-alias-label-secondary', '#666'), letterSpacing: 0.3, display: 'flex', alignItems: 'center', gap: 6 } as CSSProperties,
-  btn: { font: 'inherit', cursor: 'pointer', border: `1px solid ${V('--dsw-alias-border-l2', '#ddd')}`, background: V('--dsw-alias-bg-layer-3', '#fff'), color: V('--dsw-alias-label-primary', '#111'), borderRadius: 8, padding: '4px 10px', fontSize: 12 } as CSSProperties,
-  input: { border: `1px solid ${V('--dsw-alias-border-l2', '#ddd')}`, background: V('--dsw-alias-bg-layer-3', '#fff'), color: V('--dsw-alias-label-primary', '#111'), borderRadius: 8, padding: '0 8px', height: 30, fontSize: 12, minWidth: 0 } as CSSProperties,
-  chip: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '2px 8px', borderRadius: 999, background: V('--dsw-alias-bg-module-platform', '#f2f3f5'), color: V('--dsw-alias-label-secondary', '#555'), fontSize: 12 } as CSSProperties,
-  tag: { fontSize: 10, padding: '0 5px', borderRadius: 4, background: V('--dsw-alias-bg-module-platform', '#eef0f3'), color: V('--dsw-alias-label-tertiary', '#888') } as CSSProperties,
-  muted: { color: V('--dsw-alias-label-tertiary', '#999'), fontSize: 12 } as CSSProperties,
-  row: { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderTop: `1px solid ${V('--dsw-alias-border-l2', '#eee')}` } as CSSProperties,
-  card: { border: `1px solid ${V('--dsw-alias-border-l2', '#eee')}`, borderRadius: 10, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 4 } as CSSProperties,
-  analysisBackdrop: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 2147483100 } as CSSProperties,
+  title: { fontSize: 11.5, fontWeight: 700, color: V('--dsw-alias-label-secondary', '#6b7280'), letterSpacing: 0.6, display: 'flex', alignItems: 'center', gap: 6 } as CSSProperties,
+  btn: {
+    font: 'inherit', cursor: 'pointer', border: `1px solid ${R.line}`, background: R.surface,
+    color: V('--dsw-alias-label-primary', '#111'), borderRadius: R.sm, padding: '4px 10px', fontSize: 12,
+    transition: 'background .15s, border-color .15s, box-shadow .15s',
+  } as CSSProperties,
+  btnPrimary: {
+    font: 'inherit', cursor: 'pointer', border: 'none', background: BRAND, color: '#fff',
+    borderRadius: R.sm, padding: '5px 12px', fontSize: 12, fontWeight: 600,
+    boxShadow: '0 2px 8px rgba(75,123,236,0.3)',
+  } as CSSProperties,
+  input: {
+    border: `1px solid ${R.line}`, background: R.surface, color: V('--dsw-alias-label-primary', '#111'),
+    borderRadius: R.sm, padding: '0 9px', height: 30, fontSize: 12, minWidth: 0,
+  } as CSSProperties,
+  chip: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '2px 9px', borderRadius: 999, background: V('--dsw-alias-bg-module-platform', '#f2f3f5'), color: V('--dsw-alias-label-secondary', '#555'), fontSize: 12 } as CSSProperties,
+  tag: { fontSize: 10, padding: '1px 6px', borderRadius: 5, background: V('--dsw-alias-bg-module-platform', '#eef0f3'), color: V('--dsw-alias-label-tertiary', '#888'), lineHeight: 1.6 } as CSSProperties,
+  muted: { color: V('--dsw-alias-label-tertiary', '#8a8f99'), fontSize: 12 } as CSSProperties,
+  row: { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderTop: `1px solid ${R.line}` } as CSSProperties,
+  card: {
+    border: `1px solid ${R.line}`, borderRadius: R.md, padding: '9px 11px',
+    display: 'flex', flexDirection: 'column', gap: 4, background: R.surface, boxShadow: R.shadow1,
+  } as CSSProperties,
+  // 分组容器：把同屏内容收进一张"大卡"，视觉上分层清晰。
+  group: {
+    border: `1px solid ${R.line}`, borderRadius: R.md, background: R.surface, boxShadow: R.shadow1,
+    overflow: 'hidden',
+  } as CSSProperties,
+  groupHead: {
+    display: 'flex', alignItems: 'center', gap: 6, padding: '9px 11px',
+    borderBottom: `1px solid ${R.line}`, background: V('--dsw-alias-bg-module-platform', '#fafbfc'),
+  } as CSSProperties,
+  analysisBackdrop: { position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(3px)', zIndex: 2147483100 } as CSSProperties,
   analysisPanel: {
     position: 'fixed', inset: '4vh 5vw', zIndex: 2147483101, display: 'flex', flexDirection: 'column',
-    background: V('--dsw-alias-bg-layer-3', '#fff'), color: V('--dsw-alias-label-primary', '#111'),
-    border: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`, borderRadius: 12,
-    boxShadow: '0 12px 40px rgba(0,0,0,0.2)', overflow: 'hidden',
+    background: R.surface, color: V('--dsw-alias-label-primary', '#111'),
+    border: `1px solid ${R.line}`, borderRadius: R.lg,
+    boxShadow: R.shadow2, overflow: 'hidden',
   } as CSSProperties,
+}
+
+/** 统一空态：以前各 tab 各写一句灰字，风格不一致。 */
+function EmptyState(props: { icon?: ReactNode; text: string; action?: ReactNode }) {
+  return h('div', {
+    style: {
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8,
+      padding: '26px 16px', border: `1px dashed ${R.line}`, borderRadius: R.md,
+      background: R.surface, color: V('--dsw-alias-label-tertiary', '#8a8f99'), textAlign: 'center',
+    },
+  },
+    props.icon ? h('span', { style: { opacity: 0.75 } }, props.icon) : null,
+    h('div', { style: { fontSize: 12.5, lineHeight: 1.6, maxWidth: 280 } }, props.text),
+    props.action ?? null)
 }
 function fmt(n: number | undefined, d = 2): string {
   return typeof n === 'number' && Number.isFinite(n) ? n.toFixed(d) : '—'
@@ -148,7 +294,16 @@ function ensureStyles(): void {
   if (stylesInjected || typeof document === 'undefined') return
   stylesInjected = true
   const style = document.createElement('style')
-  style.textContent = '@keyframes dsn-pulse{0%{opacity:.35}50%{opacity:.75}100%{opacity:.35}}'
+  // 面板没有构建期 CSS：hover / 滚动条等非内联能表达的状态在这里集中声明。
+  style.textContent = [
+    '@keyframes dsn-pulse{0%{opacity:.35}50%{opacity:.75}100%{opacity:.35}}',
+    '.dsn-row{transition:background .15s ease,box-shadow .15s ease;}',
+    '.dsn-row:hover{background:rgba(120,134,155,0.12);box-shadow:0 1px 2px rgba(16,24,40,0.05);}',
+    '.dsn-card{transition:box-shadow .15s ease,transform .15s ease;}',
+    '.dsn-card:hover{box-shadow:0 6px 18px rgba(16,24,40,0.10);}',
+    '.dsn-tabs::-webkit-scrollbar{height:4px;}',
+    '.dsn-tabs::-webkit-scrollbar-thumb{background:rgba(120,134,155,0.35);border-radius:999px;}',
+  ].join('')
   document.head.appendChild(style)
 }
 
@@ -256,6 +411,19 @@ function IconChart(props: { size?: number }) {
     }))
 }
 
+function IconBell(props: { size?: number; dot?: boolean }) {
+  const s = props.size ?? 15
+  return h('svg', {
+    width: s, height: s, viewBox: '0 0 16 16', fill: 'none', xmlns: 'http://www.w3.org/2000/svg',
+    style: { flex: '0 0 auto', display: 'block' }, 'aria-hidden': true,
+  },
+    h('path', {
+      d: 'M4.2 7a3.8 3.8 0 1 1 7.6 0c0 2.4.8 3.4 1.2 3.9H3c.4-.5 1.2-1.5 1.2-3.9ZM6.6 12.4a1.5 1.5 0 0 0 2.8 0',
+      stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round',
+    }),
+    props.dot ? h('circle', { cx: 12.5, cy: 3.8, r: 2.4, fill: UP }) : null)
+}
+
 function Sparkline(props: { data?: number[]; color: string; w?: number }) {
   const data = props.data
   const w = props.w ?? 72
@@ -287,6 +455,7 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
     return h('span', { style: S.muted, title: err || '暂无行情' }, limited ? '限流' : '获取失败')
   })()
   return h('div', {
+    className: 'dsn-row',
     style: {
       ...S.row,
       gap: 10,
@@ -319,6 +488,7 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
 function IndexCard(props: { ix: IndexQuote; spark?: number[] }) {
   const { ix } = props
   return h('div', {
+    className: 'dsn-card',
     style: {
       ...S.card,
       gap: 2,
@@ -334,6 +504,21 @@ function IndexCard(props: { ix: IndexQuote; spark?: number[] }) {
 }
 
 // ---- data hooks over the plugin HTTP API (React state; never written to config) ----
+/** 观点触发式提醒条目（与 src/reminders.ts 的 Reminder 对齐）。 */
+interface ReminderItem {
+  id: string
+  kind: 'move' | 'opinion'
+  level: 'info' | 'warn'
+  code: string
+  name?: string
+  type: 'stock' | 'fund'
+  pct: number
+  title: string
+  detail: string
+  at: string
+  read: boolean
+}
+
 interface LiveData {
   at?: string
   quotes: LiveQuote[]
@@ -380,13 +565,33 @@ const ANALYSIS_MARKDOWN_COMPONENTS = {
   a: ({ href, children }: any) => h('a', { href, target: '_blank', rel: 'noreferrer', style: { color: BRAND } }, children),
 }
 
+/**
+ * 请求封装：非 2xx 或 `ok:false` 一律抛错。
+ * 之前只 `r.json()`，HTTP 500/503 会被当成正常结果往下走——
+ * AI 解读请求失败时页面就一直转圈，没有任何提示。
+ */
+async function unwrap<T>(r: Response): Promise<T> {
+  const body = (await r.json().catch(() => ({}))) as T & { ok?: boolean; error?: string }
+  if (!r.ok || body?.ok === false) {
+    throw new Error(body?.error || `请求失败（HTTP ${r.status}）`)
+  }
+  return body as T
+}
 async function apiGet<T>(path: string): Promise<T> {
   const r = await fetch(API + path, { headers: { Accept: 'application/json' } })
-  return (await r.json()) as T
+  return unwrap<T>(r)
 }
 async function apiPost<T>(path: string, body: unknown): Promise<T> {
-  const r = await fetch(API + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-  return (await r.json()) as T
+  const r = await fetch(API + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return unwrap<T>(r)
+}
+/** 非 JSON 文本型错误（例如代理返回 HTML）时给出可读提示。 */
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 // ---- SSE event bus: server → panel push channel (bidirectional bridge) ----
@@ -635,25 +840,31 @@ function QuotesView(props: {
     const c = wCode.trim(); if (!c) return
     mutate('addWatch', { code: c, type: wType }); setWCode('')
   }
-  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
-    h('div', { style: S.section },
-      h('div', { style: { ...S.title, alignItems: 'center' } }, '市场总览',
-        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '刷新中…' : `${ago}更新`),
-        h('button', {
-          style: { ...S.btn, padding: '2px 8px', marginLeft: 6 },
-          disabled: loading,
-          onClick: () => props.onRefresh?.(),
-        }, '刷新')),
+  const group = (title: string, extra: ReactNode, children: ReactNode, footer?: ReactNode) => h('div', { style: S.group },
+    h('div', { style: S.groupHead },
+      h('div', { style: { ...S.title, marginBottom: 0 } }, title),
+      h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, extra)),
+    h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 6 } },
+      children,
+      footer ? h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 2 } }, footer) : null))
+
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    group('市场总览',
+      h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+        h('span', null, loading ? '刷新中…' : `${ago}更新`),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: loading, onClick: () => props.onRefresh?.() }, '刷新')),
       data.indices.length === 0
-        ? (loading ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
-          : h('div', { style: S.muted }, '暂无指数数据'))
+        ? (loading
+          ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
+          : h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无指数数据，点右上角刷新重试' }))
         : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))', gap: 6 } },
           data.indices.map((ix) => h(IndexCard, { key: ix.code, ix })))),
-    h('div', { style: S.section },
-      h('div', { style: S.title }, '自选 · 行情走势',
-        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `${watchQuotes.length} 只`)),
+    group('自选 · 行情走势', `${watchQuotes.length} 只`,
       watchQuotes.length === 0
-        ? h('div', { style: S.muted }, '暂无自选，在下方添加')
+        ? h(EmptyState, {
+          icon: h(IconChart, { size: 20 }),
+          text: '还没有自选。在下方输入代码（如 600519 / 00700 / AAPL / 110022）添加，或搜索名称。',
+        })
         : watchQuotes.map((q) => h(QuoteRow, {
           key: `w-${q.type}-${q.code}`,
           q,
@@ -661,12 +872,13 @@ function QuotesView(props: {
           onClick: () => props.onOpen({ code: q.code, type: q.type ?? 'stock', name: q.name }),
           onRemove: () => mutate('removeWatch', { code: q.code, type: q.type }),
         })),
-      h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
+      [
         h('input', { style: { ...S.input, flex: 1 }, placeholder: '代码，如 600519 / 00700 / AAPL / 110022', value: wCode, onChange: (e: any) => setWCode(e.target.value), onKeyDown: onEnterCommit(addWatch) }),
         h(SegToggle, { value: wType, onChange: setWType }),
-        h('button', { style: S.btn, onClick: addWatch }, '添加')),
-      h(SearchAdd, { onAdd: (code, type) => mutate('addWatch', { code, type }) })),
-    h('div', { style: { ...S.muted, fontSize: 11, display: 'flex', gap: 8, flexWrap: 'wrap' } },
+        h('button', { style: S.btnPrimary, onClick: addWatch }, '添加'),
+        h(SearchAdd, { onAdd: (code, type) => mutate('addWatch', { code, type }) }),
+      ]),
+    h('div', { style: { ...S.muted, fontSize: 11, display: 'flex', gap: 8, flexWrap: 'wrap', padding: '0 2px' } },
       h('span', null, '数据优先 WeStock（本地 CLI，批量取）；不通时自动回落东财/腾讯。'),
       perf ? h('span', null, `本次缓存命中 ${perf.cacheHits}/${perf.calls + perf.cacheHits} · 平均 ${perf.avgLatencyMs}ms${perf.coalesced ? ` · 合并请求 ${perf.coalesced}` : ''}`) : null))
 }
@@ -1154,10 +1366,63 @@ function McpSourcesView() {
     h('div', { style: { ...S.muted, fontSize: 11, marginTop: 2 } }, 'token 保存到 data/mcp-secrets.json（也支持环境变量）；保存后即时热重载'))
 }
 
+interface RegistryStats {
+  calls: number
+  cacheHits: number
+  coalesced: number
+  avgLatencyMs: number
+  byProvider: Array<{ provider: string; ok: number; fail: number; avgMs: number }>
+  circuitOpen: string[]
+  swrServed?: number
+  backgroundRefreshes?: number
+}
+
 function HealthView(props: { health: LiveData['health'] }) {
   const healthBy = new Map(props.health.map((x) => [x.capability, x]))
+  const [stats, setStats] = useState<RegistryStats>()
+  const [westock, setWestock] = useState<{ configured?: boolean; available?: boolean; version?: string }>()
+  const [busy, setBusy] = useState(false)
+  const loadStats = useCallback(async () => {
+    setBusy(true)
+    try {
+      const r = await apiGet<{ ok: boolean; stats?: RegistryStats; westock?: { configured?: boolean; available?: boolean; version?: string } }>('/stats')
+      if (r.stats) setStats(r.stats)
+      if (r.westock) setWestock(r.westock)
+    } catch { /* keep prior */ } finally { setBusy(false) }
+  }, [])
+  useEffect(() => { void loadStats() }, [loadStats])
+  const hitRate = stats && stats.calls + stats.cacheHits
+    ? Math.round((stats.cacheHits / (stats.calls + stats.cacheHits)) * 100)
+    : undefined
   return h('div', { style: S.section },
     h('div', { style: S.title }, '可用接口'),
+    // 性能可观测：缓存命中 / 平均耗时 / 各源成败与耗时 / 熔断中的源
+    h('div', { style: { ...S.card, gap: 6 } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+        h('span', { style: { fontWeight: 600 } }, '数据源性能'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } },
+          westock?.available
+            ? `WeStock ${(westock.version ?? '').match(/\d+\.\d+\.\d+/)?.[0] ?? ''} · 优先`
+            : 'WeStock 不可用 · 走 HTTP 回落'),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: busy, onClick: () => void loadStats() }, busy ? '…' : '刷新')),
+      stats ? h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11 } },
+        h('span', { style: S.muted }, `上游调用 ${stats.calls}`),
+        h('span', { style: S.muted }, `缓存命中 ${stats.cacheHits}${typeof hitRate === 'number' ? ` (${hitRate}%)` : ''}`),
+        h('span', { style: S.muted }, `并发合并 ${stats.coalesced}`),
+        h('span', { style: S.muted }, `平均 ${stats.avgLatencyMs}ms`),
+        stats.swrServed ? h('span', { style: S.muted }, `陈旧复用 ${stats.swrServed}`) : null,
+        stats.backgroundRefreshes ? h('span', { style: S.muted }, `后台刷新 ${stats.backgroundRefreshes}`) : null) : h(Skeleton, { w: '60%', h: 12 }),
+      stats?.circuitOpen.length ? h('div', { style: { fontSize: 11, color: '#c98a1a' } },
+        `熔断中（连续失败，暂不调用）：${stats.circuitOpen.join('、')}`) : null,
+      stats && stats.byProvider.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+        stats.byProvider.slice(0, 10).map((p) => {
+          const src = sourceOf(p.provider)
+          return h('div', { key: p.provider, style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 } },
+            h('span', { style: { width: 8, height: 8, borderRadius: 999, background: p.fail && !p.ok ? UP : DOWN, flex: '0 0 auto' } }),
+            h('span', { style: { color: src?.color, fontWeight: 500 } }, src?.label ?? p.provider),
+            h('code', { style: { ...S.muted, fontSize: 10 } }, p.provider),
+            h('span', { style: { ...S.muted, marginLeft: 'auto' } }, `✓ ${p.ok} · ✗ ${p.fail} · ${p.avgMs}ms`))
+        })) : null),
     DATA_INTERFACES.map((grp) => h('div', { key: grp.group, style: { display: 'flex', flexDirection: 'column', gap: 2 } },
       h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, grp.group),
       grp.items.map((it) => {
@@ -1172,13 +1437,24 @@ function HealthView(props: { health: LiveData['health'] }) {
     h(McpSourcesView, null))
 }
 
+/** 生成超过这个时间就停止轮询并给出可操作提示，避免永远转圈。 */
+const ANALYSIS_TIMEOUT_MS = 3 * 60_000
+
 function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }) {
   const { item } = props
   const [analysis, setAnalysis] = useState<PositionAnalysis>()
   const [status, setStatus] = useState<'loading' | 'empty' | 'generating' | 'ready' | 'error'>('loading')
   const [error, setError] = useState('')
+  const [elapsed, setElapsed] = useState(0)
   const poll = useRef<number | undefined>(undefined)
+  const startedAt = useRef(0)
+  const statusRef = useRef(status)
+  statusRef.current = status
   const title = item.name || item.code
+
+  const stopPoll = useCallback(() => {
+    if (poll.current) { window.clearInterval(poll.current); poll.current = undefined }
+  }, [])
 
   const refresh = useCallback(async () => {
     try {
@@ -1188,22 +1464,39 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
       if (result.analysis) {
         setAnalysis(result.analysis)
         setStatus('ready')
-        if (poll.current) { window.clearInterval(poll.current); poll.current = undefined }
-      } else if (status !== 'generating') {
+        setError('')
+        stopPoll()
+      } else if (statusRef.current !== 'generating') {
         setStatus('empty')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      setStatus('error')
+      // 读缓存失败不要把"生成中"打成 error：一次抖动就丢进度会很困惑。
+      if (statusRef.current !== 'generating') {
+        setError(errText(err))
+        setStatus('error')
+      }
     }
-  }, [item.code, item.type, status])
+  }, [item.code, item.type, stopPoll])
 
   useEffect(() => {
     void refresh()
-    return () => {
-      if (poll.current) window.clearInterval(poll.current)
-    }
-  }, [refresh])
+    return stopPoll
+  }, [refresh, stopPoll])
+
+  // 生成中：轮询 + 计时；超过 3 分钟主动停下并给可操作提示（不再无限转圈）。
+  useEffect(() => {
+    if (status !== 'generating') return
+    const t = window.setInterval(() => {
+      void refresh()
+      setElapsed(Date.now() - startedAt.current)
+      if (Date.now() - startedAt.current > ANALYSIS_TIMEOUT_MS) {
+        stopPoll()
+        setStatus(analysis ? 'ready' : 'error')
+        setError(analysis ? '' : '生成超时：会话可能没有响应本次追问。请确认对话侧处于空闲可回复状态后重试。')
+      }
+    }, 2000)
+    return () => window.clearInterval(t)
+  }, [status, refresh, stopPoll, analysis])
 
   // save_position_analysis (agent side) pushes an event — no need to wait for the 2s poll.
   useBus((e) => {
@@ -1214,7 +1507,10 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
 
   async function generate(force: boolean) {
     setError('')
+    setAnalysis(force ? undefined : analysis)
     setStatus('generating')
+    startedAt.current = Date.now()
+    setElapsed(0)
     try {
       const result = await apiPost<{ ok: boolean; status?: string; analysis?: PositionAnalysis; error?: string }>(
         '/analysis',
@@ -1223,42 +1519,50 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
       if (result.analysis) {
         setAnalysis(result.analysis)
         setStatus('ready')
-        return
       }
-      if (!poll.current) poll.current = window.setInterval(() => void refresh(), 2000)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      // 请求本身失败（如"当前没有可用会话"）必须可见，否则就是静默转圈。
+      setError(errText(err))
       setStatus('error')
     }
   }
 
   const typeLabel = item.type === 'fund' ? '基金' : '股票'
+  const busy = status === 'generating'
   return h('div', null,
     h('div', { style: S.analysisBackdrop, onClick: props.onClose }),
     h('div', { style: S.analysisPanel, onClick: (e: any) => e.stopPropagation() },
       h('div', { style: S.header },
         h('button', { style: S.btn, onClick: props.onClose }, '← 返回'),
         h('div', { style: { flex: 1, minWidth: 0 } },
-          h('div', { style: { fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, `${title} · ${typeLabel}`),
+          h('div', { style: { fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, `${title} · ${typeLabel} AI 解读`),
           h('div', { style: S.muted }, item.code)),
-        analysis ? h('button', { style: S.btn, onClick: () => void generate(true), disabled: status === 'generating' }, '重新生成') : null),
-      h('div', { style: { overflowY: 'auto', padding: '18px 22px', flex: 1 } },
-        status === 'loading' ? h('div', { style: S.muted }, '读取缓存…') : null,
-        status === 'generating' ? h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600 } }, '正在生成 AI 解读'),
-          h('div', { style: S.muted }, '模型正在当前 Harness 会话中收集行情、基本面、新闻和风险数据。完成后本页会自动刷新。')) : null,
-        status === 'empty' ? h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600 } }, '还没有解读缓存'),
-          h('div', { style: S.muted }, '只有你主动点击后才会调用当前会话模型生成报告。'),
-          h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6 }, onClick: () => void generate(false) }, '生成 AI 解读')) : null,
-        status === 'error' ? h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600 } }, '解读请求失败'),
-          h('div', { style: S.muted }, error || '请稍后重试'),
-          h('button', { style: { ...S.btn, alignSelf: 'flex-start', marginTop: 6 }, onClick: () => void generate(false) }, '重试')) : null,
-        analysis ? h('div', null,
-          h('div', { style: { ...S.muted, marginBottom: 12 } },
-            `生成于 ${new Date(analysis.generatedAt).toLocaleString()}${analysis.dataAsOf ? ` · 数据截至 ${analysis.dataAsOf}` : ''}`),
-          h('div', { style: { wordBreak: 'break-word', fontSize: 13 } },
+        analysis ? h('button', { style: S.btn, onClick: () => void generate(true), disabled: busy }, busy ? '生成中…' : '重新生成') : null),
+      h('div', { style: { overflowY: 'auto', padding: '18px 22px', flex: 1, background: R.canvas } },
+        status === 'loading' ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+          h(Skeleton, { w: '45%', h: 14 }), h(Skeleton, { w: '90%', h: 10 }), h(Skeleton, { w: '75%', h: 10 })) : null,
+        busy ? h('div', { style: { ...S.card, gap: 8, alignItems: 'flex-start' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            h('span', { style: { width: 10, height: 10, borderRadius: 999, background: BRAND, animation: 'dsn-pulse 1.2s ease-in-out infinite' } }),
+            h('div', { style: { fontWeight: 600 } }, '正在生成 AI 解读')),
+          h('div', { style: S.muted }, '已把生成请求发给当前会话的模型：它会在对话里拉取行情、基本面、新闻与风险数据，写回后本页自动刷新。'),
+          h('div', { style: { ...S.muted, fontSize: 11 } }, `已等待 ${Math.round(elapsed / 1000)} 秒 · 超过 3 分钟会提示超时`),
+          h('button', { style: S.btn, onClick: () => { stopPoll(); setStatus(analysis ? 'ready' : 'empty') } }, '停止等待')) : null,
+        status === 'empty' ? h(EmptyState, {
+          icon: h(IconChart, { size: 22 }),
+          text: '还没有这份标的的 AI 解读。点击下方按钮，当前会话的模型会拉取行情、基本面、新闻与风险数据生成报告。',
+          action: h('button', { style: S.btnPrimary, onClick: () => void generate(false) }, '生成 AI 解读'),
+        }) : null,
+        status === 'error' ? h(EmptyState, {
+          icon: h('span', { style: { fontSize: 20, color: UP } }, '!'),
+          text: error || '生成失败，请稍后重试。',
+          action: h('button', { style: S.btnPrimary, onClick: () => void generate(true) }, '重试'),
+        }) : null,
+        analysis && !busy ? h('div', { style: { ...S.card, padding: '14px 16px', gap: 10 } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+            h('span', { style: { ...S.tag, background: BRAND_SOFT, color: BRAND } }, 'AI 解读'),
+            h('span', { style: S.muted }, `生成于 ${new Date(analysis.generatedAt).toLocaleString()}${analysis.dataAsOf ? ` · 数据截至 ${analysis.dataAsOf}` : ''}`)),
+          h('div', { style: { wordBreak: 'break-word', fontSize: 13, lineHeight: 1.75, maxWidth: 900 } },
             h(ReactMarkdown, { remarkPlugins: [remarkGfm], components: ANALYSIS_MARKDOWN_COMPONENTS }, analysis.report))) : null)))
 }
 
@@ -1811,18 +2115,28 @@ function ResearchView() {
           h('button', { style: S.btn, onClick: () => setPendingPrompt('') }, '关闭')))) : null)
 }
 
-const TABS: Array<{ id: string; label: string }> = [
-  { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
-  { id: 'funds', label: '基金' }, { id: 'kline', label: 'K线' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
-  { id: 'research', label: '资料' }, { id: 'discover', label: '发现' }, { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
+/** 分组导航：12 个入口按用途分段，横向滚动，选中态为品牌药丸。 */
+const TAB_GROUPS: Array<Array<{ id: string; label: string }>> = [
+  [
+    { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
+    { id: 'funds', label: '基金' }, { id: 'kline', label: 'K线' },
+  ],
+  [
+    { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
+    { id: 'research', label: '资料' }, { id: 'discover', label: '发现' },
+  ],
+  [
+    { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
+  ],
 ]
+const TABS: Array<{ id: string; label: string }> = TAB_GROUPS.flat()
 
 function findShellFrame(): HTMLElement | null {
   return document.querySelector('[data-shell-overlay]')?.parentElement ?? null
 }
 
 /** Shrink the shell grid so the docked panel sits in reserved right padding. */
-function useCenterReserve(active: boolean) {
+function useCenterReserve(active: boolean, width: number) {
   useLayoutEffect(() => {
     if (!active) return
     const frame = findShellFrame()
@@ -1830,12 +2144,13 @@ function useCenterReserve(active: boolean) {
     const prevPad = frame.style.paddingRight
     const prevBox = frame.style.boxSizing
     frame.style.boxSizing = 'border-box'
-    frame.style.paddingRight = `${PANEL_W}px`
+    frame.style.paddingRight = `${width}px`
     return () => {
       frame.style.paddingRight = prevPad
       frame.style.boxSizing = prevBox
     }
-  }, [active])
+    // 拖动宽度时同步让出中间区域，避免内容被面板压住。
+  }, [active, width])
 }
 
 function portalHost(): HTMLElement {
@@ -1880,8 +2195,22 @@ function PanelBody(props: {
     return () => window.clearTimeout(t)
   }, [agentSaved])
 
+  // ---- 观点触发式提醒：铃铛 + 下拉列表 ----
+  const [reminders, setReminders] = useState<ReminderItem[]>([])
+  const [unread, setUnread] = useState(0)
+  const [bellOpen, setBellOpen] = useState(false)
+  const loadReminders = useCallback(async () => {
+    try {
+      const r = await apiGet<{ ok: boolean; items?: ReminderItem[]; unread?: number }>('/reminders')
+      setReminders(r.items ?? [])
+      setUnread(r.unread ?? 0)
+    } catch { /* 提醒不可用不阻塞面板 */ }
+  }, [])
+  useEffect(() => { void loadReminders() }, [loadReminders])
+
   // Agent → panel direction: navigate commands, config-change refresh, and research receipts.
   useBus((e) => {
+    if (e.kind === 'reminder') { void loadReminders(); return }
     if (e.kind === 'providers' || e.kind === 'skills' || e.kind === 'mcp') {
       void loadLive()
       return
@@ -1914,18 +2243,90 @@ function PanelBody(props: {
   const quoteBy = new Map<string, LiveQuote>()
   for (const q of data.quotes) quoteBy.set(keyOf(q.code, q.type ?? 'stock'), q)
   rememberNames([...data.watchlist, ...data.holdings, ...data.quotes])
+  const agoText = useAgo(data.at)
+  const panelWidth = usePanelWidth()
   return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
     h('div', { style: S.header },
-      h(IconChart, { size: 16 }),
-      h('div', { style: { flex: 1, fontWeight: 600 } }, 'DSN 金融面板'),
-      h('button', { style: S.btn, onClick: () => void loadLive(), disabled: loading }, loading ? '刷新中…' : '刷新'),
-      h('button', { style: { ...S.btn, padding: '4px 8px' }, title: docked ? '切换为浮动窗' : '停靠为侧栏页', onClick: onToggleDock }, docked ? '浮动' : '停靠'),
-      h('button', { style: { ...S.btn, padding: '4px 8px' }, onClick: onClose }, '×')),
-    h('div', { style: S.tabs }, TABS.map((t) => h('button', { key: t.id, style: S.tab(tab === t.id), onClick: () => selectTab(t.id) }, t.label))),
+      h('span', { style: S.brandBadge }, h(IconChart, { size: 15 })),
+      h('div', { style: { flex: 1, minWidth: 0 } },
+        h('div', { style: { fontWeight: 700, fontSize: 13.5, letterSpacing: 0.2 } }, 'DSN 金融面板'),
+        // 注意：useAgo 必须在组件顶层无条件调用，写进 `data.at ? ... : ...`
+        // 会让钩子数随数据变化，直接触发 React #310 崩溃。
+        h('div', { style: { ...S.muted, fontSize: 10.5 } },
+          loading ? '刷新中…' : (data.at ? `更新于 ${agoText}` : '实时行情'))),
+      h('button', {
+        style: { ...S.btn, padding: '4px 8px', color: unread ? BRAND : undefined },
+        onClick: () => { setBellOpen(!bellOpen); void loadReminders() },
+        title: unread ? `${unread} 条未读提醒` : '查看提醒（行情异动 / 观点复核）',
+      }, h(IconBell, { size: 15, dot: unread > 0 })),
+      h('button', { style: { ...S.btn, padding: '4px 9px' }, onClick: () => void loadLive(), disabled: loading, title: '刷新行情' }, loading ? '…' : '刷新'),
+      h('button', { style: { ...S.btn, padding: '4px 9px' }, title: docked ? '切换为浮动窗' : '停靠为侧栏页', onClick: onToggleDock }, docked ? '浮动' : '停靠'),
+      h('button', { style: { ...S.btn, padding: '4px 9px' }, onClick: onClose }, '×')),
+    // 提醒下拉：观点触发式提醒的入口
+    bellOpen ? h('div', { style: { position: 'relative', zIndex: 3 } },
+      h('div', { style: { position: 'fixed', inset: 0 }, onClick: () => setBellOpen(false) }),
+      h('div', {
+        style: {
+          position: 'absolute', top: 2, right: 10, width: Math.min(360, panelWidth - 24), maxHeight: 340,
+          overflowY: 'auto', background: R.surface, border: `1px solid ${R.line}`, borderRadius: R.md,
+          boxShadow: R.shadow2, padding: 10, display: 'flex', flexDirection: 'column', gap: 8,
+        },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+          h('div', { style: { ...S.title, marginBottom: 0 } }, `提醒 · 未读 ${unread}`),
+          h('button', {
+            style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' },
+            onClick: async () => {
+              try { await apiPost('/reminders/read', {}) } catch { /* ignore */ }
+              await loadReminders()
+            },
+          }, '全部已读'),
+          h('button', {
+            style: { ...S.btn, padding: '2px 8px' },
+            onClick: async () => {
+              try { await apiPost('/reminders/check', {}) } catch { /* ignore */ }
+              await loadReminders()
+            },
+          }, '立即检查')),
+        reminders.length === 0
+          ? h(EmptyState, {
+            icon: h(IconBell, { size: 20 }),
+            text: '暂无提醒。当持仓/自选当日涨跌超过 ±5%，或资料库里观点对应标的波动超过 ±8% 时，这里会出现提醒。',
+          })
+          : reminders.slice(0, 12).map((r) => h('div', {
+            key: r.id,
+            className: 'dsn-row',
+            style: {
+              ...S.card, gap: 3, cursor: 'pointer',
+              borderLeft: `3px solid ${r.level === 'warn' ? UP : BRAND}`,
+              opacity: r.read ? 0.62 : 1,
+            },
+            onClick: () => {
+              props.onOpenAnalysis({ code: r.code, type: r.type === 'fund' ? 'fund' : 'stock', name: r.name })
+              setBellOpen(false)
+              void apiPost('/reminders/read', { ids: [r.id] }).catch(() => {})
+              void loadReminders()
+            },
+          },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+              h('span', { style: { ...S.tag, background: r.kind === 'opinion' ? `${UP}1f` : BRAND_SOFT, color: r.kind === 'opinion' ? UP : BRAND } },
+                r.kind === 'opinion' ? '观点复核' : '行情异动'),
+              h('span', { style: { fontSize: 12, fontWeight: 600 } }, r.title),
+              h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 10 } }, r.at.slice(5, 16).replace('T', ' '))),
+            h('div', { style: { ...S.muted, fontSize: 11, lineHeight: 1.5 } }, r.detail))))) : null,
+    h('div', { style: S.tabs, className: 'dsn-tabs' },
+      TAB_GROUPS.map((grp, gi) => [
+        gi > 0 ? h('span', { key: `sep-${gi}`, style: S.tabSep }) : null,
+        ...grp.map((t) => h('button', {
+          key: t.id,
+          style: S.tab(tab === t.id),
+          onClick: () => selectTab(t.id),
+        }, t.label)),
+      ])),
     agentSaved ? h('div', {
       style: {
         display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: 12,
-        background: `${BRAND}14`, color: BRAND, borderBottom: `1px solid ${V('--dsw-alias-border-l2', '#eee')}`,
+        background: BRAND_SOFT, color: BRAND, borderBottom: `1px solid ${V('--dsw-alias-border-l2', '#eee')}`,
       },
     },
       h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, agentSaved.text),
@@ -1946,17 +2347,34 @@ function PanelBody(props: {
       tab === 'health' ? h(HealthView, { health: data.health }) : null))
 }
 
+/** 面板外壳：承载宽度状态与拖动把手，浮动/停靠两种形态共用。 */
+function PanelShell(props: { docked: boolean; children?: ReactNode }) {
+  const width = usePanelWidth()
+  const [onResizeStart, dragging] = useResizeDrag()
+  return h('div', {
+    style: {
+      position: 'fixed', top: 0, right: 0, bottom: 0, width, maxWidth: '95vw',
+      zIndex: props.docked ? 30 : 41, display: 'flex',
+    },
+  },
+    h(ResizeHandle, { onPointerDown: onResizeStart, active: dragging }),
+    h('div', { style: props.docked ? S.docked(width) : S.drawer(width) }, props.children))
+}
+
 function FloatingDrawer(props: { onClose: () => void; onToggleDock: () => void; onOpenAnalysis: (item: AnalysisItem) => void }) {
   return createPortal(
     h('div', null,
       h('div', { style: S.backdrop, onClick: props.onClose }),
-      h('div', { style: S.drawer }, h(PanelBody, { ...props, docked: false }))),
+      h(PanelShell, { docked: false }, h(PanelBody, { ...props, docked: false }))),
     portalHost())
 }
 
 function DockedPanel(props: { onClose: () => void; onToggleDock: () => void; onOpenAnalysis: (item: AnalysisItem) => void }) {
-  useCenterReserve(true)
-  return createPortal(h('div', { style: S.docked }, h(PanelBody, { ...props, docked: true })), portalHost())
+  const width = usePanelWidth()
+  useCenterReserve(true, width)
+  return createPortal(
+    h(PanelShell, { docked: true }, h(PanelBody, { ...props, docked: true })),
+    portalHost())
 }
 
 function FootAction(props: { scope: FinanceScope; wide?: boolean }) {
@@ -2027,6 +2445,8 @@ type ClientCtx = {
 }
 
 export function apply(ctx: ClientCtx): void {
+  // 面板宽度在挂载前初始化，保证首帧就是用户上次的宽度（不会先窄后宽跳一下）。
+  try { initPanelWidth() } catch { /* ignore */ }
   const scope = ctx.configForms.get('dsn-finance')
   // 面板 → 对话的桥：记住客户端 ctx，发提问时按当前会话作用域投递；
   // 读服务可能抛错（宿主未提供），必须兜住——否则整个面板都加载不了。

@@ -554,9 +554,71 @@ function searchQuery(args: Record<string, unknown>): string {
   return query
 }
 
+/** 解析 Bing RSS（纯函数，可离线测试）：提取 title/link/description 并还原实体转义。 */
+/** 还原 XML 文本：CDATA 包裹 + 实体转义（Bing RSS 两者都会出现）。 */
+function decodeXmlText(s: string): string {
+  return s
+    .replace(/^<!\[CDATA\[/, '')
+    .replace(/\]\]>$/, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, '&')
+    .trim()
+}
+
+/** 取一个 XML 标签的文本（不用正则转义，避免 `\s` 之类的转义陷阱）。 */
+function pickXmlTag(item: string, tag: string): string {
+  const open = `<${tag}>`
+  const close = `</${tag}>`
+  const a = item.indexOf(open)
+  if (a < 0) return ''
+  const from = a + open.length
+  const b = item.indexOf(close, from)
+  return decodeXmlText(b < 0 ? item.slice(from) : item.slice(from, b))
+}
+
+/** 解析 Bing RSS（纯函数，可离线测试）：提取 title/link/description。 */
+export function parseBingRss(xml: string, max = 10): SearchResult[] {
+  const limit = Math.max(1, max)
+  const out: SearchResult[] = []
+  for (const chunk of xml.split('<item>').slice(1)) {
+    const end = chunk.indexOf('</item>')
+    const item = end >= 0 ? chunk.slice(0, end) : chunk
+    const title = pickXmlTag(item, 'title')
+    const url = pickXmlTag(item, 'link')
+    if (!title || !url) continue
+    out.push({ title, url, snippet: pickXmlTag(item, 'description').slice(0, 300), source: 'Bing' })
+    if (out.length >= limit) break
+  }
+  return out
+}
+
 /**
- * Python ddgs + primp → Brave/Bing/Google (no DuckDuckGo).
- * primp impersonates browser TLS/headers; Node fetch to the same hosts is blocked or timed out.
+ * 回补数据源：Node 原生网页搜索（Bing RSS）。
+ * 之前唯一实现是 Python `ddgs`，但宿主机没装（pip 依赖不可控），web_search 长期不可用。
+ * Bing 的 `&format=rss` 输出是稳定的 XML，Node 侧直接解析即可，零安装成本。
+ */
+async function rssWebSearch(args: Record<string, unknown>, ctx: ProviderContext) {
+  const query = searchQuery(args)
+  const max = Number(args.size ?? args.maxResults ?? 10)
+  const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&format=rss&count=${Math.min(30, Math.max(1, max))}`
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+      Accept: 'application/rss+xml, application/xml;q=0.9, */*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    },
+    signal: ctx.signal,
+  })
+  if (!res.ok) throw new Error(`bing rss http ${res.status}`)
+  const results = parseBingRss(await res.text(), max)
+  if (!results.length) throw new Error('bing rss: empty')
+  return { rows: results, data: results, sampleKeys: Object.keys(results[0]!) }
+}
+
+/**
+ * Python ddgs + primp → Bing/Google/Yandex (no DuckDuckGo)。
+ * 作为可选增强：装了 ddgs 就能拿到多引擎结果，没装也不影响搜索能力。
  */
 async function pyWebSearch(args: Record<string, unknown>, ctx: ProviderContext) {
   const query = searchQuery(args)
@@ -957,9 +1019,17 @@ export const PROVIDERS: ProviderMeta[] = [
     call: emStockInfo,
   },
   {
+    // 免安装的回补实现排在最前：没有 pip 依赖也能搜索。
+    id: 'rss_web_search',
+    capability: 'web_search',
+    endpointRef: 'Bing Search RSS — Node 原生解析，零依赖',
+    sampleArgs: { query: 'nvidia stock' },
+    call: rssWebSearch,
+  },
+  {
     id: 'py_web_search',
     capability: 'web_search',
-    endpointRef: 'Python ddgs + primp → Bing/Google/Yandex (pip install ddgs)',
+    endpointRef: 'Python ddgs + primp → Bing/Google/Yandex (可选，pip install ddgs)',
     sampleArgs: { query: 'nvidia stock' },
     call: pyWebSearch,
   },

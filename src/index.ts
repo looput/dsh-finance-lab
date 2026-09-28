@@ -25,6 +25,8 @@ import { WESTOCK_SPECS } from './data/westock-capabilities.js'
 import { KIND_LABEL, ORIGIN_LABEL, ResearchVault, type ResearchKind } from './research/store.js'
 import { registerResearchTools } from './research/tools.js'
 import { createWebSearchProvider } from './web-search.js'
+import { ReminderStore, scanReminders, type ReminderOptions } from './reminders.js'
+import { registerReminderTools } from './reminders-tools.js'
 
 export const name = pluginName
 export const inject = ['tools', 'systemPrompt', 'web', 'webServer', 'agents', 'skills']
@@ -112,6 +114,18 @@ export function apply(ctx: Context, config: Config) {
     async (holdings) => { await store.setHoldings(holdings) },
   )
 
+  // 观点触发式提醒：行情异动 + 资料库观点复核，落盘去重，推送到面板铃铛。
+  const reminders = new ReminderStore(path.join(dataDir, 'reminders.json'), logger)
+  void reminders.load().catch((err) => logger.fail('reminder store load failed', err))
+  const scanRemindersNow = async (options?: ReminderOptions) => {
+    const result = await scanReminders(finance, store, vault, reminders, options)
+    if (result.added.length) {
+      logger.info('reminders triggered', { added: result.added.length })
+      bus.publish({ kind: 'reminder', count: result.added.length, at: result.at })
+    }
+    return result
+  }
+
   const history = new HistoryStore(path.join(dataDir, 'history'), logger)
 
   // 投研资料库：正文落工作区（Markdown），索引在 <dataDir>/research/index.json。
@@ -141,7 +155,15 @@ export function apply(ctx: Context, config: Config) {
   const yingmiCommand = (config.mcpSources ?? []).find((s) => s.kind === 'cli' && s.enabled)?.command || undefined
   const skills = registerSkills(ctx, packageRoot, dataDir, yingmiCommand, logger)
   const mcp = registerMcpSources(ctx, config.mcpSources ?? [], dataDir)
-  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, ctx, bus, vault, logger)
+  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, ctx, bus, vault, logger, reminders, scanRemindersNow)
+  registerReminderTools(ctx, reminders, scanRemindersNow, bus)
+  // 定时扫描：10 分钟一次（插件卸载时随 effect 清理）。
+  ctx.effect(() => {
+    const t = setInterval(() => { void scanRemindersNow().catch(() => {}) }, 10 * 60_000)
+    // 启动 20 秒后先扫一次，让提醒尽快可见。
+    const boot = setTimeout(() => { void scanRemindersNow().catch(() => {}) }, 20_000)
+    return () => { clearInterval(t); clearTimeout(boot) }
+  })
 
   // Replace the default (key-gated) web search with free meta search (Python ddgs → Brave/Bing/Google).
   ctx.web.registerSearchProvider(createWebSearchProvider((q, signal) => finance.webSearch(q, signal)))

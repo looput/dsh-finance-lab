@@ -23,10 +23,20 @@ import { ResearchVault, ResearchValidationError, renderResearchDoc } from '../sr
 import { routeCode } from '../src/data/service.ts'
 import { ProviderRegistry } from '../src/data/registry.ts'
 import { CAPABILITIES, DEFAULT_PROVIDER_ORDER } from '../src/types.ts'
+import { ReminderStore } from '../src/reminders.js'
+import { advisorMemory } from '../src/server-routes.js'
+import { ResearchVault } from '../src/research/store.js'
+import { parseBingRss } from '../src/data/providers.js'
 
 let passed = 0
 let failed = 0
 const failures: string[] = []
+
+/** Bing RSS 样例：含 CDATA 与 &amp; 转义，验证解析与还原。 */
+const FIXTURE_RSS = `<?xml version="1.0"?><rss><channel>
+<item><title><![CDATA[贵州茅台 & 五粮液 对比]]></title><link>https://example.com/a</link><description>摘要 A</description></item>
+<item><title>第二 &amp; 条</title><link>https://example.com/b</link><description>摘要 B</description></item>
+</channel></rss>`
 
 function check(name: string, cond: boolean, detail = ''): void {
   if (cond) {
@@ -548,6 +558,54 @@ esac
     configureWestock({ enabled: false, binPath: fake, timeoutMs: 5_000 })
     const missing = await registry.call('research_report', { code: '600519' })
     check('不可用能力返回 ok:false 而非抛异常', missing.ok === false && !!missing.attempts?.length, missing.error)
+
+    // ---- 回补数据源：web_search 的默认源必须是免安装的 Node 实现 ----
+    check('web_search 首选免安装源', DEFAULT_PROVIDER_ORDER.web_search[0] === 'rss_web_search', DEFAULT_PROVIDER_ORDER.web_search.join(','))
+    const parsed = parseBingRss(FIXTURE_RSS)
+    eq('Bing RSS 解析条数', parsed.length, 2)
+    check('RSS 首条有标题/链接/摘要', !!parsed[0]?.title && !!parsed[0]?.url && !!parsed[0]?.snippet, JSON.stringify(parsed[0]))
+    check('RSS 实体转义还原', parsed[0]!.title.includes('&'), parsed[0]!.title)
+
+    // ---- 观点触发式提醒：落盘、去重、已读 ----
+    const rs = new ReminderStore(path.join(root, 'reminders.json'))
+    const first = await rs.add([
+      { kind: 'move', level: 'info', code: '600519', type: 'stock', pct: 6.2, title: 't', detail: 'd' },
+    ])
+    eq('提醒写入', first.length, 1)
+    const again = await rs.add([
+      { kind: 'move', level: 'info', code: '600519', type: 'stock', pct: 7.1, title: 't2', detail: 'd2' },
+    ])
+    eq('冷却期内不重复提醒', again.length, 0)
+    const other = await rs.add([
+      { kind: 'opinion', level: 'warn', code: '600519', type: 'stock', pct: 9, title: 't3', detail: 'd3' },
+    ])
+    eq('不同类型可分别提醒', other.length, 1)
+    eq('未读数', rs.unread(), 2)
+    await rs.markRead([first[0]!.id])
+    eq('单条已读', rs.unread(), 1)
+    await rs.markRead()
+    eq('全部已读', rs.unread(), 0)
+    const reloaded = new ReminderStore(path.join(root, 'reminders.json'))
+    await reloaded.load()
+    eq('提醒持久化', reloaded.list().length, 2)
+
+    // ---- 投顾视角：解读 prompt 必须带上资料库里的观点 ----
+    const vroot = path.join(root, 'vault')
+    const advVault = new ResearchVault(vroot)
+    await advVault.load()
+    await advVault.create({
+      title: '库存周期见底',
+      source: '个人观点',
+      occurredAt: '2026-09-01',
+      kind: 'note',
+      codes: ['600519'],
+      opinion: '库存周期见底，Q4 营收转正',
+      status: 'active',
+    })
+    const memory = advisorMemory(advVault, '600519')
+    check('投顾记忆命中该标的观点', memory.includes('库存周期见底'), memory.slice(0, 60))
+    check('投顾记忆要求对照既有观点', memory.includes('与我既有观点的对照'))
+    eq('无关标的没有投顾记忆', advisorMemory(advVault, '000001'), '')
 
     console.log(`\n[offline] ${passed} passed, ${failed} failed`)
     if (failed) {

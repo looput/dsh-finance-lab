@@ -42,6 +42,7 @@ export type BusEvent =
   | { kind: 'providers' }
   | { kind: 'skills' }
   | { kind: 'mcp' }
+  | { kind: 'reminder'; count: number; at: string }
   | { kind: 'panel'; command: PanelCommand }
 
 /**
