@@ -5,6 +5,7 @@ import '@deepseek-ai/dsh-tools'
 import type { AnalysisStore } from '../analysis-store.js'
 import type { FinanceDataService } from '../data/service.js'
 import type { PanelBus } from '../panel-bus.js'
+import { buildStockDossier, dossierSummary } from '../data/dossier.js'
 import { simulateRebalance } from '../rebalance.js'
 import type { PortfolioStore } from '../store.js'
 import type { AssetType } from '../types.js'
@@ -26,6 +27,35 @@ const jsonOut = {
 }
 
 export function registerTools(ctx: Context, finance: FinanceDataService, store: PortfolioStore, analyses: AnalysisStore, bus: PanelBus) {
+  // 个股深度档案：一次调用拿到 WeStock 上该标的的全部维度（研究/资金/股东/风险/资讯/产业链）。
+  ctx.tools.register(defineTool({
+    name: 'stock_dossier',
+    description: '个股深度档案：并发取回一致预期、股票评分、ESG、机构评级、资金流向、融资融券、大宗交易、龙虎榜、北向持仓、股东研究、分红、回购、风险事件、停复牌、公告、新闻、所属产业链。做深度研究/尽调时优先用它，比逐个命令调用快得多。',
+    parameters: {
+      code: { type: 'string', description: '标的代码，如 600519 / 00700 / AAPL' },
+      type: { type: 'string', description: 'stock（默认）或 fund' },
+    },
+    output: jsonOut,
+    async execute(args) {
+      const code = String(args.code ?? '').trim()
+      if (!code) throw new Error('code is required')
+      const type = String(args.type ?? 'stock') === 'fund' ? 'fund' as const : 'stock' as const
+      const d = await buildStockDossier(finance, code, type)
+      return asJson({
+        ok: true,
+        summary: dossierSummary(d),
+        code: d.code,
+        ready: d.ready,
+        total: d.total,
+        elapsedMs: d.elapsedMs,
+        sections: d.sections.map((s) => ({
+          key: s.key, label: s.label, group: s.group, ok: s.ok, rows: s.rows,
+          provider: s.provider, ms: s.ms, error: s.error,
+        })),
+      })
+    },
+  }))
+
   ctx.tools.register(defineTool({
     name: 'probe_finance_sources',
     description: '逐个探测公开行情 HTTP 端点健康状态（串行、有间隔）。公开源不稳定时应先运行本工具。',

@@ -676,6 +676,12 @@ function flattenTables(stdout: string): Array<Record<string, string>> {
 /** 上游偶发 `service error` / 超时：这类瞬时故障重试一次即可，不必惊动用户。 */
 const TRANSIENT = /service error|error_type=|timed out|timeout|ECONNRESET|ETIMEDOUT|EOF/i
 
+/**
+ * 上游明确说明「这次就是没有数据」的措辞（个股当前无事件、区间内未上龙虎榜…）。
+ * 这属于正常结果而非故障：返回空集 + 提示，否则档案/面板会把"没事件"当成报错。
+ */
+const EMPTY_HINT = /数据为空|未上龙虎榜|暂无数据|无相关数据|没有数据|未查询到/i
+
 async function runOnce(spec: WestockSpec, args: Record<string, unknown>, ctx: Parameters<ProviderFn>[1]): Promise<string> {
   const { stdout } = await runWestock(spec.argv(args), ctx)
   return stdout
@@ -700,11 +706,14 @@ function specProvider(spec: WestockSpec): ProviderFn {
         const text = stdout.trim().slice(0, 20_000)
         return { rows: [], data: { text, truncated: stdout.trim().length > 20_000 }, sampleKeys: ['text'] }
       }
-      // 上游常以「数据为空 / 区间内未上龙虎榜」说明原因：把这句话带上，避免只剩 empty。
-      const hint = stdout.trim()
+      const hint = stdout.trim().replace(/\s+/g, ' ')
+      // 「数据为空 / 区间内未上龙虎榜」是正常结果：给空集 + 原因，而不是报错。
+      if (EMPTY_HINT.test(hint)) {
+        return { rows: [], data: [], sampleKeys: [], emptyHint: hint.slice(0, 200) }
+      }
       throw new Error(
         hint && hint.length <= 200
-          ? `westock ${spec.id}: ${hint.replace(/\s+/g, ' ')}`
+          ? `westock ${spec.id}: ${hint}`
           : `westock ${spec.id}: empty result`,
       )
     }

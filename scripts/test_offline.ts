@@ -20,10 +20,12 @@ import { configureWestock, parseMarkdownTables, toWestockSymbol, fromWestockSymb
 import { WESTOCK_SPECS, WESTOCK_CAPABILITY_PROVIDERS, westockCapabilityCatalog } from '../src/data/westock-capabilities.ts'
 import { Logger } from '../src/log.ts'
 import { ResearchVault, ResearchValidationError, renderResearchDoc } from '../src/research/store.ts'
-import { routeCode } from '../src/data/service.ts'
+import { routeCode, FinanceDataService } from '../src/data/service.ts'
 import { ProviderRegistry } from '../src/data/registry.ts'
 import { CAPABILITIES, DEFAULT_PROVIDER_ORDER } from '../src/types.ts'
 import { ReminderStore } from '../src/reminders.js'
+import { buildStockDossier, dossierSummary } from '../src/data/dossier.js'
+import { configureWestock } from '../src/data/westock.ts'
 import { advisorMemory } from '../src/server-routes.js'
 import { ResearchVault } from '../src/research/store.js'
 import { parseBingRss } from '../src/data/providers.js'
@@ -606,6 +608,17 @@ esac
     check('投顾记忆命中该标的观点', memory.includes('库存周期见底'), memory.slice(0, 60))
     check('投顾记忆要求对照既有观点', memory.includes('与我既有观点的对照'))
     eq('无关标的没有投顾记忆', advisorMemory(advVault, '000001'), '')
+
+    // ---- 个股深度档案：聚合层必须"单项失败不影响整体 + 空数据不算失败" ----
+    configureWestock({ enabled: false, binPath: '/nonexistent/westock', timeoutMs: 1_000 })
+    const dossierFinance = new FinanceDataService(registry, () => [], async () => {})
+    const dossier = await buildStockDossier(dossierFinance as never, '600519')
+    eq('档案维度总数', dossier.total, 18)
+    check('全部源不可用时档案仍返回结构', Array.isArray(dossier.sections) && dossier.sections.length === 18)
+    check('单项失败不影响其他维度', dossier.sections.every((s) => typeof s.ok === 'boolean' && typeof s.ms === 'number'))
+    check('ready 不超过总数', dossier.ready >= 0 && dossier.ready <= dossier.total, String(dossier.ready))
+    check('摘要含维度计数', /\d+\/18 个维度有数据/.test(dossierSummary(dossier)), dossierSummary(dossier).slice(0, 40))
+    check('WeStock 关闭后新闻维度回落到 HTTP 源', dossier.sections.some((s) => s.key === 'news' && s.provider?.startsWith('em_')), dossier.sections.find((s) => s.key === 'news')?.provider ?? '')
 
     console.log(`\n[offline] ${passed} passed, ${failed} failed`)
     if (failed) {

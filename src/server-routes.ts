@@ -4,6 +4,7 @@ import type { AnalysisStore } from './analysis-store.js'
 import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
 import type { McpManager } from './mcp/manager.js'
+import { buildStockDossier, dossierSummary } from './data/dossier.js'
 import type { ReminderOptions, ReminderScanResult, ReminderStore } from './reminders.js'
 import type { PanelBus } from './panel-bus.js'
 import type { SkillManager } from './skills.js'
@@ -541,6 +542,14 @@ export function registerRoutes(
           }
           const r = await finance.getNewsFlash(25)
           return sendJson(res, 200, { ok: r.ok, news: r.ok && Array.isArray(r.data) ? r.data : [], error: r.ok ? undefined : r.error })
+        }
+        // 个股深度档案：一次并发取回该标的在 WeStock 上的全部维度（研究/资金/股东/风险/资讯/产业链）。
+        if (req.method === 'GET' && sub === '/dossier') {
+          const code = String(url.searchParams.get('code') ?? '').trim()
+          const type: AssetType = url.searchParams.get('type') === 'fund' ? 'fund' : 'stock'
+          if (!code) return sendJson(res, 400, { ok: false, error: 'code is required' })
+          const d = await buildStockDossier(finance, code, type)
+          return sendJson(res, 200, { ok: true, summary: dossierSummary(d), ...d })
         }
         if (req.method === 'GET' && sub === '/analysis') {
           const code = String(url.searchParams.get('code') ?? '').trim()

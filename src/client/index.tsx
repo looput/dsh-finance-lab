@@ -1593,6 +1593,124 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
             h(ReactMarkdown, { remarkPlugins: [remarkGfm], components: ANALYSIS_MARKDOWN_COMPONENTS }, analysis.report))) : null)))
 }
 
+// ---- 个股深度档案 tab（WeStock 全维度）----
+interface DossierSection {
+  key: string
+  label: string
+  group: string
+  ok: boolean
+  provider?: string
+  rows: number
+  data?: Array<Record<string, string>>
+  error?: string
+  ms: number
+}
+interface DossierPayload {
+  ok: boolean
+  code: string
+  at: string
+  ready: number
+  total: number
+  elapsedMs: number
+  summary?: string
+  sections: DossierSection[]
+}
+
+/** 把档案里的对象数组渲染成紧凑表格（只取前若干行/列，避免撑破面板）。 */
+function DataTable(props: { rows: Array<Record<string, string>>; maxRows?: number; maxCols?: number }) {
+  const rows = (props.rows ?? []).slice(0, props.maxRows ?? 8)
+  if (!rows.length) return null
+  const cols = Object.keys(rows[0]!).filter((k) => k !== '_section').slice(0, props.maxCols ?? 6)
+  const cell: CSSProperties = { padding: '3px 6px', fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 130 }
+  return h('div', { style: { overflowX: 'auto', maxWidth: '100%' } },
+    h('table', { style: { borderCollapse: 'collapse', width: '100%' } },
+      h('thead', null, h('tr', null, cols.map((c) => h('th', {
+        key: c,
+        style: { ...cell, textAlign: 'left', color: V('--dsw-alias-label-tertiary', '#999'), fontWeight: 500, borderBottom: `1px solid ${R.line}` },
+      }, c)))),
+      h('tbody', null, rows.map((r, i) => h('tr', { key: i, style: { borderBottom: `1px solid ${R.line}` } },
+        cols.map((c) => h('td', { key: c, style: cell, title: String(r[c] ?? '') }, String(r[c] ?? '—'))))))))
+}
+
+function DossierView(props: { initial?: string }) {
+  const [code, setCode] = useState(props.initial ?? '')
+  const [data, setData] = useState<DossierPayload>()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [openKey, setOpenKey] = useState('')
+
+  const load = useCallback(async (c: string) => {
+    const q = c.trim()
+    if (!q) return
+    setBusy(true)
+    setError('')
+    try {
+      const r = await apiGet<DossierPayload>(`/dossier?code=${encodeURIComponent(q)}`)
+      setData(r)
+    } catch (err) {
+      setError(errText(err))
+      setData(undefined)
+    } finally { setBusy(false) }
+  }, [])
+
+  useEffect(() => { if (props.initial) void load(props.initial) }, [props.initial, load])
+
+  const groups = [...new Set((data?.sections ?? []).map((s) => s.group))]
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '个股深度档案'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } },
+          data ? `${data.ready}/${data.total} 维度有数据 · ${data.elapsedMs}ms` : 'WeStock 全维度')),
+      h('div', { style: { padding: 9, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+        h('input', {
+          style: { ...S.input, flex: '1 1 140px' },
+          placeholder: '代码，如 600519 / 00700 / AAPL',
+          value: code,
+          onChange: (e: any) => setCode(String(e.target.value ?? '')),
+          onKeyDown: onEnterCommit(() => void load(code)),
+        }),
+        h('button', { style: S.btnPrimary, disabled: busy || !code.trim(), onClick: () => void load(code) }, busy ? '取数中…' : '拉取档案')),
+      error ? h('div', { style: { padding: '0 9px 9px', fontSize: 11, color: UP } }, error) : null),
+
+    !data && !busy && !error
+      ? h(EmptyState, {
+        icon: h(IconChart, { size: 20 }),
+        text: '输入代码，一次性拉取该标的在 WeStock 上的全部维度：一致预期、评分、ESG、资金流向、股东、分红回购、风险事件、公告、产业链。',
+      })
+      : null,
+    busy && !data ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+      h(Skeleton, { w: '40%', h: 12 }), h(Skeleton, { w: '90%', h: 44 }), h(Skeleton, { w: '80%', h: 44 })) : null,
+
+    data ? groups.map((g) => h('div', { key: g, style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, g),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } },
+          `${data.sections.filter((s) => s.group === g && s.ok && s.rows > 0).length}/${data.sections.filter((s) => s.group === g).length}`)),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 6 } },
+        data.sections.filter((s) => s.group === g).map((s) => {
+          const open = openKey === s.key
+          const rows = Array.isArray(s.data) ? s.data : []
+          const empty = s.ok && s.rows === 0
+          return h('div', { key: s.key, style: { ...S.card, gap: 5, padding: '8px 10px' } },
+            h('div', {
+              style: { display: 'flex', alignItems: 'center', gap: 6, cursor: rows.length ? 'pointer' : 'default' },
+              onClick: () => setOpenKey(open ? '' : s.key),
+            },
+              h('span', {
+                style: { width: 7, height: 7, borderRadius: 999, flex: '0 0 auto', background: s.ok ? (s.rows ? DOWN : '#c98a1a') : UP },
+              }),
+              h('span', { style: { fontSize: 12, fontWeight: 500, minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.label),
+              h('span', { style: { ...S.muted, fontSize: 10, flex: '0 0 auto' } },
+                s.ok ? (s.rows ? `${s.rows} 条` : '暂无') : '失败'),
+              h('span', { style: { ...S.muted, fontSize: 10, flex: '0 0 auto' } }, `${s.ms}ms`),
+              rows.length ? h('span', { style: { ...S.muted, fontSize: 11, flex: '0 0 auto' } }, open ? '收起' : '展开') : null),
+            empty ? h('div', { style: { ...S.muted, fontSize: 11 } }, s.error ?? '该维度当前无数据') : null,
+            !s.ok && s.error ? h('div', { style: { fontSize: 11, color: UP } }, s.error.slice(0, 120)) : null,
+            open ? h(DataTable, { rows }) : null)
+        })))) : null)
+}
+
 // ---- 市场发现 tab（WeStock：情绪温度 / 热搜 / 龙虎榜）----
 interface DiscoverData {
   at: string
@@ -2150,7 +2268,7 @@ const TAB_GROUPS: Array<Array<{ id: string; label: string }>> = [
   ],
   [
     { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
-    { id: 'research', label: '资料' }, { id: 'discover', label: '发现' },
+    { id: 'research', label: '资料' }, { id: 'dossier', label: '深度' }, { id: 'discover', label: '发现' },
   ],
   [
     { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
@@ -2368,6 +2486,7 @@ function PanelBody(props: {
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
       tab === 'kline' ? h(KlineView, { data, requested: klineTarget }) : null,
       tab === 'research' ? h(ResearchView, null) : null,
+      tab === 'dossier' ? h(DossierView, { initial: klineTarget?.code }) : null,
       tab === 'discover' ? h(DiscoverView, null) : null,
       tab === 'sources' ? h(SourcesView, null) : null,
       tab === 'skills' ? h(SkillsView, null) : null,
