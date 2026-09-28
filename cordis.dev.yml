@@ -3,7 +3,7 @@
 # Note: --patch mounts the host half only; scripts/dev_web.sh registers the
 # package into the web profile instead, which also loads the client UI bundle.
 - insert:
-    - id: dsn-finance
+    - id: dsh-finance
       name: /Users/loopulu/workspace/dsh_fin/dsh-finance-lab/lib/index.js
       config:
         cacheTtlSec: 300
@@ -14,4 +14,4 @@
 
 - id: web
   config:
-    searchProvider: dsn-web-search
+    searchProvider: dsh-web-search

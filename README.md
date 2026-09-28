@@ -4,9 +4,9 @@
 
 [English README](./README.en.md) · [MIT License](./package.json)
 
-DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、港股、美股、基金、宏观数据和财经新闻接入模型，同时提供一个可停靠的本地金融面板。行情通过公开 HTTP 接口直连，持仓和自选股保存在本地 JSON 中，适合个人研究、组合复盘和多智能体协作。
+DSH Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、港股、美股、基金、宏观数据和财经新闻接入模型，同时提供一个可停靠的本地金融面板。行情通过公开 HTTP 接口直连，持仓和自选股保存在本地 JSON 中，适合个人研究、组合复盘和多智能体协作。
 
-<img width="1331" height="804" alt="DSN Finance panel" src="https://github.com/user-attachments/assets/3fa063b1-22ef-404b-8fb9-1d230b7e66c0" />
+<img width="1331" height="804" alt="DSH Finance panel" src="https://github.com/user-attachments/assets/3fa063b1-22ef-404b-8fb9-1d230b7e66c0" />
 
 ## 你可以用它做什么
 
@@ -44,7 +44,7 @@ DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 | 接口 | 数据源健康状态与当前 provider、数据源性能（缓存命中率/平均耗时/各源成败与耗时/熔断列表）、MCP 外部源开关 |
 | 顶部铃铛 | 观点触发式提醒：行情异动（默认 ±5%）与「观点需复核」（默认 ±8%），点击直达 AI 解读 |
 
-面板开关（`panelOpen` / `panelDocked`）是 volatile 配置：优先写回 profile；若当前 profile 不可写（本版本 `configForms.set` 会返回不可写），客户端自动退回 localStorage（`dsn-finance:panelPrefs`），并在面板顶部提示，保证面板打得开、刷新后状态保留。默认以**浮层抽屉**打开（`dev_web.sh` 生成 `panelDocked: false`；停靠页需要宿主 dock 容器，未选择工作区时可能不渲染），可在面板内一键切换为停靠。
+面板开关（`panelOpen` / `panelDocked`）是 volatile 配置：优先写回 profile；若当前 profile 不可写（本版本 `configForms.set` 会返回不可写），客户端自动退回 localStorage（`dsh-finance:panelPrefs`），并在面板顶部提示，保证面板打得开、刷新后状态保留。默认以**浮层抽屉**打开（`dev_web.sh` 生成 `panelDocked: false`；停靠页需要宿主 dock 容器，未选择工作区时可能不渲染），可在面板内一键切换为停靠。
 
 持仓截图也可以交给 Agent 识别，再通过 `import_holdings` 批量写入本地文件；面板会自动刷新。点击持仓或自选中的股票/基金即可打开完整 AI 解读，首次主动点击后才生成，报告会缓存到本地并支持重新生成。插件只修改本地持仓数据，不执行真实交易。
 
@@ -96,7 +96,7 @@ DSN Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 需要 Node.js `^22.19`、`>=24.2`（dsh 的 `bin` 依赖 `import.meta.main`，24.0/24.1 会让 CLI 静默退出）：
 
 ```bash
-cd dsn-finance-lab
+cd dsh-finance-lab
 npm install
 npm run build
 ```
@@ -127,7 +127,7 @@ npx tsx scripts/probe_sources.ts --only kline.em_kline
 
 ```bash
 npx @deepseek-ai/dsh@0.1.7-rc.2 plugin \
-  --profile web add /absolute/path/to/dsn-finance-lab
+  --profile web add /absolute/path/to/dsh-finance-lab
 npx @deepseek-ai/dsh@0.1.7-rc.2 web
 ```
 
@@ -144,7 +144,7 @@ bash scripts/dev_web.sh
 该脚本按顺序保证隔离：① 每个应用独立 `$DSH_HOME`（profile/session/存储/数据互不干扰）→
 ② 挑选支持 `import.meta.main` 的 Node（读 `.nvmrc`，挑不到直接报错而不是静默退出）→
 ③ 端口默认 `0` 由 OS 分配（避免与其他插件应用抢端口）→
-④ 生成 `$DSH_HOME/dsn-finance.overlay.yml`（**插件依赖、dataDir、数据源与 LLM provider 一律写在 profile 层**，经 `--patch` 应用）→
+④ 生成 `$DSH_HOME/dsh-finance.overlay.yml`（**插件依赖、dataDir、数据源与 LLM provider 一律写在 profile 层**，经 `--patch` 应用）→
 ⑤ `dsh plugin add` 后启动。
 
 WeStock CLI 未安装时，行情/财报/资讯会回落到 HTTP 源，仅研报不可用；安装（pinned + SHA256 校验）：
@@ -170,7 +170,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.2 web --patch ./cordis.dev.yml
 | `cacheTtlSec` | `300` | provider 缓存时间 |
 | `requestGapMs` | `3000` | 相邻公开请求的间隔 |
 | `httpTimeoutMs` | `30000` | 单次请求超时 |
-| `logLevel` | `info` | 日志级别（`debug`/`info`/`warn`/`error`）；结构化日志写入 `<dataDir>/logs/dsn-finance.jsonl`，可在面板接口页/`/api/logs` 查看 |
+| `logLevel` | `info` | 日志级别（`debug`/`info`/`warn`/`error`）；结构化日志写入 `<dataDir>/logs/dsh-finance.jsonl`，可在面板接口页/`/api/logs` 查看 |
 | `westock.enabled` | `true` | 是否启用 WeStock CLI 数据源（腾讯自选股，免鉴权） |
 | `westock.binPath` | 空 → 自动探测 | CLI 路径（`$WESTOCK_BIN` → PATH → 常见安装位置） |
 | `westock.timeoutMs` | `20000` | 单次 CLI 调用超时 |

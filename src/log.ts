@@ -2,7 +2,7 @@ import { appendFile, mkdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 
 /**
- * Structured logging for dsn-finance.
+ * Structured logging for dsh-finance.
  *
  * Before this module the plugin swallowed every failure (`catch {}`), so a dead
  * data source, a corrupt state file or a rejected tool call left no trace. Every
@@ -28,7 +28,7 @@ export interface LogEntry {
 export interface LoggerOptions {
   /** Directory that owns `logs/`; set to undefined for a memory-only logger (tests). */
   dataDir?: string
-  /** File name inside `<dataDir>/logs/`; defaults to `dsn-finance.jsonl`. */
+  /** File name inside `<dataDir>/logs/`; defaults to `dsh-finance.jsonl`. */
   fileName?: string
   level?: LogLevel
   /** Mirror WARNING+ to stdout; on by default. */
@@ -53,7 +53,7 @@ export class Logger {
     file?: string,
     options: LoggerOptions = {},
   ) {
-    this.file = file ?? (options.dataDir ? path.join(options.dataDir, 'logs', options.fileName ?? 'dsn-finance.jsonl') : undefined)
+    this.file = file ?? (options.dataDir ? path.join(options.dataDir, 'logs', options.fileName ?? 'dsh-finance.jsonl') : undefined)
     this.console = options.console ?? true
     this.mirror = options.mirror
   }
@@ -108,7 +108,7 @@ export class Logger {
     const entry: LogEntry = { ts: new Date().toISOString(), level, scope: this.scope, msg }
     if (fields && Object.keys(fields).length) entry.fields = fields
     if (this.console && LEVEL_ORDER[level] >= LEVEL_ORDER.warn) {
-      const prefix = `${entry.ts} [dsn-finance] ${level.toUpperCase()} ${entry.scope}:`
+      const prefix = `${entry.ts} [dsh-finance] ${level.toUpperCase()} ${entry.scope}:`
       const args: unknown[] = [prefix, msg]
       if (entry.fields) args.push(entry.fields)
       if (level === 'error') console.error(...args)
@@ -173,7 +173,7 @@ export class Logger {
 
 /** Build the plugin root logger: level from config, JSONL under `<dataDir>/logs/`. */
 export function createLogger(options: LoggerOptions & { level?: LogLevel } = {}): Logger {
-  const level = parseLevel(process.env.DSN_FINANCE_LOG_LEVEL, options.level ?? 'info')
-  const file = options.dataDir ? path.join(options.dataDir, 'logs', options.fileName ?? 'dsn-finance.jsonl') : undefined
-  return new Logger('dsn-finance', level, file, options)
+  const level = parseLevel(process.env.DSH_FINANCE_LOG_LEVEL, options.level ?? 'info')
+  const file = options.dataDir ? path.join(options.dataDir, 'logs', options.fileName ?? 'dsh-finance.jsonl') : undefined
+  return new Logger('dsh-finance', level, file, options)
 }

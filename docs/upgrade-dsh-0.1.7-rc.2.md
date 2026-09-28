@@ -17,8 +17,8 @@
 | # | 0.1.7 契约 | 原实现 | 适配后 |
 | --- | --- | --- | --- |
 | 1 | `@deepseek-ai/dsh-settings` 不再导出 `installSettingsSection` / `settingsNamespace`；配置归 profile 条目所有，且**只有 `volatile` 字段**进入宿主配置表单（`volatileForm` / `isVolatilePath`） | 插件自建 settings 段并暴露整份 Config | 删除该调用；`panelOpen` / `panelDocked` 在 Config schema 中声明 `Schema.boolean().volatile()`，其余字段保持普通组合配置 |
-| 2 | 客户端设置服务由 `settingsScope.bind({namespace})` 变为 `ctx.configForms.get(entryId)` | `inject: ['slots','settingsScope']` | `inject: ['slots','configForms']` + `ctx.configForms.get('dsn-finance')` |
-| 3 | 客户端插槽 `settings.plugin.item` 移除，改为 `settings.plugins.tab`（Plugins 设置页的功能标签页） | 注册一张插件设置卡 | 注册 `settings.plugins.tab`（`id: 'dsn-finance'`、`label: 'DSN Finance'`） |
+| 2 | 客户端设置服务由 `settingsScope.bind({namespace})` 变为 `ctx.configForms.get(entryId)` | `inject: ['slots','settingsScope']` | `inject: ['slots','configForms']` + `ctx.configForms.get('dsh-finance')` |
+| 3 | 客户端插槽 `settings.plugin.item` 移除，改为 `settings.plugins.tab`（Plugins 设置页的功能标签页） | 注册一张插件设置卡 | 注册 `settings.plugins.tab`（`id: 'dsh-finance'`、`label: 'DSH Finance'`） |
 | 4 | `JsonValue` 从 `dsh-tools` 迁至 `@deepseek-ai/dsh-util-values` | `import { type JsonValue } from '@deepseek-ai/dsh-tools'` | 改从 `@deepseek-ai/dsh-util-values` 导入（`tools/register.ts`、`mcp/manager.ts`、`history/tools.ts`） |
 | 5 | 客户端 roster 以包名做行 id，`dsh.client.inject` 即组合边 | 仅 inject `…-ui-settings-plugins` | 补齐 `…-ui-settings`（提供 `configForms`）与 `…-ui-sidebar`（foot 座位宿主） |
 | 6 | 本地安装必须是**完整的 dsh 安装**：服务定义包（`dsh-jobs`、`dsh-attachment`、`dsh-session-persistence`…）以实现包的 peer 形式发布 | `.npmrc` 设 `legacy-peer-deps=true`，npm 跳过 peer | `.npmrc` 改为显式 `legacy-peer-deps=false`；否则 profile 条目全部 `failed to import` |
@@ -32,34 +32,34 @@
 **profile 组合**：`dsh --profile web --dump-config`
 
 ```yaml
-# == @deepseek-ai/dsh-base, patched by dsn-finance
+# == @deepseek-ai/dsh-base, patched by dsh-finance
 - id: web
   config:
-    searchProvider: dsn-web-search
+    searchProvider: dsh-web-search
 ...
-# == dsn-finance
-- id: dsn-finance
-  name: dsn-finance
+# == dsh-finance
+- id: dsh-finance
+  name: dsh-finance
 ```
 
-**宿主启动**：`dsh web --host 127.0.0.1 --port 3080` 无启动失败；插件管理器显示 `dsn-finance v0.1.0`，组件 `1 running`。
+**宿主启动**：`dsh web --host 127.0.0.1 --port 3080` 无启动失败；插件管理器显示 `dsh-finance v0.1.0`，组件 `1 running`。
 
 ![插件在插件管理器中 Running](images/plugin-running.png)
 
 **客户端 roster**：首页 `window.__DSH_BOOT__` 含
 
 ```json
-{"id":"dsn-finance","url":"plugins/??dsn-finance/client.js&rev=ed6e51904a70",
+{"id":"dsh-finance","url":"plugins/??dsh-finance/client.js&rev=ed6e51904a70",
  "inject":["@deepseek-ai/dsh-client-ui-settings","@deepseek-ai/dsh-client-ui-settings-plugins","@deepseek-ai/dsh-client-ui-sidebar"]}
 ```
 
-bundle 可取：`GET /plugins/??dsn-finance/client.js&rev=…` → 200 / 467309 B，内容为 `window.__ModuleLoader__.load({id:"dsn-finance",…})`。
+bundle 可取：`GET /plugins/??dsh-finance/client.js&rev=…` → 200 / 467309 B，内容为 `window.__ModuleLoader__.load({id:"dsh-finance",…})`。
 
 **宿主 API**（HTTP 实测，非 mock）：
 
 | 路由 | 结果 |
 | --- | --- |
-| `GET /plugins/dsn-finance/api/state` | `holdings: []`、`watchlist: 600519/000001/110022`、`portfolioPath` |
+| `GET /plugins/dsh-finance/api/state` | `holdings: []`、`watchlist: 600519/000001/110022`、`portfolioPath` |
 | `GET …/api/live` | 5 条指数（上证 3888.37 −1.22%）、行情快照、9 项 capability 健康 |
 | `GET …/api/news` | 25 条市场电报（实时） |
 | `GET …/api/macro` | 5 组序列（CPI 最新 2026年08月 0.8%） |
@@ -76,15 +76,15 @@ bundle 可取：`GET /plugins/??dsn-finance/client.js&rev=…` → 200 / 467309 
 | --- | --- |
 | ![数据源](images/panel-sources.png) | ![接口](images/panel-health.png) |
 
-**设置页适配**：Plugins 设置段出现 `DSN Finance` 标签页。
+**设置页适配**：Plugins 设置段出现 `DSH Finance` 标签页。
 
 ![设置页标签](images/settings-plugins-tab.png)
 
 **偏好写回（volatile 字段闭环）**：点击左下角「金融面板」后，`$DSH_HOME/profiles/web/cordis.patch.yml` 出现
 
 ```yaml
-- id: dsn-finance
-  name: dsn-finance
+- id: dsh-finance
+  name: dsh-finance
   config:
     ...
     panelOpen: true

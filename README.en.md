@@ -1,12 +1,12 @@
-# DSN Finance
+# DSH Finance
 
 > Turn DeepSeek Harness from “look up a quote” into a practical market, portfolio, and research workspace.
 
 [中文版](./README.md) · [MIT License](./package.json)
 
-DSN Finance is a finance plugin for DeepSeek Harness. It brings A-shares, Hong Kong stocks, US stocks, funds, macroeconomic data, and financial news into model tools, while providing a dockable local finance panel. Market data uses public HTTP endpoints directly; holdings and watchlists stay in a local JSON file, making the plugin useful for personal research, portfolio reviews, and multi-agent analysis.
+DSH Finance is a finance plugin for DeepSeek Harness. It brings A-shares, Hong Kong stocks, US stocks, funds, macroeconomic data, and financial news into model tools, while providing a dockable local finance panel. Market data uses public HTTP endpoints directly; holdings and watchlists stay in a local JSON file, making the plugin useful for personal research, portfolio reviews, and multi-agent analysis.
 
-<img width="1331" height="804" alt="DSN Finance panel" src="https://github.com/user-attachments/assets/3fa063b1-22ef-404b-8fb9-1d230b7e66c0" />
+<img width="1331" height="804" alt="DSH Finance panel" src="https://github.com/user-attachments/assets/3fa063b1-22ef-404b-8fb9-1d230b7e66c0" />
 
 ## What you can do
 
@@ -77,7 +77,7 @@ The panel and the model stay in sync in both directions:
 Requires Node.js `^22.19` or `>=24.2` (the dsh bin relies on `import.meta.main`; 24.0/24.1 make the CLI exit silently):
 
 ```bash
-cd dsn-finance-lab
+cd dsh-finance-lab
 npm install
 npm run build
 ```
@@ -108,7 +108,7 @@ Register the current project directory in the `web` profile (`dsh plugin` runs p
 
 ```bash
 npx @deepseek-ai/dsh@0.1.7-rc.2 plugin \
-  --profile web add /absolute/path/to/dsn-finance-lab
+  --profile web add /absolute/path/to/dsh-finance-lab
 npx @deepseek-ai/dsh@0.1.7-rc.2 web
 ```
 

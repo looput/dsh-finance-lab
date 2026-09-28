@@ -7,14 +7,14 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AssetType, IndexQuote, LiveQuote, PortfolioHolding, WatchItem } from '../types.js'
 
-export const name = 'dsn-finance-client'
+export const name = 'dsh-finance-client'
 export const inject = ['slots', 'configForms', 'conversation', 'sessions']
 
 /** 面板宽度：默认放宽到 480，并支持左边缘拖动（360–820），宽度写入 localStorage。 */
-const PANEL_W = 480
+const PANEL_W = 520
 const PANEL_W_MIN = 360
 const PANEL_W_MAX = 820
-const WIDTH_KEY = 'dsn-finance:width'
+const WIDTH_KEY = 'dsh-finance:width'
 
 function readPanelWidth(): number {
   try {
@@ -84,9 +84,9 @@ function ResizeHandle(props: { onPointerDown: (e: ReactPointerEvent) => void; ac
   })
 }
 
-const API = '/plugins/dsn-finance/api'
-const TAB_KEY = 'dsn-finance:tab'
-const NAME_CACHE_KEY = 'dsn-finance:nameByCode'
+const API = '/plugins/dsh-finance/api'
+const TAB_KEY = 'dsh-finance:tab'
+const NAME_CACHE_KEY = 'dsh-finance:nameByCode'
 
 // ---- 可用接口 catalog (cap matches server capability keys for health dots) ----
 interface InterfaceItem { cap: string; label: string; tool: string; source: string }
@@ -118,7 +118,7 @@ const DATA_INTERFACES: Array<{ group: string; items: InterfaceItem[] }> = [
 ]
 
 // ---- reactive config form (panel open/dock prefs only, not market data) ----
-// The Host entry `dsn-finance` owns the plugin config, so the client reads and
+// The Host entry `dsh-finance` owns the plugin config, so the client reads and
 // writes through the settings domain's shared `configForms` service. Only the
 // entry's volatile fields ride the wire, and those are exactly these prefs.
 interface PanelPrefs { panelOpen?: boolean; panelDocked?: boolean }
@@ -128,7 +128,7 @@ interface FinanceScope {
   set(field: string, value: unknown): Promise<boolean>
 }
 /** 面板开关的本地兜底存储：profile 不可写时也能跨刷新保持开关状态。 */
-const LOCAL_PREFS_KEY = 'dsn-finance:panelPrefs'
+const LOCAL_PREFS_KEY = 'dsh-finance:panelPrefs'
 function readLocalPrefs(): PanelPrefs {
   try {
     const raw = localStorage.getItem(LOCAL_PREFS_KEY)
@@ -225,6 +225,8 @@ const S = {
   input: {
     border: `1px solid ${R.line}`, background: R.surface, color: V('--dsw-alias-label-primary', '#111'),
     borderRadius: R.sm, padding: '0 9px', height: 30, fontSize: 12, minWidth: 0,
+    // 关键：input 默认 content-box，`width:100%` + padding + border 会溢出容器（实测 +20px）。
+    boxSizing: 'border-box',
   } as CSSProperties,
   chip: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '2px 9px', borderRadius: 999, background: V('--dsw-alias-bg-module-platform', '#f2f3f5'), color: V('--dsw-alias-label-secondary', '#555'), fontSize: 12 } as CSSProperties,
   tag: { fontSize: 10, padding: '1px 6px', borderRadius: 5, background: V('--dsw-alias-bg-module-platform', '#eef0f3'), color: V('--dsw-alias-label-tertiary', '#888'), lineHeight: 1.6 } as CSSProperties,
@@ -240,7 +242,7 @@ const S = {
     overflow: 'hidden',
   } as CSSProperties,
   groupHead: {
-    display: 'flex', alignItems: 'center', gap: 6, padding: '9px 11px',
+    display: 'flex', alignItems: 'center', gap: 6, padding: '9px 11px', minWidth: 0,
     borderBottom: `1px solid ${R.line}`, background: V('--dsw-alias-bg-module-platform', '#fafbfc'),
   } as CSSProperties,
   analysisBackdrop: { position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(3px)', zIndex: 2147483100 } as CSSProperties,
@@ -337,13 +339,13 @@ function useAgo(at?: string, intervalMs = 10_000): string {
 }
 
 /** 跌涨幅药丸：带底色的涨跌块，比裸数字更好扫。 */
-function PctPill(props: { pct?: number; compact?: boolean }) {
+function PctPill(props: { pct?: number; compact?: boolean; block?: boolean }) {
   const up = (props.pct ?? 0) >= 0
   const bg = typeof props.pct === 'number' ? (up ? `${UP}1f` : `${DOWN}1f`) : 'transparent'
   return h('span', {
     style: {
-      display: 'inline-block',
-      minWidth: props.compact ? 58 : 66,
+      display: props.block ? 'block' : 'inline-block',
+      minWidth: props.block ? 0 : (props.compact ? 52 : 66),
       textAlign: 'right',
       padding: props.compact ? '1px 6px' : '2px 8px',
       borderRadius: 999,
@@ -440,8 +442,12 @@ function Sparkline(props: { data?: number[]; color: string; w?: number }) {
 }
 
 /** 一张行情卡：名称/代码/市场 → 迷你走势 → 价格 + 涨跌药丸 + 数据来源。 */
+/** 窄面板下的紧凑阈值：小于它就把行情行拆成两行，避免固定列宽把行撑破。 */
+const TIGHT_W = 460
+
 function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => void; onClick?: () => void }) {
   const q = props.q
+  const tight = usePanelWidth() < TIGHT_W
   const pct = q.changePercent
   const sparkColor = q.spark && q.spark.length >= 2 ? (q.spark[q.spark.length - 1]! >= q.spark[0]! ? UP : DOWN) : colorOf(pct)
   const digits = q.type === 'fund' ? 4 : 2
@@ -462,6 +468,7 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
       alignItems: 'center',
       padding: '8px 10px',
       borderRadius: 8,
+      flexWrap: 'wrap',
       borderLeft: `3px solid ${hasPrice ? colorOf(pct) : V('--dsw-alias-border-l2', '#e5e5e5')}`,
       cursor: props.onClick ? 'pointer' : 'default',
     },
@@ -471,12 +478,19 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
       props.loading && !q.name
         ? h(Skeleton, { w: '70%', h: 12 })
         : h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, q.name || q.code),
-      h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center', fontSize: 11 } },
+      // minWidth:0 + wrap：否则「市场标签 + 代码 + 来源」的 min-content 会把窄面板撑破。
+      h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center', fontSize: 11, minWidth: 0, flexWrap: 'wrap', overflow: 'hidden' } },
         h('span', { style: S.tag }, q.market || (q.type === 'fund' ? '基金' : '股票')), q.code,
         src ? h('span', { style: { color: src.color, fontSize: 10, border: `1px solid ${src.color}55`, borderRadius: 4, padding: '0 4px' } }, src.label) : null)),
-    h(Sparkline, { data: q.spark, color: sparkColor, w: 64 }),
-    h('div', { style: { width: 64, textAlign: 'right' } }, priceNode),
+    // 窄面板：迷你 K 线挪到第二行与价格同行，主行只留名称 + 涨跌幅 + 移除。
+    tight ? null : h(Sparkline, { data: q.spark, color: sparkColor, w: 64 }),
+    tight ? null : h('div', { style: { width: 64, textAlign: 'right' } }, priceNode),
     h(PctPill, { pct: hasPrice ? pct : undefined, compact: true }),
+    // 窄屏第二行：现价 + 迷你 K 线整行铺开，主行只留名称 / 涨跌幅 / 移除。
+    tight ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', minWidth: 0 } },
+      h('span', { style: { fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums' } }, hasPrice ? fmt(q.price, digits) : '—'),
+      h(Sparkline, { data: q.spark, color: sparkColor, w: 56 }),
+      h('span', { style: { ...S.muted, fontSize: 10, marginLeft: 'auto' } }, q.market || '')) : null,
     props.onRemove ? h('button', {
       style: { ...S.btn, padding: '2px 6px' },
       title: '移除',
@@ -493,14 +507,16 @@ function IndexCard(props: { ix: IndexQuote; spark?: number[] }) {
       ...S.card,
       gap: 2,
       padding: '8px 10px',
-      minWidth: 104,
+      // grid 项默认 min-width:auto，会把卡片撑出列宽（实测溢出 12px）；这里显式归零。
+      minWidth: 0,
+      overflow: 'hidden',
       borderTop: `2px solid ${colorOf(ix.changePercent)}`,
     },
   },
     h('div', { style: { fontSize: 11, color: V('--dsw-alias-label-secondary', '#666'), whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, ix.name),
-    h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 6 } },
-      h('span', { style: { fontSize: 16, fontWeight: 700, fontVariantNumeric: 'tabular-nums' } }, fmt(ix.price)),
-      h(PctPill, { pct: ix.changePercent, compact: true })))
+    // 竖排：价格与涨跌幅不再争同一行的宽度（实测原来会把卡片撑出 30px 横向溢出）。
+    h('div', { style: { fontSize: 16, fontWeight: 700, fontVariantNumeric: 'tabular-nums', lineHeight: 1.25 } }, fmt(ix.price)),
+    h('div', { style: { display: 'flex' } }, h(PctPill, { pct: ix.changePercent, compact: true, block: true })))
 }
 
 // ---- data hooks over the plugin HTTP API (React state; never written to config) ----
@@ -834,6 +850,8 @@ function QuotesView(props: {
   const [wCode, setWCode] = useState('')
   const [wType, setWType] = useState<AssetType>('stock')
   const ago = useAgo(data.at)
+  // 窄面板：添加区换行排布（输入框/类型/按钮一行，搜索框独占一行），否则会横向溢出。
+  const tight = usePanelWidth() < TIGHT_W
   const watchQuotes: LiveQuote[] = data.watchlist.map((w) => quoteBy.get(keyOf(w.code, w.type)) ?? { code: w.code, type: w.type, name: w.name })
   const perf = data.perf
   function addWatch() {
@@ -846,7 +864,7 @@ function QuotesView(props: {
       h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, extra)),
     h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 6 } },
       children,
-      footer ? h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 2 } }, footer) : null))
+      footer ? h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 2, flexWrap: 'wrap' } }, footer) : null))
 
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
     group('市场总览',
@@ -857,7 +875,7 @@ function QuotesView(props: {
         ? (loading
           ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
           : h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无指数数据，点右上角刷新重试' }))
-        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))', gap: 6 } },
+        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))', gap: 6 } },
           data.indices.map((ix) => h(IndexCard, { key: ix.code, ix })))),
     group('自选 · 行情走势', `${watchQuotes.length} 只`,
       watchQuotes.length === 0
@@ -876,7 +894,9 @@ function QuotesView(props: {
         h('input', { style: { ...S.input, flex: 1 }, placeholder: '代码，如 600519 / 00700 / AAPL / 110022', value: wCode, onChange: (e: any) => setWCode(e.target.value), onKeyDown: onEnterCommit(addWatch) }),
         h(SegToggle, { value: wType, onChange: setWType }),
         h('button', { style: S.btnPrimary, onClick: addWatch }, '添加'),
-        h(SearchAdd, { onAdd: (code, type) => mutate('addWatch', { code, type }) }),
+        tight
+          ? h('div', { style: { flex: '1 1 100%', minWidth: 0 } }, h(SearchAdd, { onAdd: (code, type) => mutate('addWatch', { code, type }) }))
+          : h(SearchAdd, { onAdd: (code, type) => mutate('addWatch', { code, type }) }),
       ]),
     h('div', { style: { ...S.muted, fontSize: 11, display: 'flex', gap: 8, flexWrap: 'wrap', padding: '0 2px' } },
       h('span', null, '数据优先 WeStock（本地 CLI，批量取）；不通时自动回落东财/腾讯。'),
@@ -1051,7 +1071,7 @@ function MarketView(props: { active: boolean }) {
       d.indices.length === 0
         ? (loading ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
           : h('div', { style: S.muted }, '暂无指数'))
-        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))', gap: 6 } },
+        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))', gap: 6 } },
           d.indices.map((ix) => h(IndexCard, { key: ix.code, ix })))),
     h('div', { style: S.section }, h('div', { style: S.title }, h('span', { style: { color: UP } }, '● '), '领涨板块'),
       d.gainers.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无') : d.gainers.map(sectorRow)),
@@ -1304,9 +1324,16 @@ function SourcesView() {
       style: { ...S.btn, padding: '2px 8px', display: 'inline-flex', alignItems: 'center', gap: 5, background: on ? BRAND : S.btn.background, color: on ? '#fff' : S.btn.color },
     }, p.ok === false ? h('span', { style: { width: 6, height: 6, borderRadius: 999, background: UP } }) : (p.ok ? h('span', { style: { width: 6, height: 6, borderRadius: 999, background: DOWN } }) : null), p.source)
   }
-  const capRow = (c: CapCatalog) => h('div', { key: c.capability, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' } },
-    h('span', { style: { width: 76, flex: '0 0 auto', fontWeight: 500 } }, CAP_LABEL[c.capability] ?? c.capability),
-    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 } }, c.providers.map((p) => chip(c.capability, p))))
+  // 竖排：能力名独占一行（id 如 index_constituent 很长），来源按钮在下一行自由换行，
+  // 不再靠固定列宽硬挤——之前会撑破面板 10+ 处。
+  const capRow = (c: CapCatalog) => h('div', { key: c.capability, style: { display: 'flex', flexDirection: 'column', gap: 5, padding: '7px 0', borderTop: `1px solid ${R.line}` } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
+      h('span', {
+        style: { fontWeight: 500, fontSize: 11.5, minWidth: 0, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+        title: c.capability,
+      }, CAP_LABEL[c.capability] ?? c.capability),
+      h('span', { style: { ...S.muted, fontSize: 10, flex: '0 0 auto' } }, `${c.providers.length} 源`)),
+    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } }, c.providers.map((p) => chip(c.capability, p))))
   return h('div', { style: S.section },
     h('div', { style: S.title }, '数据源选择',
       h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, disabled: busy, onClick: () => void save(sel) }, busy ? '…' : '保存'),
@@ -1703,7 +1730,7 @@ const RS = {
   label: { fontSize: 11, color: V('--dsw-alias-label-tertiary', '#999'), letterSpacing: 0.4 } as CSSProperties,
   title: { fontSize: 19, fontWeight: 600, lineHeight: 1.35 } as CSSProperties,
   editor: {
-    width: '100%', flex: 1, minHeight: 260, resize: 'none', fontFamily: MONO, fontSize: 13, lineHeight: 1.65,
+    width: '100%', flex: 1, minHeight: 260, resize: 'none', fontFamily: MONO, fontSize: 13, lineHeight: 1.65, boxSizing: 'border-box',
     border: `1px solid ${V('--dsw-alias-border-l2', '#ddd')}`, borderRadius: 8, padding: 12,
     background: V('--dsw-alias-bg-layer-3', '#fff'), color: V('--dsw-alias-label-primary', '#111'),
   } as CSSProperties,
@@ -1895,7 +1922,7 @@ function ResearchView() {
   }
 
   return h('div', { style: S.section },
-    h('div', { style: S.title }, '投研资料库',
+    h('div', { style: { ...S.title, flexWrap: 'wrap', rowGap: 2 } }, '投研资料库',
       h('span', { style: { ...S.muted, marginLeft: 'auto' } }, `共 ${stats.total} 条 · 待整理 ${stats.byStatus.inbox ?? 0} · 已归档 ${stats.byStatus.archived ?? 0}`)),
     // 本地文件联动：vault 目录 + 同步状态 + 手动同步
     vaultDir ? h('div', { style: { ...S.card, gap: 6 } },
@@ -2249,7 +2276,7 @@ function PanelBody(props: {
     h('div', { style: S.header },
       h('span', { style: S.brandBadge }, h(IconChart, { size: 15 })),
       h('div', { style: { flex: 1, minWidth: 0 } },
-        h('div', { style: { fontWeight: 700, fontSize: 13.5, letterSpacing: 0.2 } }, 'DSN 金融面板'),
+        h('div', { style: { fontWeight: 700, fontSize: 13.5, letterSpacing: 0.2 } }, 'DSH 金融面板'),
         // 注意：useAgo 必须在组件顶层无条件调用，写进 `data.at ? ... : ...`
         // 会让钩子数随数据变化，直接触发 React #310 崩溃。
         h('div', { style: { ...S.muted, fontSize: 10.5 } },
@@ -2427,7 +2454,7 @@ function FootAction(props: { scope: FinanceScope; wide?: boolean }) {
 
 function SettingsCard() {
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 8, fontSize: 13 } },
-    h('h3', { style: { margin: 0 } }, 'DSN Finance'),
+    h('h3', { style: { margin: 0 } }, 'DSH Finance'),
     h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '左下角「金融面板」提供行情 / 市场 / 持仓 / 基金 / 宏观 / 快讯 / 接口七个标签页；点击持仓或自选可生成 AI 解读。'),
     h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '持仓与自选保存在本地 JSON 文件中；可上传持仓截图让 Agent 解析并写入，面板会实时刷新。'))
 }
@@ -2447,24 +2474,24 @@ type ClientCtx = {
 export function apply(ctx: ClientCtx): void {
   // 面板宽度在挂载前初始化，保证首帧就是用户上次的宽度（不会先窄后宽跳一下）。
   try { initPanelWidth() } catch { /* ignore */ }
-  const scope = ctx.configForms.get('dsn-finance')
+  const scope = ctx.configForms.get('dsh-finance')
   // 面板 → 对话的桥：记住客户端 ctx，发提问时按当前会话作用域投递；
   // 读服务可能抛错（宿主未提供），必须兜住——否则整个面板都加载不了。
   try {
     if (ctx.conversation) panelCtx = ctx
-    ;(window as unknown as Record<string, unknown>).__DSN_FINANCE_CHAT__ = {
+    ;(window as unknown as Record<string, unknown>).__DSH_FINANCE_CHAT__ = {
       ok: !!ctx.conversation && !!ctx.sessions,
       error: () => chatDeliveryError,
     }
   } catch (err) {
-    ;(window as unknown as Record<string, unknown>).__DSN_FINANCE_CHAT__ = { ok: false, error: err instanceof Error ? err.message : String(err) }
+    ;(window as unknown as Record<string, unknown>).__DSH_FINANCE_CHAT__ = { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
   // The Plugins settings page hosts feature-owned tabs; the plugin's own config
   // form is generated from its Config schema, so this tab stays informational.
   ctx.slots.inject('settings.plugins.tab', function* () {
-    yield ctx.slots.register({ name: 'settings.plugins.tab', id: 'dsn-finance', order: 20, label: 'DSN Finance' }, () => h(SettingsCard, null))
+    yield ctx.slots.register({ name: 'settings.plugins.tab', id: 'dsh-finance', order: 20, label: 'DSH Finance' }, () => h(SettingsCard, null))
   })
   ctx.slots.inject('sidebar.footer.action', function* () {
-    yield ctx.slots.register({ name: 'sidebar.footer.action', id: 'dsn-finance' }, (p: { wide?: boolean }) => h(FootAction, { ...p, scope }))
+    yield ctx.slots.register({ name: 'sidebar.footer.action', id: 'dsh-finance' }, (p: { wide?: boolean }) => h(FootAction, { ...p, scope }))
   })
 }

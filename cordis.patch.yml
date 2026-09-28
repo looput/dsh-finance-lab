@@ -1,6 +1,6 @@
 - insert:
-    - id: dsn-finance
-      name: dsn-finance
+    - id: dsh-finance
+      name: dsh-finance
       config:
         cacheTtlSec: 300
         requestGapMs: 3000
@@ -11,4 +11,4 @@
 # Route the web search seam through this plugin's meta-search provider.
 - id: web
   config:
-    searchProvider: dsn-web-search
+    searchProvider: dsh-web-search

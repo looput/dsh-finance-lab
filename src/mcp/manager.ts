@@ -77,7 +77,7 @@ export function registerMcpSources(ctx: Context, sources: McpSource[], dataDir: 
     } catch (err) {
       base.state = 'error'
       base.detail = err instanceof Error ? err.message : String(err)
-      ctx.logger?.warn?.(`dsn-finance mcp source ${source.name}: ${base.detail}`)
+      ctx.logger?.warn?.(`dsh-finance mcp source ${source.name}: ${base.detail}`)
     }
   }
 

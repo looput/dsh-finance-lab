@@ -169,7 +169,7 @@ export function apply(ctx: Context, config: Config) {
   ctx.web.registerSearchProvider(createWebSearchProvider((q, signal) => finance.webSearch(q, signal)))
 
   ctx.systemPrompt.section({
-    name: 'dsn-finance:portfolio',
+    name: 'dsh-finance:portfolio',
     order: 121,
     text: [
       '## Finance portfolio file',
@@ -186,7 +186,7 @@ export function apply(ctx: Context, config: Config) {
   })
 
   ctx.systemPrompt.section({
-    name: 'dsn-finance:research',
+    name: 'dsh-finance:research',
     order: 122,
     text: [
       '## 投研资料库 (Research Vault)',
@@ -207,7 +207,7 @@ export function apply(ctx: Context, config: Config) {
 
   // 每轮动态注入「资料库现状」：让对话侧始终知道已沉淀了什么，避免重复收集、能按 id 继续维护。
   ctx.systemPrompt.section({
-    name: 'dsn-finance:research-state',
+    name: 'dsh-finance:research-state',
     order: 122.5,
     text: () => {
       if (!vault.isLoaded()) return ''
@@ -242,7 +242,7 @@ export function apply(ctx: Context, config: Config) {
   })
 
   ctx.systemPrompt.section({
-    name: 'dsn-finance:westock',
+    name: 'dsh-finance:westock',
     order: 123,
     text: [
       `## WeStock 数据源（腾讯自选股 CLI，免鉴权）— ${WESTOCK_SPECS.length} 个能力`,

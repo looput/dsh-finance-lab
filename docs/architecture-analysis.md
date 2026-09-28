@@ -1,4 +1,4 @@
-# DSN Finance 架构分析与金融方向优化建议
+# DSH Finance 架构分析与金融方向优化建议
 
 > 分析基线：`master @ 4bf3ea5`（2026-08-21）。代码规模：`src/` 约 4,955 行 TypeScript + React，`skills/` 13 个 SKILL 包（756KB），`scripts/` 8 个脚本。
 
@@ -6,7 +6,7 @@
 
 ## 一、项目定位
 
-DSN Finance 是 **DeepSeek Harness（DSH）的金融插件**，基于 cordis 插件框架，把 A 股 / 港股 / 美股 / 基金 / 宏观 / 新闻数据接入模型工具链，并提供一个可停靠的本地 React 金融面板。核心主张：行情直连公开 HTTP 接口（不依赖 akshare/Python 运行时）、持仓本地 JSON 化、研究流程 Skill 化。
+DSH Finance 是 **DeepSeek Harness（DSH）的金融插件**，基于 cordis 插件框架，把 A 股 / 港股 / 美股 / 基金 / 宏观 / 新闻数据接入模型工具链，并提供一个可停靠的本地 React 金融面板。核心主张：行情直连公开 HTTP 接口（不依赖 akshare/Python 运行时）、持仓本地 JSON 化、研究流程 Skill 化。
 
 ## 二、架构分层
 
@@ -17,7 +17,7 @@ DSN Finance 是 **DeepSeek Harness（DSH）的金融插件**，基于 cordis 插
 │  通过 slots 注入侧边栏；60s 轮询 /live                        │
 ├─────────────────────────────────────────────────────────────┤
 │ HTTP API src/server-routes.ts                                │
-│  /plugins/dsn-finance/api/*（live/market/macro/news/…）       │
+│  /plugins/dsh-finance/api/*（live/market/macro/news/…）       │
 │  POST /analysis → agent.followup() 注入解读任务               │
 ├─────────────────────────────────────────────────────────────┤
 │ 模型工具 src/tools/register.ts + src/history/tools.ts         │

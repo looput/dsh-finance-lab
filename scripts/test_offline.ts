@@ -55,7 +55,7 @@ function eq<T>(name: string, actual: T, expected: T): void {
 }
 
 async function main() {
-  const root = await mkdtemp(path.join(tmpdir(), 'dsn-finance-offline-'))
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-finance-offline-'))
   try {
     // ---- 1. Markdown table parsing ----
     console.log('\n== markdown table parsing ==')
@@ -519,7 +519,7 @@ esac
     logger.warn('kept warning', { scope: 'x' })
     logger.error('kept error')
     await new Promise((r) => setTimeout(r, 60))
-    const logFile = path.join(logDir, 'logs', 'dsn-finance.jsonl')
+    const logFile = path.join(logDir, 'logs', 'dsh-finance.jsonl')
     let logRaw = ''
     try { logRaw = await readFile(logFile, 'utf8') } catch { /* */ }
     const lines = logRaw.split('\n').filter(Boolean)

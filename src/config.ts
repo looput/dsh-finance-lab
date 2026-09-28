@@ -58,7 +58,7 @@ export interface Config {
   preferWestock: boolean
   /** 缓存过期后仍可服务的「陈旧窗口」（秒），用于先出画面再后台刷新。 */
   staleTtlSec: number
-  /** 日志级别：debug/info/warn/error。日志写入 `<dataDir>/logs/dsn-finance.jsonl`。 */
+  /** 日志级别：debug/info/warn/error。日志写入 `<dataDir>/logs/dsh-finance.jsonl`。 */
   logLevel: string
   /** WeStock CLI 数据源。 */
   westock: WestockConfig
@@ -137,4 +137,4 @@ export const Config = Schema.object({
   panelDocked: Schema.boolean().volatile(),
 })
 
-export const name = 'dsn-finance'
+export const name = 'dsh-finance'

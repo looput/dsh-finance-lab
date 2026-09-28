@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 const OUT = 'lib/client/wrapped-bundle.js'
-const ID = 'dsn-finance'
+const ID = 'dsh-finance'
 
 const result = await build({
   entryPoints: ['src/client/index.tsx'],

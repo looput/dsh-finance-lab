@@ -149,7 +149,7 @@ export class SkillManager {
 }
 
 class GatedFinanceSkillProvider implements SkillProvider {
-  readonly name = 'dsn-finance'
+  readonly name = 'dsh-finance'
   constructor(
     private readonly inner: FileSystemSkillProvider,
     private readonly allowed: (name: string) => boolean,
@@ -173,7 +173,7 @@ export function registerSkills(ctx: Context, packageRoot: string, dataDir: strin
   ctx.skills.registerProvider((control) => {
     mgr.setInvalidate(control.invalidate)
     inner = new FileSystemSkillProvider(ctx, control, {
-      providerName: 'dsn-finance',
+      providerName: 'dsh-finance',
       includeDefaultRoots: false,
       bundledSkillDir: path.join(packageRoot, 'skills'),
     })
@@ -181,7 +181,7 @@ export function registerSkills(ctx: Context, packageRoot: string, dataDir: strin
   })
   ctx.effect(function* () {
     yield async () => { await inner.dispose() }
-  }, 'dsn-finance skill watcher')
+  }, 'dsh-finance skill watcher')
   void mgr.init()
   return mgr
 }

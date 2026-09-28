@@ -145,7 +145,7 @@ function kline(r: { rows?: unknown }): CaseResult {
 }
 
 async function main() {
-  const root = await mkdtemp(path.join(tmpdir(), 'dsn-finance-westock-'))
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-finance-westock-'))
   try {
     configureWestock({ enabled: true, binPath: process.env.WESTOCK_BIN ?? '', timeoutMs: 25_000, autoUpgrade: false })
     const registry = new ProviderRegistry({

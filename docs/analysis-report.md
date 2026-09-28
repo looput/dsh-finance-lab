@@ -1,6 +1,6 @@
-# dsn-finance 优化分析报告（金融 + Agent 方向）
+# dsh-finance 优化分析报告（金融 + Agent 方向）
 
-目标：把 `dsn-finance` 从「能拉行情的插件」升级为**服务个人投资者的投研 / 投顾超级应用**——
+目标：把 `dsh-finance` 从「能拉行情的插件」升级为**服务个人投资者的投研 / 投顾超级应用**——
 数据接得进来、过程留得下来、结论沉淀得住、且能被 Agent 持续调用与迭代。
 
 ---
@@ -23,7 +23,7 @@
 
 ### P0 — 先让系统可信（本次已完成）
 
-1. **日志先行**：`src/log.ts` 结构化 JSONL 日志（`<dataDir>/logs/dsn-finance.jsonl`），级别可配，附 scope/字段/堆栈；
+1. **日志先行**：`src/log.ts` 结构化 JSONL 日志（`<dataDir>/logs/dsh-finance.jsonl`），级别可配，附 scope/字段/堆栈；
    所有原 `catch {}` 改为「打日志 + 明确错误」，路由 500、provider 失败、状态文件损坏、Yingmi CLI 缺失全部留痕。
    —— 这是后续一切优化的前提：没有日志就无法判断"数据源挂了"还是"代码错了"。
 2. **锁 Node 版本**：`.nvmrc`(22.22.2) + `engines` + `dev_web.sh` 自动挑选支持 `import.meta.main` 的 node，挑不到就**报错退出**而不是静默。

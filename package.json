@@ -1,5 +1,5 @@
 {
-  "name": "dsn-finance",
+  "name": "dsh-finance",
   "version": "0.1.0",
   "description": "DeepSeek Harness finance plugin: direct market HTTP APIs, portfolio settings, model tools",
   "type": "module",

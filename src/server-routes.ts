@@ -21,7 +21,7 @@ const SSE_HEARTBEAT_MS = 20_000
 
 const HISTORY_KINDS: SymbolKind[] = ['a', 'hk', 'us', 'fund']
 
-export const API_PREFIX = '/plugins/dsn-finance/api'
+export const API_PREFIX = '/plugins/dsh-finance/api'
 
 interface WebServerLike {
   register(route: {
@@ -154,7 +154,7 @@ function analysisPrompt(
       '补充 get_stock_news、get_macro_china、get_market_overview 和 get_sector_board，说明消息、宏观和行业环境。',
     ]
   return [
-    `用户刚刚在 DSN Finance 面板主动点击了${type === 'fund' ? '基金' : '股票'} ${code}，请求生成一次完整中文解读。`,
+    `用户刚刚在 DSH Finance 面板主动点击了${type === 'fund' ? '基金' : '股票'} ${code}，请求生成一次完整中文解读。`,
     position,
     ...dataPlan,
     advisorMemory(vault, code),

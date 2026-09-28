@@ -1,4 +1,4 @@
-# dsn-finance 自测报告（WeStock 接入 + 投研资料库）
+# dsh-finance 自测报告（WeStock 接入 + 投研资料库）
 
 测试日期：2026-09-27 · 环境：macOS(darwin arm64) · Node 22.22.2（`.nvmrc` 锁定）
 隔离：每个应用一个 `$DSH_HOME`（默认 `<repo>/.dsh-home`）、端口默认 `0`（OS 分配）、
@@ -118,8 +118,8 @@ WESTOCK_BIN=$PWD/.dsh-home/bin/westock npm run test:avail
 
 ```
 node: …/22.22.2-3/bin/node (v22.22.2)  ·  DSH_HOME: <repo>/.dsh-home
-overlay: <repo>/.dsh-home/dsn-finance.overlay.yml  ·  westock: <repo>/.dsh-home/bin/westock
-2026-… [dsn-finance] WARN yingmi remote-skill list failed { command: 'yingmi-skill-cli', error: 'spawn ENOENT' }
+overlay: <repo>/.dsh-home/dsh-finance.overlay.yml  ·  westock: <repo>/.dsh-home/bin/westock
+2026-… [dsh-finance] WARN yingmi remote-skill list failed { command: 'yingmi-skill-cli', error: 'spawn ENOENT' }
 dsh web: http://127.0.0.1:49402/?token=…
 ```
 
@@ -211,11 +211,11 @@ HTTP 验证（均带 Bearer token）：
 ## 4. 面板打不开的排查与修复（真实浏览器验证）
 
 现象：侧边栏「金融面板」按钮可见、点击后按钮变 active，但面板内容没有任何渲染，
-服务端也无 `/plugins/dsn-finance/api/*` 请求。
+服务端也无 `/plugins/dsh-finance/api/*` 请求。
 
 用 Playwright 逐步定位（页面内 DOM / 网络 / 控制台）：
 
-1. `GET /plugins/??dsn-finance/client.js&rev=…` → 200（486KB），bundle 正常下发；
+1. `GET /plugins/??dsh-finance/client.js&rev=…` → 200（486KB），bundle 正常下发；
 2. 点击后 `document.body.children` 仍只有 `script, script, #root`，没有 portal 容器 → 组件未挂载；
 3. 按钮内联样式 `background: transparent` → `open` 仍为 `false`；
 4. profile 用户层 `profiles/web/cordis.patch.yml` 中没有任何 `panelOpen` 写入。
@@ -225,7 +225,7 @@ HTTP 验证（均带 Bearer token）：
 
 修复：
 
-* 开关状态改为「本地 state 优先 + localStorage（`dsn-finance:panelPrefs`）兜底」，
+* 开关状态改为「本地 state 优先 + localStorage（`dsh-finance:panelPrefs`）兜底」，
   profile 可写时仍写回 profile；不可写时顶部提示"开关已存到浏览器本地"。
 * `scripts/dev_web.sh` 生成的 overlay 默认 `panelDocked: false`（浮层抽屉），
   避免停靠页依赖宿主 dock 容器、未选工作区时不渲染。
@@ -283,3 +283,16 @@ npm run test:westock                 # WeStock 可用性（真实网络，15 条
 WESTOCK_BIN=$PWD/.dsh-home/bin/westock npm run test:avail   # 全量数据源 + 资料库收集
 ./scripts/dev_web.sh                 # 端到端启动（独立 home / 独立端口 / profile 层配置）
 ```
+
+## 7. 品牌更名与布局优化（本轮）
+
+- **更名**：插件 id / 包名 / API 前缀 / 设置页标签 / 面板标题统一 `dsn-*` → `dsh-*`
+  （`dsn-finance` → `dsh-finance`，`/plugins/dsh-finance/api`，面板显示「DSH 金融面板」）。
+  CSS 类名（`dsn-row` / `dsn-card` / `dsn-tabs` / `dsn-pulse`）保持原名，避免样式失效。
+- **布局**：默认宽度 480 → 520；实测并修掉 4 类横向溢出：
+  1. 指数卡「价格 + 涨跌幅」同行挤压（改竖排，卡片 min-width 归零）；
+  2. 数据源页 capability id（如 `index_constituent`）撑破固定列宽（改竖排 + 省略号）；
+  3. input 默认 `content-box`，`width:100%` + padding + border 溢出 20px（改 `border-box`）；
+  4. 窄面板（360）行情行与添加区挤破 → 宽度 <460 时自动切换为两行布局。
+- 三档宽度（360 / 520 / 820）实测横向溢出均为 0。
+

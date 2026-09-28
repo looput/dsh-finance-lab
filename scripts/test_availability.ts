@@ -130,7 +130,7 @@ async function main() {
   console.log(`\n[avail] ${ok}/${cases.length} queries available`)
 
   // ---- 投研资料库：真实收集（网络）----
-  const vaultRoot = await mkdtemp(path.join(tmpdir(), 'dsn-finance-vault-'))
+  const vaultRoot = await mkdtemp(path.join(tmpdir(), 'dsh-finance-vault-'))
   try {
     const vault = new ResearchVault(vaultRoot)
     await vault.load()

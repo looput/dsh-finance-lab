@@ -11,7 +11,7 @@ export interface WebSearchProviderLike {
   }>
 }
 
-export const WEB_SEARCH_PROVIDER_ID = 'dsn-web-search'
+export const WEB_SEARCH_PROVIDER_ID = 'dsh-web-search'
 
 /**
  * Free web search for the ctx.web seam (replaces key-gated DeepSeek provider).
