@@ -3,7 +3,8 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
 import type { McpSource } from '../config.js'
 
@@ -40,8 +41,8 @@ async function resolveToken(source: McpSource, secretsPath: string): Promise<str
 }
 
 /** Connect enabled sources, bridge their tools onto ctx.tools, and support hot reload. */
-export function registerMcpSources(ctx: Context, sources: McpSource[], packageRoot: string): McpManager {
-  const secretsPath = path.join(packageRoot, 'data/mcp-secrets.json')
+export function registerMcpSources(ctx: Context, sources: McpSource[], dataDir: string): McpManager {
+  const secretsPath = path.join(dataDir, 'mcp-secrets.json')
   const statuses = new Map<string, SourceStatus>()
   let handles: Disposable[] = []
 

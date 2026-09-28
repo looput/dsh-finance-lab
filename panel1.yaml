@@ -1,0 +1,57 @@
+- generic [ref=e4]:
+  - generic [ref=e7]:
+    - generic [ref=e8]:
+      - button "新建会话" [ref=e9] [cursor=pointer]
+      - button "收起侧边栏" [ref=e38] [cursor=pointer]
+    - button "新建会话" [ref=e41] [cursor=pointer]:
+      - generic [ref=e42]: 新会话
+      - generic:
+        - generic:
+          - generic: ⌥
+          - generic: ⌘
+          - generic: "N"
+    - navigation "全局面板" [ref=e47]:
+      - button "插件" [ref=e48] [cursor=pointer]
+    - generic [ref=e59]:
+      - generic [ref=e60]:
+        - generic [ref=e61]: 工作区
+        - generic [ref=e63]:
+          - button "搜索会话" [ref=e64] [cursor=pointer]
+          - textbox "搜索会话名称"
+        - generic [ref=e68]:
+          - button "视图选项" [ref=e70] [cursor=pointer]
+          - button "添加工作区" [ref=e74] [cursor=pointer]
+      - tree "会话" [ref=e79]:
+        - generic [ref=e80]:
+          - treeitem "默认工作区" [expanded] [ref=e82] [cursor=pointer]
+          - treeitem "新会话" [selected] [ref=e148] [cursor=pointer]
+          - treeitem "今日行情分析 7分钟" [ref=e152] [cursor=pointer]:
+            - generic [ref=e154]: 今日行情分析
+            - generic [ref=e155]: 7分钟
+    - generic [ref=e88]:
+      - button "金融面板" [active] [ref=e92] [cursor=pointer]
+      - button "设置" [ref=e100] [cursor=pointer]
+  - generic [ref=e109]:
+    - banner [ref=e157]:
+      - button "打开右侧边栏" [ref=e162] [cursor=pointer]
+    - generic [ref=e115]:
+      - generic [ref=e123]:
+        - generic [ref=e124]: 探索未至之境
+        - generic [ref=e125]: 预览版
+      - generic [ref=e126]:
+        - button "选择工作区" [ref=e127] [cursor=pointer]:
+          - generic [ref=e130]: 默认工作区
+        - button "标准模式" [ref=e171] [cursor=pointer]
+      - generic [ref=e135]:
+        - generic [ref=e137]:
+          - textbox "描述你想要构建的内容, / 调用指令, @ 文件或对话" [ref=e180]
+          - generic: 描述你想要构建的内容, / 调用指令, @ 文件或对话
+        - generic [ref=e139]:
+          - generic [ref=e140]:
+            - button "添加文件或调用指令" [ref=e181] [cursor=pointer]
+            - button "访问模式，当前：工作区内修改" [ref=e186] [cursor=pointer]:
+              - generic [ref=e192]: 工作区内修改
+          - generic [ref=e141]:
+            - button "选择模型，当前 Qwen3.6-35B-A3B" [ref=e199] [cursor=pointer]:
+              - generic [ref=e200]: Qwen3.6-35B-A3B
+            - button "发送消息" [disabled] [ref=e203]

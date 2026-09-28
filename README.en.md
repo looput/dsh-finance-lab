@@ -74,13 +74,15 @@ The panel and the model stay in sync in both directions:
 
 ### 1. Install and build
 
-Requires Node.js `>=20`:
+Requires Node.js `^22.19` or `>=24.2` (the dsh bin relies on `import.meta.main`; 24.0/24.1 make the CLI exit silently):
 
 ```bash
 cd dsn-finance-lab
 npm install
 npm run build
 ```
+
+The install must resolve peer dependencies: dsh declares its Service Definition packages (`dsh-jobs`, `dsh-attachment`, `dsh-session-persistence`, …) as peers of their implementations. The checked-in `.npmrc` sets `legacy-peer-deps=false`; with legacy behaviour the local tree is not a complete dsh installation and every profile row fails to import.
 
 ### 2. Probe public data sources first
 
@@ -102,13 +104,15 @@ The report is written to `data/probe-report.json` by default. If all public prov
 
 ### 3. Connect to DeepSeek Harness
 
-Register the current project directory in the `web` profile:
+Register the current project directory in the `web` profile (`dsh plugin` runs pnpm inside the profile; the CLI version must match the plugin's dependencies, i.e. `0.1.7-rc.2` for this repository):
 
 ```bash
-npx @deepseek-ai/dsh plugin \
+npx @deepseek-ai/dsh@0.1.7-rc.2 plugin \
   --profile web add /absolute/path/to/dsn-finance-lab
-npx @deepseek-ai/dsh web --profile web
+npx @deepseek-ai/dsh@0.1.7-rc.2 web
 ```
+
+`dsh web` is shorthand for `dsh --profile web`: the profile is the first positional argument and every other argument is forwarded to the app.
 
 For local development, you can also run:
 
@@ -116,10 +120,10 @@ For local development, you can also run:
 bash scripts/dev_web.sh
 ```
 
-If you need the development overlay with absolute paths:
+If you need the development overlay with absolute paths (host half only, no panel client bundle):
 
 ```bash
-npx @deepseek-ai/dsh web --patch ./cordis.dev.yml
+npx @deepseek-ai/dsh@0.1.7-rc.2 web --patch ./cordis.dev.yml
 ```
 
 After registration, open **📈 Finance Panel** in the lower-left corner of Harness. The model tools are loaded automatically.
@@ -133,12 +137,15 @@ The default configuration is in `cordis.patch.yml`:
 | `cacheTtlSec` | `300` | Provider cache lifetime |
 | `requestGapMs` | `3000` | Gap between public requests |
 | `httpTimeoutMs` | `30000` | Per-request timeout |
-| `probeReportPath` | `data/probe-report.json` | Provider probe report |
-| `portfolioPath` | `data/portfolio.json` | Local holdings/watchlist file |
-| `panelOpen` | unset | Whether to open the finance panel |
-| `panelDocked` | unset | Whether the panel starts docked |
+| `dataDir` | `data` | Root directory for every file the plugin writes (portfolio, probe report, analysis cache, history, provider/skill policy, MCP secrets) |
+| `probeReportPath` | empty → `<dataDir>/probe-report.json` | Provider probe report |
+| `portfolioPath` | empty → `<dataDir>/portfolio.json` | Local holdings/watchlist file |
+| `panelOpen` | unset | Whether to open the finance panel (volatile, see below) |
+| `panelDocked` | unset | Whether the panel starts docked (volatile, see below) |
 
-Relative paths are resolved from the plugin package directory. `data/probe-report.json` and `data/portfolio.json` are local runtime data and are ignored by Git.
+A relative `dataDir` resolves from the plugin package directory. When the same source checkout is linked into more than one dsh profile, point `dataDir` at a per-profile directory (or give `portfolioPath` / `probeReportPath` absolute paths), otherwise those profiles share one data set. These files are local runtime data and are ignored by Git.
+
+`panelOpen` / `panelDocked` are declared **volatile** in the Config schema: dsh 0.1.7 surfaces only volatile fields in its configuration forms and stores them in the profile's user layer (`$DSH_HOME/profiles/<name>/cordis.patch.yml`). The panel trigger reads and writes that entry through `ctx.configForms`, so the open/docked state survives a reload; every other field is ordinary composition configuration and a change re-applies the entry.
 
 ## Availability tests
 

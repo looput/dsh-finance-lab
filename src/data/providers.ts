@@ -17,6 +17,8 @@ import {
   toTxSymbol,
   type HttpGetOptions,
 } from './http.js'
+import { DEFAULT_INDEX_CODES, westockProviders } from './westock.js'
+import { WESTOCK_CAPABILITY_PROVIDERS, WESTOCK_SPECS } from './westock-capabilities.js'
 import type { Capability, KlineBar, ProviderContext, ProviderFn, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
 
 const execFileAsync = promisify(execFile)
@@ -961,6 +963,108 @@ export const PROVIDERS: ProviderMeta[] = [
     sampleArgs: { query: 'nvidia stock' },
     call: pyWebSearch,
   },
+
+  // ---- WeStock CLI（腾讯自选股，免鉴权）----
+  {
+    id: 'ws_quote',
+    capability: 'quote',
+    endpointRef: 'westock quote <sh600519> — 腾讯自选股网关 (proxy.finance.qq.com)',
+    sampleArgs: { code: '600519' },
+    call: westockProviders.quote,
+  },
+  {
+    id: 'ws_kline',
+    capability: 'kline',
+    endpointRef: 'westock kline <sh600519> --period day',
+    sampleArgs: { code: '600519', days: 40 },
+    call: westockProviders.kline,
+  },
+  {
+    id: 'ws_hk_quote',
+    capability: 'hk_quote',
+    endpointRef: 'westock quote <hk00700>',
+    sampleArgs: { code: '00700' },
+    call: westockProviders.hkQuote,
+  },
+  {
+    id: 'ws_hk_kline',
+    capability: 'hk_kline',
+    endpointRef: 'westock kline <hk00700> --period day',
+    sampleArgs: { code: '00700', days: 40 },
+    call: westockProviders.hkKline,
+  },
+  {
+    id: 'ws_us_quote',
+    capability: 'us_quote',
+    endpointRef: 'westock quote <usAAPL>',
+    sampleArgs: { code: 'AAPL' },
+    call: westockProviders.usQuote,
+  },
+  {
+    id: 'ws_us_kline',
+    capability: 'us_kline',
+    endpointRef: 'westock kline <usAAPL> --period day',
+    sampleArgs: { code: 'AAPL', days: 40 },
+    call: westockProviders.usKline,
+  },
+  {
+    id: 'ws_research',
+    capability: 'research_report',
+    endpointRef: 'westock report list <sh600519> — 券商研报（标题/机构/评级/时间）',
+    sampleArgs: { code: '600519', size: 5 },
+    call: westockProviders.research,
+  },
+  {
+    id: 'ws_news',
+    capability: 'stock_news',
+    endpointRef: 'westock news list <sh600519>',
+    sampleArgs: { code: '600519', size: 5 },
+    call: westockProviders.news,
+  },
+  {
+    id: 'ws_financials',
+    capability: 'financials',
+    endpointRef: 'westock finance <sh600519> — 三大报表',
+    sampleArgs: { code: '600519' },
+    call: westockProviders.financials,
+  },
+  {
+    id: 'ws_profile',
+    capability: 'stock_info',
+    endpointRef: 'westock profile <sh600519> — 公司简况',
+    sampleArgs: { code: '600519' },
+    call: westockProviders.profile,
+  },
+  {
+    id: 'ws_search',
+    capability: 'symbol_search',
+    endpointRef: 'westock search <关键词> — 跨市场代码解析',
+    sampleArgs: { query: '腾讯' },
+    call: westockProviders.search,
+  },
+  {
+    id: 'ws_quotes_batch',
+    capability: 'quotes_batch',
+    endpointRef: 'westock quote <sh600519,sz000858,hk00700> — 一次调用拿多只标的',
+    sampleArgs: { codes: ['600519', '000858', '00700'] },
+    call: westockProviders.quotesBatch,
+  },
+  {
+    id: 'ws_indices',
+    capability: 'indices',
+    endpointRef: 'westock quote <sh000001,sz399001,…> — 指数批量行情',
+    sampleArgs: { codes: DEFAULT_INDEX_CODES },
+    call: westockProviders.indices,
+  },
+
+  // ---- WeStock CLI 扩展能力（表驱动，见 westock-capabilities.ts）----
+  ...WESTOCK_SPECS.map((spec) => ({
+    id: spec.id,
+    capability: spec.capability,
+    endpointRef: spec.usage,
+    sampleArgs: spec.sampleArgs,
+    call: WESTOCK_CAPABILITY_PROVIDERS[spec.id]!,
+  })),
 ]
 
 export const PROVIDER_BY_ID = new Map(PROVIDERS.map((p) => [p.id, p]))

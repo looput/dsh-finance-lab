@@ -14,6 +14,7 @@ import type {
   SkillProviderObservation,
 } from '@deepseek-ai/dsh-skill'
 import '@deepseek-ai/dsh-skill'
+import type { Logger } from './log.js'
 
 const run = promisify(execFile)
 
@@ -39,8 +40,8 @@ export class SkillManager {
   private readonly policyPath: string
   private readonly skillsDir: string
 
-  constructor(packageRoot: string, private readonly yingmiCommand?: string) {
-    this.policyPath = path.join(packageRoot, 'data/skills-policy.json')
+  constructor(packageRoot: string, dataDir: string, private readonly yingmiCommand?: string, private readonly logger?: Logger) {
+    this.policyPath = path.join(dataDir, 'skills-policy.json')
     this.skillsDir = path.join(packageRoot, 'skills')
     this.loadLocal()
     this.localEnabled = new Set(this.local.map((s) => s.name))
@@ -82,7 +83,10 @@ export class SkillManager {
         name: s.name,
         description: s.description,
       }))
-    } catch { this.yingmi = [] }
+    } catch (err) {
+      this.logger?.warn('yingmi remote-skill list failed', { command: this.yingmiCommand, error: err instanceof Error ? err.message : String(err) })
+      this.yingmi = []
+    }
   }
 
   private async loadPolicy(): Promise<void> {
@@ -93,7 +97,9 @@ export class SkillManager {
         if (next.length > 0 || p.local.length === 0) this.localEnabled = new Set(next)
       }
       if (Array.isArray(p.yingmi)) this.yingmiScope = p.yingmi
-    } catch { /* defaults */ }
+    } catch (err) {
+      this.logger?.debug('no skill policy loaded (defaults)', { path: this.policyPath, error: err instanceof Error ? err.message : String(err) })
+    }
   }
 
   private async persist(): Promise<void> {
@@ -136,7 +142,9 @@ export class SkillManager {
       } else {
         await run(this.yingmiCommand, ['remote-skill', 'scope', 'clear'], { timeout: 60_000 })
       }
-    } catch { /* best effort */ }
+    } catch (err) {
+      this.logger?.warn('yingmi scope apply failed', { error: err instanceof Error ? err.message : String(err) })
+    }
   }
 }
 
@@ -159,8 +167,8 @@ class GatedFinanceSkillProvider implements SkillProvider {
   }
 }
 
-export function registerSkills(ctx: Context, packageRoot: string, yingmiCommand?: string): SkillManager {
-  const mgr = new SkillManager(packageRoot, yingmiCommand)
+export function registerSkills(ctx: Context, packageRoot: string, dataDir: string, yingmiCommand?: string, logger?: Logger): SkillManager {
+  const mgr = new SkillManager(packageRoot, dataDir, yingmiCommand, logger)
   let inner!: FileSystemSkillProvider
   ctx.skills.registerProvider((control) => {
     mgr.setInvalidate(control.invalidate)

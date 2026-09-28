@@ -14,6 +14,7 @@ const registry = new ProviderRegistry({
   httpTimeoutMs: 30000,
   probeReportPath: path.join(root, 'data/probe-report.json'),
   packageRoot: root,
+  dataDir: path.join(root, 'data'),
 })
 await registry.loadProbeReport()
 

@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import type { Logger } from './log.js'
 import type { AssetType } from './types.js'
 
 export interface PositionAnalysis {
@@ -26,7 +27,10 @@ export class AnalysisStore {
   private data: AnalysisFile = { analyses: {}, updatedAt: new Date(0).toISOString() }
   private readonly changeListeners = new Set<(analysis: PositionAnalysis) => void>()
 
-  constructor(private readonly file: string) {}
+  constructor(
+    private readonly file: string,
+    private readonly logger?: Logger,
+  ) {}
 
   get path(): string {
     return this.file
@@ -48,7 +52,12 @@ export class AnalysisStore {
         analyses: parsed.analyses ?? {},
         updatedAt: parsed.updatedAt ?? new Date().toISOString(),
       }
-    } catch {
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code
+      this.logger?.[code === 'ENOENT' ? 'debug' : 'warn'](
+        'analysis cache load failed, starting empty',
+        { file: this.file, error: err instanceof Error ? err.message : String(err) },
+      )
       this.data = { analyses: {}, updatedAt: new Date().toISOString() }
       await this.persist().catch(() => {})
     }

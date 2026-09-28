@@ -5,11 +5,10 @@ import { createPortal } from 'react-dom'
 import type { CSSProperties } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { Config } from '../config.js'
 import type { AssetType, IndexQuote, LiveQuote, PortfolioHolding, WatchItem } from '../types.js'
 
 export const name = 'dsn-finance-client'
-export const inject = ['slots', 'settingsScope']
+export const inject = ['slots', 'configForms', 'conversation', 'sessions']
 
 const PANEL_W = 410
 
@@ -35,6 +34,10 @@ const DATA_INTERFACES: Array<{ group: string; items: InterfaceItem[] }> = [
     { cap: 'news_flash', label: '市场电报', tool: 'get_market_news', source: '东财全球快讯' },
     { cap: 'stock_news', label: '个股新闻', tool: 'get_stock_news', source: '东财搜索' },
   ] },
+  { group: '投研资料', items: [
+    { cap: 'research_report', label: '券商研报', tool: 'collect_research', source: 'WeStock' },
+    { cap: 'stock_info', label: '公司简况', tool: 'get_stock_info', source: '东财 / WeStock' },
+  ] },
   { group: '宏观 / 通用', items: [
     { cap: 'macro', label: '宏观经济', tool: 'get_macro_china', source: '东财 datacenter' },
     { cap: 'symbol_search', label: '代码解析', tool: 'search_symbol', source: '东财 suggest' },
@@ -42,17 +45,33 @@ const DATA_INTERFACES: Array<{ group: string; items: InterfaceItem[] }> = [
   ] },
 ]
 
-// ---- reactive settings scope (panel open/dock prefs only, not market data) ----
+// ---- reactive config form (panel open/dock prefs only, not market data) ----
+// The Host entry `dsn-finance` owns the plugin config, so the client reads and
+// writes through the settings domain's shared `configForms` service. Only the
+// entry's volatile fields ride the wire, and those are exactly these prefs.
+interface PanelPrefs { panelOpen?: boolean; panelDocked?: boolean }
 interface FinanceScope {
-  getSnapshot(): { status?: string; value?: Config; writable?: boolean }
+  getSnapshot(): { status?: string; value?: PanelPrefs; writable?: boolean }
   subscribe(listener: () => void): () => void
-  set(field: string, value: unknown): Promise<void>
+  set(field: string, value: unknown): Promise<boolean>
 }
-function useConfig(scope: FinanceScope): { value: Config; writable: boolean } {
+/** 面板开关的本地兜底存储：profile 不可写时也能跨刷新保持开关状态。 */
+const LOCAL_PREFS_KEY = 'dsn-finance:panelPrefs'
+function readLocalPrefs(): PanelPrefs {
+  try {
+    const raw = localStorage.getItem(LOCAL_PREFS_KEY)
+    return raw ? (JSON.parse(raw) as PanelPrefs) : {}
+  } catch { return {} }
+}
+function writeLocalPrefs(next: PanelPrefs): void {
+  try { localStorage.setItem(LOCAL_PREFS_KEY, JSON.stringify(next)) } catch { /* 隐私模式忽略 */ }
+}
+
+function useConfig(scope: FinanceScope): { value: PanelPrefs; writable: boolean } {
   const [, bump] = useReducer((n: number) => n + 1, 0)
   useEffect(() => scope.subscribe(bump), [scope])
   const snap = scope.getSnapshot?.() ?? {}
-  return { value: (snap.value ?? {}) as Config, writable: snap.writable !== false }
+  return { value: snap.value ?? {}, writable: snap.writable !== false }
 }
 
 // ---- styling ----
@@ -108,6 +127,79 @@ function pctStr(n: number | undefined): string {
 }
 const colorOf = (n: number | undefined) => (typeof n === 'number' ? (n >= 0 ? UP : DOWN) : V('--dsw-alias-label-tertiary', '#999'))
 const keyOf = (code: string, type: AssetType) => `${type}:${code}`
+
+/** 数据来源 → 展示名/色：让「这个数是谁给的」一眼可见（WeStock 优先）。 */
+const SOURCE_META: Array<{ prefix: string; label: string; color: string }> = [
+  { prefix: 'ws_', label: 'WeStock', color: BRAND },
+  { prefix: 'em_', label: '东财', color: '#c98a1a' },
+  { prefix: 'tx_', label: '腾讯', color: '#2b8ac9' },
+  { prefix: 'yahoo_', label: 'Yahoo', color: '#7a5af8' },
+  { prefix: 'ddg_', label: 'DuckDuckGo', color: '#8a8f99' },
+  { prefix: 'py_', label: '本地检索', color: '#8a8f99' },
+]
+function sourceOf(provider?: string): { label: string; color: string } | undefined {
+  if (!provider) return undefined
+  return SOURCE_META.find((s) => provider.startsWith(s.prefix))
+}
+
+/** 注入一次骨架屏动画（面板没有全局样式表，避免为此引入构建期 CSS）。 */
+let stylesInjected = false
+function ensureStyles(): void {
+  if (stylesInjected || typeof document === 'undefined') return
+  stylesInjected = true
+  const style = document.createElement('style')
+  style.textContent = '@keyframes dsn-pulse{0%{opacity:.35}50%{opacity:.75}100%{opacity:.35}}'
+  document.head.appendChild(style)
+}
+
+/** 加载骨架：首屏/刷新时占位，避免"白屏 + 突然跳动"。 */
+function Skeleton(props: { w?: number | string; h?: number; radius?: number }) {
+  ensureStyles()
+  return h('span', {
+    style: {
+      display: 'inline-block',
+      width: props.w ?? '100%',
+      height: props.h ?? 12,
+      borderRadius: props.radius ?? 6,
+      background: V('--dsw-alias-bg-module-platform', '#e9edf2'),
+      animation: 'dsn-pulse 1.4s ease-in-out infinite',
+    },
+  })
+}
+
+/** 相对时间：面板顶部显示"x 秒前"，比绝对时钟更能说明新鲜度。 */
+function useAgo(at?: string, intervalMs = 10_000): string {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const t = window.setInterval(() => tick((n) => n + 1), intervalMs)
+    return () => window.clearInterval(t)
+  }, [intervalMs])
+  if (!at) return '—'
+  const sec = Math.max(0, Math.round((Date.now() - Date.parse(at)) / 1000))
+  if (sec < 60) return `${sec} 秒前`
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`
+  return `${Math.floor(sec / 3600)} 小时前`
+}
+
+/** 跌涨幅药丸：带底色的涨跌块，比裸数字更好扫。 */
+function PctPill(props: { pct?: number; compact?: boolean }) {
+  const up = (props.pct ?? 0) >= 0
+  const bg = typeof props.pct === 'number' ? (up ? `${UP}1f` : `${DOWN}1f`) : 'transparent'
+  return h('span', {
+    style: {
+      display: 'inline-block',
+      minWidth: props.compact ? 58 : 66,
+      textAlign: 'right',
+      padding: props.compact ? '1px 6px' : '2px 8px',
+      borderRadius: 999,
+      background: bg,
+      color: colorOf(props.pct),
+      fontWeight: 600,
+      fontSize: props.compact ? 11 : 12,
+      fontVariantNumeric: 'tabular-nums',
+    },
+  }, pctStr(props.pct))
+}
 
 function loadNameCache(): Record<string, string> {
   try {
@@ -179,32 +271,66 @@ function Sparkline(props: { data?: number[]; color: string; w?: number }) {
     h('polyline', { points: pts, fill: 'none', stroke: props.color, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }))
 }
 
+/** 一张行情卡：名称/代码/市场 → 迷你走势 → 价格 + 涨跌药丸 + 数据来源。 */
 function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => void; onClick?: () => void }) {
   const q = props.q
   const pct = q.changePercent
   const sparkColor = q.spark && q.spark.length >= 2 ? (q.spark[q.spark.length - 1]! >= q.spark[0]! ? UP : DOWN) : colorOf(pct)
   const digits = q.type === 'fund' ? 4 : 2
   const hasPrice = typeof q.price === 'number' && Number.isFinite(q.price)
+  const src = sourceOf(q.provider)
   const priceNode = (() => {
-    if (hasPrice) return fmt(q.price, digits)
-    if (props.loading) return h('span', { style: S.muted }, '加载中')
+    if (hasPrice) return h('span', { style: { fontSize: 14, fontWeight: 600, fontVariantNumeric: 'tabular-nums' } }, fmt(q.price, digits))
+    if (props.loading) return h(Skeleton, { w: 52, h: 12 })
     const err = q.error ?? ''
     const limited = /429|限流|rate.?limit|timeout|超时/i.test(err)
     return h('span', { style: S.muted, title: err || '暂无行情' }, limited ? '限流' : '获取失败')
   })()
-  return h('div', { style: { ...S.row, cursor: props.onClick ? 'pointer' : 'default' }, onClick: props.onClick },
+  return h('div', {
+    style: {
+      ...S.row,
+      gap: 10,
+      alignItems: 'center',
+      padding: '8px 10px',
+      borderRadius: 8,
+      borderLeft: `3px solid ${hasPrice ? colorOf(pct) : V('--dsw-alias-border-l2', '#e5e5e5')}`,
+      cursor: props.onClick ? 'pointer' : 'default',
+    },
+    onClick: props.onClick,
+  },
     h('div', { style: { flex: 1, minWidth: 0 } },
-      h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, q.name || q.code),
-      h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center' } },
-        h('span', { style: S.tag }, q.market || (q.type === 'fund' ? '基金' : '股票')), q.code)),
-    h(Sparkline, { data: q.spark, color: sparkColor }),
-    h('div', { style: { width: 62, textAlign: 'right' } }, priceNode),
-    h('div', { style: { width: 54, textAlign: 'right', color: colorOf(pct) } }, hasPrice ? pctStr(pct) : '—'),
+      props.loading && !q.name
+        ? h(Skeleton, { w: '70%', h: 12 })
+        : h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, q.name || q.code),
+      h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center', fontSize: 11 } },
+        h('span', { style: S.tag }, q.market || (q.type === 'fund' ? '基金' : '股票')), q.code,
+        src ? h('span', { style: { color: src.color, fontSize: 10, border: `1px solid ${src.color}55`, borderRadius: 4, padding: '0 4px' } }, src.label) : null)),
+    h(Sparkline, { data: q.spark, color: sparkColor, w: 64 }),
+    h('div', { style: { width: 64, textAlign: 'right' } }, priceNode),
+    h(PctPill, { pct: hasPrice ? pct : undefined, compact: true }),
     props.onRemove ? h('button', {
       style: { ...S.btn, padding: '2px 6px' },
       title: '移除',
       onClick: (e: any) => { e.stopPropagation(); props.onRemove?.() },
     }, '×') : null)
+}
+
+/** 指数卡：市场总览用（大数字 + 涨跌药丸 + 迷你走势）。 */
+function IndexCard(props: { ix: IndexQuote; spark?: number[] }) {
+  const { ix } = props
+  return h('div', {
+    style: {
+      ...S.card,
+      gap: 2,
+      padding: '8px 10px',
+      minWidth: 104,
+      borderTop: `2px solid ${colorOf(ix.changePercent)}`,
+    },
+  },
+    h('div', { style: { fontSize: 11, color: V('--dsw-alias-label-secondary', '#666'), whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, ix.name),
+    h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 6 } },
+      h('span', { style: { fontSize: 16, fontWeight: 700, fontVariantNumeric: 'tabular-nums' } }, fmt(ix.price)),
+      h(PctPill, { pct: ix.changePercent, compact: true })))
 }
 
 // ---- data hooks over the plugin HTTP API (React state; never written to config) ----
@@ -213,6 +339,8 @@ interface LiveData {
   quotes: LiveQuote[]
   indices: IndexQuote[]
   health: Array<{ capability: string; ok: boolean; provider?: string }>
+  /** 缓存/耗时统计脚注。 */
+  perf?: { calls: number; cacheHits: number; coalesced: number; avgLatencyMs: number; westockAvailable?: boolean; westockProvider?: string }
   holdings: PortfolioHolding[]
   watchlist: WatchItem[]
   portfolioPath?: string
@@ -287,6 +415,67 @@ function ensureBusSource(): void {
   busSource = es
 }
 
+// ---- 面板 → 对话：把面板里的上下文直接发成一条提问 ----
+// 宿主客户端提供会话域服务：`ctx.sessions`（会话/作用域）与 `ctx.conversation`
+// （输入面板）。做法是找到当前会话的作用域，取其输入面板 setDraft + submit，
+// 等价于用户在输入框里粘贴后回车；拿不到服务时退回复制到剪贴板。
+type SessionInputFace = { setDraft: (text: string) => void; submit: () => void }
+type SessionsFace = {
+  list: { getSnapshot: () => { ids?: string[] } }
+  scope: (id: string) => unknown | undefined
+}
+type ConversationFace = {
+  input: { for: (actx: unknown) => SessionInputFace }
+  send?: (text: string) => Promise<void>
+}
+let panelCtx: { sessions?: SessionsFace; conversation?: ConversationFace } | undefined
+
+/** 面板 → 对话的投递诊断：send/clipboard 失败原因（调试用）。 */
+let chatDeliveryError = ''
+
+/** 当前已打开（被保留作用域）的会话 id。 */
+function currentSessionId(sessions: SessionsFace): string | undefined {
+  try {
+    const snap = sessions.list?.getSnapshot?.()
+    for (const id of snap?.ids ?? []) {
+      if (sessions.scope(id)) return id
+    }
+  } catch { /* ignore */ }
+  return undefined
+}
+
+/** 把一段 prompt 送进当前对话；返回实际投递方式，供 UI 提示。 */
+async function deliverToChat(text: string): Promise<'sent' | 'copied' | 'failed'> {
+  try {
+    const sessions = panelCtx?.sessions
+    const conversation = panelCtx?.conversation
+    const id = sessions ? currentSessionId(sessions) : undefined
+    const actx = id && sessions ? sessions.scope(id) : undefined
+    if (conversation && actx) {
+      const input = conversation.input.for(actx)
+      input.setDraft(text)
+      input.submit()
+      chatDeliveryError = ''
+      return 'sent'
+    }
+    if (conversation?.send) {
+      await conversation.send(text)
+      chatDeliveryError = ''
+      return 'sent'
+    }
+    if (!id) chatDeliveryError = '没有已打开的会话'
+  } catch (err) {
+    chatDeliveryError = err instanceof Error ? err.message : String(err)
+  }
+  try {
+    await navigator.clipboard.writeText(text)
+    return 'copied'
+  } catch (err) {
+    chatDeliveryError = `${chatDeliveryError || '-'} · copy:${err instanceof Error ? err.message : String(err)}`
+    return 'failed'
+  }
+}
+
 /** Subscribe to pushed server events; the shared EventSource starts on first use. */
 function useBus(fn: (e: BusMsg) => void): void {
   const latest = useRef(fn)
@@ -320,7 +509,16 @@ function useLive() {
     setLoading(true)
     try {
       const s = await apiGet<LiveData>('/live')
-      setData({ at: s.at, quotes: s.quotes ?? [], indices: s.indices ?? [], health: s.health ?? [], holdings: s.holdings ?? [], watchlist: s.watchlist ?? [], portfolioPath: s.portfolioPath })
+      setData({
+        at: s.at,
+        quotes: s.quotes ?? [],
+        indices: s.indices ?? [],
+        health: s.health ?? [],
+        perf: s.perf,
+        holdings: s.holdings ?? [],
+        watchlist: s.watchlist ?? [],
+        portfolioPath: s.portfolioPath,
+      })
     } catch { /* keep prior */ } finally {
       inflight.current = false
       if (again.current) {
@@ -425,39 +623,52 @@ function QuotesView(props: {
   loading: boolean
   mutate: (a: string, p: Record<string, unknown>) => void
   onOpen: (item: AnalysisItem) => void
+  onRefresh?: () => void
 }) {
   const { data, quoteBy, loading, mutate } = props
   const [wCode, setWCode] = useState('')
   const [wType, setWType] = useState<AssetType>('stock')
+  const ago = useAgo(data.at)
   const watchQuotes: LiveQuote[] = data.watchlist.map((w) => quoteBy.get(keyOf(w.code, w.type)) ?? { code: w.code, type: w.type, name: w.name })
+  const perf = data.perf
   function addWatch() {
     const c = wCode.trim(); if (!c) return
     mutate('addWatch', { code: c, type: wType }); setWCode('')
   }
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
     h('div', { style: S.section },
-      h('div', { style: S.title }, '市场总览'),
+      h('div', { style: { ...S.title, alignItems: 'center' } }, '市场总览',
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '刷新中…' : `${ago}更新`),
+        h('button', {
+          style: { ...S.btn, padding: '2px 8px', marginLeft: 6 },
+          disabled: loading,
+          onClick: () => props.onRefresh?.(),
+        }, '刷新')),
       data.indices.length === 0
-        ? h('div', { style: S.muted }, '暂无指数数据')
-        : h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
-          data.indices.map((ix) => h('div', { key: ix.code, style: { ...S.chip, flexDirection: 'column', alignItems: 'flex-start', gap: 0, padding: '4px 8px' } },
-            h('span', { style: { fontSize: 11 } }, ix.name),
-            h('span', { style: { color: colorOf(ix.changePercent), fontWeight: 600 } }, `${fmt(ix.price)} ${pctStr(ix.changePercent)}`))))),
+        ? (loading ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
+          : h('div', { style: S.muted }, '暂无指数数据'))
+        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))', gap: 6 } },
+          data.indices.map((ix) => h(IndexCard, { key: ix.code, ix })))),
     h('div', { style: S.section },
-      h('div', { style: S.title }, '自选 · 行情走势'),
-      watchQuotes.length === 0 ? h('div', { style: S.muted }, '暂无自选，在下方添加') : watchQuotes.map((q) => h(QuoteRow, {
-        key: `w-${q.type}-${q.code}`,
-        q,
-        loading,
-        onClick: () => props.onOpen({ code: q.code, type: q.type ?? 'stock', name: q.name }),
-        onRemove: () => mutate('removeWatch', { code: q.code, type: q.type }),
-      })),
-      data.at ? h('div', { style: S.muted }, `更新于 ${new Date(data.at).toLocaleTimeString()}`) : null,
+      h('div', { style: S.title }, '自选 · 行情走势',
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `${watchQuotes.length} 只`)),
+      watchQuotes.length === 0
+        ? h('div', { style: S.muted }, '暂无自选，在下方添加')
+        : watchQuotes.map((q) => h(QuoteRow, {
+          key: `w-${q.type}-${q.code}`,
+          q,
+          loading,
+          onClick: () => props.onOpen({ code: q.code, type: q.type ?? 'stock', name: q.name }),
+          onRemove: () => mutate('removeWatch', { code: q.code, type: q.type }),
+        })),
       h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
         h('input', { style: { ...S.input, flex: 1 }, placeholder: '代码，如 600519 / 00700 / AAPL / 110022', value: wCode, onChange: (e: any) => setWCode(e.target.value), onKeyDown: onEnterCommit(addWatch) }),
         h(SegToggle, { value: wType, onChange: setWType }),
         h('button', { style: S.btn, onClick: addWatch }, '添加')),
-      h(SearchAdd, { onAdd: (code, type) => mutate('addWatch', { code, type }) })))
+      h(SearchAdd, { onAdd: (code, type) => mutate('addWatch', { code, type }) })),
+    h('div', { style: { ...S.muted, fontSize: 11, display: 'flex', gap: 8, flexWrap: 'wrap' } },
+      h('span', null, '数据优先 WeStock（本地 CLI，批量取）；不通时自动回落东财/腾讯。'),
+      perf ? h('span', null, `本次缓存命中 ${perf.cacheHits}/${perf.calls + perf.cacheHits} · 平均 ${perf.avgLatencyMs}ms${perf.coalesced ? ` · 合并请求 ${perf.coalesced}` : ''}`) : null))
 }
 
 // ---- 持仓 tab ----
@@ -512,19 +723,22 @@ function HoldingsView(props: {
         h('div', { style: { flex: 1, minWidth: 0 } },
           h('div', { style: { fontWeight: 500 } }, h('span', { style: S.tag }, hd.type === 'fund' ? '基' : '股'), ' ', q?.name || hd.name || hd.code),
           h('div', { style: S.muted }, `${hd.code} · ${hd.quantity} @ ${fmt(hd.avgCost, hd.type === 'fund' ? 4 : 2)}`)),
-        h('div', { style: { width: 118, textAlign: 'right' } },
+        h('div', { style: { width: 128, textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 } },
           typeof hpnl === 'number'
-            ? h('span', { style: { color: colorOf(hpnl) } }, `${hpnl >= 0 ? '+' : ''}${hpnl.toFixed(0)}`)
-            : h('span', { style: S.muted }, `现价 ${fmt(price, hd.type === 'fund' ? 4 : 2)}`)),
+            ? h('span', { style: { color: colorOf(hpnl), fontWeight: 600, fontVariantNumeric: 'tabular-nums' } }, `${hpnl >= 0 ? '+' : ''}${hpnl.toFixed(0)}`)
+            : h('span', { style: S.muted }, `现价 ${fmt(price, hd.type === 'fund' ? 4 : 2)}`),
+          typeof hpnl === 'number' ? h(PctPill, { pct: (hpnl / (hd.avgCost * hd.quantity || 1)) * 100, compact: true }) : null),
         h('button', {
           style: { ...S.btn, padding: '2px 6px' },
           onClick: (e: any) => { e.stopPropagation(); mutate('removeHolding', { code: hd.code, type: hd.type }) },
         }, '删'))
     }),
-    data.holdings.length ? h('div', { style: { ...S.row, fontWeight: 600 } },
-      h('div', { style: { flex: 1 } }, '合计'),
-      h('div', { style: { textAlign: 'right' } }, `市值 ${totalValue.toFixed(0)} · `,
-        h('span', { style: { color: colorOf(pnl) } }, `${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)} (${pctStr(pnlPct)})`))) : null,
+    data.holdings.length ? h('div', { style: { ...S.row, fontWeight: 600, alignItems: 'center' } },
+      h('div', { style: { flex: 1 } }, '合计',
+        h('span', { style: { ...S.muted, marginLeft: 6, fontWeight: 400 } }, `市值 ${totalValue.toFixed(0)}`)),
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+        h('span', { style: { color: colorOf(pnl), fontVariantNumeric: 'tabular-nums' } }, `${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}`),
+        h(PctPill, { pct: pnlPct }))) : null,
     data.holdings.length ? h('div', { style: { ...S.card, marginTop: 2 } },
       h('div', { style: S.title }, '配置 · 集中度'),
       h('div', { style: { display: 'flex', height: 8, borderRadius: 999, overflow: 'hidden', background: V('--dsw-alias-bg-module-platform', '#eef0f3') } },
@@ -622,10 +836,11 @@ function MarketView(props: { active: boolean }) {
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
     h('div', { style: S.section },
       h('div', { style: S.title }, '市场总览', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
-      d.indices.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无指数') : h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
-        d.indices.map((ix) => h('div', { key: ix.code, style: { ...S.chip, flexDirection: 'column', alignItems: 'flex-start', gap: 0, padding: '4px 8px' } },
-          h('span', { style: { fontSize: 11 } }, ix.name),
-          h('span', { style: { color: colorOf(ix.changePercent), fontWeight: 600 } }, `${fmt(ix.price)} ${pctStr(ix.changePercent)}`))))),
+      d.indices.length === 0
+        ? (loading ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
+          : h('div', { style: S.muted }, '暂无指数'))
+        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))', gap: 6 } },
+          d.indices.map((ix) => h(IndexCard, { key: ix.code, ix })))),
     h('div', { style: S.section }, h('div', { style: S.title }, h('span', { style: { color: UP } }, '● '), '领涨板块'),
       d.gainers.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无') : d.gainers.map(sectorRow)),
     h('div', { style: S.section }, h('div', { style: S.title }, h('span', { style: { color: DOWN } }, '● '), '领跌板块 · 今日风险'),
@@ -837,7 +1052,7 @@ const CAP_LABEL: Record<string, string> = {
   stock_list: 'A股列表', quote: 'A股行情', kline: 'A股K线', indices: '指数概览', financials: '财务指标', sectors: '行业板块',
   hk_quote: '港股行情', hk_kline: '港股K线', hk_list: '港股列表', us_quote: '美股行情', us_kline: '美股K线',
   fund_quote: '基金净值', fund_kline: '基金走势', fund_rank: '基金排行', macro: '宏观', news_flash: '市场快讯',
-  stock_news: '个股新闻', symbol_search: '代码解析', stock_info: '个股档案', web_search: '网页搜索',
+  stock_news: '个股新闻', research_report: '券商研报', symbol_search: '代码解析', stock_info: '个股档案', web_search: '网页搜索',
 }
 interface CapProvider { id: string; source: string; endpointRef: string; ok?: boolean; selected: boolean }
 interface CapCatalog { capability: string; selected: string[]; hasPolicy: boolean; providers: CapProvider[] }
@@ -1047,10 +1262,559 @@ function PositionAnalysisView(props: { item: AnalysisItem; onClose: () => void }
             h(ReactMarkdown, { remarkPlugins: [remarkGfm], components: ANALYSIS_MARKDOWN_COMPONENTS }, analysis.report))) : null)))
 }
 
+// ---- 市场发现 tab（WeStock：情绪温度 / 热搜 / 龙虎榜）----
+interface DiscoverData {
+  at: string
+  breadth: unknown
+  hotStocks: unknown
+  hotSectors: unknown
+  lhb: unknown
+}
+
+function firstRow(v: unknown): Record<string, string> | undefined {
+  if (Array.isArray(v) && v.length) return v[0] as Record<string, string>
+  if (v && typeof v === 'object' && !Array.isArray(v)) return v as Record<string, string>
+  return undefined
+}
+
+function rows(v: unknown, limit = 10): Array<Record<string, string>> {
+  return Array.isArray(v) ? (v.slice(0, limit) as Array<Record<string, string>>) : []
+}
+
+function DiscoverView() {
+  const [data, setData] = useState<DiscoverData>()
+  const [error, setError] = useState('')
+
+  const load = useCallback(async () => {
+    try {
+      setData(await apiGet<DiscoverData>('/discover?limit=12'))
+      setError('')
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)) }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+  useBus((e) => { if (e.kind === 'portfolio' || e.kind === 'research') void load() })
+
+  const breadth = firstRow(data?.breadth)
+  const errOf = (v: unknown) => (v && typeof v === 'object' && 'error' in (v as object) ? String((v as { error?: string }).error) : '')
+
+  const rowLine = (r: Record<string, string>, codeKey: string, nameKey: string, pctKey: string, priceKey?: string) => {
+    const pct = Number(r[pctKey])
+    const color = Number.isFinite(pct) ? (pct > 0 ? UP : pct < 0 ? DOWN : S.muted.color) : S.muted.color
+    return h('div', { style: { display: 'flex', gap: 6, alignItems: 'baseline' } },
+      h('span', { style: { ...S.muted, fontSize: 11, width: 74, flexShrink: 0 } }, String(r[codeKey] ?? '').replace(/^(sh|sz|bj|hk|us|pt|cs)/, '')),
+      h('span', { style: { flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, String(r[nameKey] ?? '')),
+      priceKey && r[priceKey] ? h('span', { style: { ...S.muted, fontSize: 11 } }, String(r[priceKey])) : null,
+      h('span', { style: { color, fontSize: 11, width: 52, textAlign: 'right' } }, Number.isFinite(pct) ? `${pct > 0 ? '+' : ''}${pct}%` : '—'))
+  }
+
+  return h('div', { style: S.section },
+    h('div', { style: S.title }, '市场发现',
+      h('button', { style: { ...S.btn, marginLeft: 'auto' }, onClick: () => void load() }, '刷新')),
+    error ? h('div', { style: S.muted }, error) : null,
+    !data ? h('div', { style: S.muted }, '加载中…') : null,
+    breadth ? h('div', { style: S.card },
+      h('div', { style: { fontWeight: 600 } }, '涨跌分布（市场情绪）'),
+      h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 4 } },
+        h('span', { style: { color: UP } }, `上涨 ${breadth.upCount ?? '—'}`),
+        h('span', { style: { color: DOWN } }, `下跌 ${breadth.downCount ?? '—'}`),
+        h('span', { style: S.muted }, `涨停 ${breadth.upLimitCount ?? 0} / 跌停 ${breadth.downLimitCount ?? 0}`),
+        h('span', { style: S.muted }, `上涨占比 ${breadth.upRatio ?? '—'}`))) : (data && errOf(data.breadth) ? h('div', { style: S.muted }, `涨跌分布不可用：${errOf(data.breadth)}`) : null),
+    rows(data?.hotStocks).length ? h('div', { style: S.card },
+      h('div', { style: { fontWeight: 600 } }, '热搜股票'),
+      rows(data?.hotStocks).map((r, i) => h('div', { key: `${r.code}-${i}` }, rowLine(r, 'code', 'name', 'zdf', 'zxj')))) : null,
+    rows(data?.hotSectors).length ? h('div', { style: S.card },
+      h('div', { style: { fontWeight: 600 } }, '热门板块'),
+      rows(data?.hotSectors).map((r, i) => h('div', { key: `${r.symbol}-${i}` }, rowLine(r, 'symbol', 'name', 'zdf')))) : null,
+    rows(data?.lhb).length ? h('div', { style: S.card },
+      h('div', { style: { fontWeight: 600 } }, '龙虎榜（机构）'),
+      rows(data?.lhb).map((r, i) => h('div', { key: `${r.code}-${i}` }, rowLine(r, 'code', 'name', 'netBuyRate', 'netBuyAmt')))) : null,
+    data ? h('div', { style: S.muted }, `更新于 ${new Date(data.at).toLocaleTimeString()} · 数据源 WeStock`) : null)
+}
+
+// ---- 投研资料库 tab ----
+interface VaultNote { at: string; text: string; author?: string }
+interface VaultItem {
+  id: string
+  title: string
+  kind: string
+  source: string
+  occurredAt: string
+  status: string
+  codes: string[]
+  tags: string[]
+  summary?: string
+  opinion?: string
+  sourceUrl?: string
+  file: string
+  notes: VaultNote[]
+  updatedAt?: string
+  missing?: boolean
+  origin?: 'chat' | 'panel' | 'file'
+}
+interface VaultStats { total: number; byKind: Record<string, number>; byStatus: Record<string, number>; topCodes: Array<{ code: string; count: number }>; missing?: number }
+interface VaultDetail {
+  ok: boolean
+  path: string
+  file: string
+  item: VaultItem
+  body: string
+  notes: VaultNote[]
+  raw?: string
+  exists: boolean
+  mtime?: string
+  watching?: boolean
+}
+
+const KIND_LABEL: Record<string, string> = { report: '研报', filing: '财报', note: '观点', news: '资讯', other: '其他' }
+const STATUS_LABEL: Record<string, string> = { inbox: '待整理', active: '在用', archived: '已归档' }
+const KIND_COLOR: Record<string, string> = { report: BRAND, filing: '#8a63d2', note: '#c98a1a', news: '#2b8ac9', other: '#8a8f99' }
+const ORIGIN_LABEL: Record<string, string> = { chat: '对话', panel: '面板', file: '文件' }
+const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
+const KIND_FILTERS: Array<{ id: string; label: string }> = [
+  { id: '', label: '全部' }, { id: 'report', label: '研报' }, { id: 'filing', label: '财报' },
+  { id: 'note', label: '观点' }, { id: 'news', label: '资讯' },
+]
+const STATUS_FILTERS: Array<{ id: string; label: string }> = [
+  { id: '', label: '全部' }, { id: 'inbox', label: '待整理' }, { id: 'active', label: '在用' }, { id: 'archived', label: '已归档' },
+]
+
+/** 资料详情用「左元数据 / 右正文」双栏：正文按文档宽度阅读，元数据常驻可见。 */
+const RS = {
+  backdrop: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 2147483100 } as CSSProperties,
+  panel: {
+    position: 'fixed', inset: '5vh 6vw', zIndex: 2147483101, display: 'flex', flexDirection: 'row',
+    background: V('--dsw-alias-bg-layer-3', '#fff'), color: V('--dsw-alias-label-primary', '#111'),
+    border: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`, borderRadius: 12,
+    boxShadow: '0 12px 40px rgba(0,0,0,0.22)', overflow: 'hidden',
+  } as CSSProperties,
+  side: {
+    width: 312, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 12,
+    padding: 16, overflowY: 'auto', borderRight: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`,
+    background: V('--dsw-alias-bg-layer-2', '#fafbfc'),
+  } as CSSProperties,
+  main: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } as CSSProperties,
+  head: { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '12px 18px', borderBottom: `1px solid ${V('--dsw-alias-border-l2', '#e5e5e5')}`, flexWrap: 'wrap' } as CSSProperties,
+  body: { flex: 1, overflowY: 'auto', padding: '20px 26px' } as CSSProperties,
+  label: { fontSize: 11, color: V('--dsw-alias-label-tertiary', '#999'), letterSpacing: 0.4 } as CSSProperties,
+  title: { fontSize: 19, fontWeight: 600, lineHeight: 1.35 } as CSSProperties,
+  editor: {
+    width: '100%', flex: 1, minHeight: 260, resize: 'none', fontFamily: MONO, fontSize: 13, lineHeight: 1.65,
+    border: `1px solid ${V('--dsw-alias-border-l2', '#ddd')}`, borderRadius: 8, padding: 12,
+    background: V('--dsw-alias-bg-layer-3', '#fff'), color: V('--dsw-alias-label-primary', '#111'),
+  } as CSSProperties,
+  pre: { margin: 0, whiteSpace: 'pre-wrap', fontFamily: MONO, fontSize: 12, lineHeight: 1.6 } as CSSProperties,
+}
+
+function ResearchView() {
+  const [items, setItems] = useState<VaultItem[]>([])
+  const [stats, setStats] = useState<VaultStats>({ total: 0, byKind: {}, byStatus: {}, topCodes: [] })
+  const [vaultDir, setVaultDir] = useState('')
+  const [watching, setWatching] = useState(false)
+  const [kind, setKind] = useState('')
+  const [status, setStatus] = useState('')
+  const [code, setCode] = useState('')
+  const [query, setQuery] = useState('')
+  const [group, setGroup] = useState<'time' | 'code' | 'none'>('time')
+  const [detail, setDetail] = useState<VaultDetail>()
+  const [raw, setRaw] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editor, setEditor] = useState('')
+  const [note, setNote] = useState('')
+  const [hint, setHint] = useState('')
+  const [busy, setBusy] = useState(false)
+  /** 无法直连对话时的兜底：把提问摊开给用户手抄。 */
+  const [pendingPrompt, setPendingPrompt] = useState('')
+  // 收集 / 新增表单
+  const [collectCode, setCollectCode] = useState('')
+  const [collectKind, setCollectKind] = useState('report')
+  const [draft, setDraft] = useState({ title: '', source: '', date: '', opinion: '' })
+
+  const load = useCallback(async () => {
+    const qs = new URLSearchParams()
+    if (kind) qs.set('kind', kind)
+    if (status) qs.set('status', status)
+    if (code) qs.set('code', code)
+    if (query.trim()) qs.set('query', query.trim())
+    try {
+      const r = await apiGet<{ ok: boolean; items: VaultItem[]; stats?: VaultStats; vault?: string; watching?: boolean }>(`/research?${qs.toString()}`)
+      setItems(r.items ?? [])
+      if (r.stats) setStats(r.stats)
+      if (r.vault) setVaultDir(r.vault)
+      if (typeof r.watching === 'boolean') setWatching(r.watching)
+    } catch { /* keep prior */ }
+  }, [kind, status, code, query])
+
+  /** 读一条资料：正文（去掉 frontmatter）+ 磁盘原文 + 文件 mtime。 */
+  const open = useCallback(async (id: string) => {
+    try {
+      const r = await apiGet<VaultDetail>(`/research?id=${encodeURIComponent(id)}&raw=1`)
+      if (!r.ok) return
+      setDetail(r)
+      setEditing(false)
+      setRaw(false)
+      setEditor(r.body ?? '')
+    } catch { /* ignore */ }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+  // Agent 侧保存 / 本地文件改动（watch → sync）都即时可见。
+  useBus((e) => {
+    if (e.kind !== 'research') return
+    void load()
+    const id = String((e as { id?: unknown }).id ?? '')
+    if (id && detail && detail.item.id === id) void open(id)
+  })
+
+  const close = () => { setDetail(undefined); setEditing(false); setRaw(false) }
+
+  const act = async (path: string, body: Record<string, unknown>) => {
+    setBusy(true)
+    setHint('')
+    try {
+      const r = await apiPost<{ ok: boolean; error?: string }>(path, body)
+      if (!r.ok) { setHint(r.error ?? '操作失败'); return }
+    } catch (err) { setHint(err instanceof Error ? err.message : String(err)) } finally { setBusy(false) }
+  }
+
+  /** 反向同步：把磁盘上的新增/编辑/删除合并回索引。 */
+  const sync = async () => {
+    setBusy(true)
+    setHint('')
+    try {
+      const r = await apiPost<{ ok: boolean; added?: number; updated?: number; missing?: number; error?: string }>('/research/sync', {})
+      setHint(r.ok ? `已同步：新增 ${r.added ?? 0} · 更新 ${r.updated ?? 0} · 缺失 ${r.missing ?? 0}` : (r.error ?? '同步失败'))
+      await load()
+      const id = detail?.item.id
+      if (id) await open(id)
+    } catch (err) { setHint(err instanceof Error ? err.message : String(err)) } finally { setBusy(false) }
+  }
+
+  /** 面板改正文 → 写回工作区 Markdown（frontmatter 与批注不动）。 */
+  const saveBody = async () => {
+    if (!detail) return
+    setBusy(true)
+    setHint('')
+    try {
+      const r = await apiPost<{ ok: boolean; error?: string }>('/research/body', { id: detail.item.id, body: editor })
+      if (!r.ok) { setHint(r.error ?? '保存失败'); return }
+      setHint('正文已写入本地文件')
+      setEditing(false)
+      await open(detail.item.id)
+      await load()
+    } catch (err) { setHint(err instanceof Error ? err.message : String(err)) } finally { setBusy(false) }
+  }
+
+  const copyPath = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setHint('文件路径已复制')
+    } catch { setHint(text) }
+  }
+
+  /** 面板 → 对话：把一段提问送进当前会话（拿不到对话服务时退回复制/手抄）。 */
+  const ask = async (text: string, okMsg = '已发给 Agent，请看对话继续') => {
+    const how = await deliverToChat(text)
+    if (how === 'sent') setHint(okMsg)
+    else if (how === 'copied') setHint('提问已复制，粘贴到对话框即可')
+    else {
+      setPendingPrompt(text)
+      setHint('当前环境无法直接发送，请复制下面的提问')
+    }
+  }
+
+  /** 把一条资料带进对话继续研究（正文摘录 + 已有观点，要求 Agent 回写 note）。 */
+  const promptForItem = (it: VaultItem, body: string) => [
+    `请基于资料库里这条资料继续研究，并把结论回写到资料库（资料 id：${it.id}）：`,
+    `- 标题：${it.title}`,
+    `- 来源：${it.source}　时间：${it.occurredAt}`,
+    it.codes.length ? `- 关联标的：${it.codes.join('、')}` : '',
+    it.opinion ? `- 我的观点：${it.opinion}` : '',
+    body ? `\n正文摘录：\n${body.slice(0, 900)}` : '',
+    '\n要求：1) 结合最新行情/研报补充关键事实；2) 用 add_research_note 把结论追加到这条资料；3) 观点有变化时用 update_research 更新 opinion/status；4) 回复里说明改了什么。',
+  ].filter(Boolean).join('\n')
+
+  /** 让 Agent 按资料库现状做一次整理（待整理 → 在用，补观点）。 */
+  const promptForTriage = () => [
+    '请整理我的投研资料库：',
+    `当前共 ${stats.total} 条，待整理 ${stats.byStatus.inbox ?? 0} 条，关联最多的标的：${stats.topCodes.slice(0, 5).map((c) => `${c.code}(${c.count})`).join('、') || '（无）'}。`,
+    '请：1) 先用 list_research 看 status=inbox 的条目；2) 对已有明确价值的补 opinion / codes / tags 并把 status 改成 active；3) 对重复或过时的归档（archive_research）；4) 需要补充资料时用 collect_research；5) 最后用 research_overview 汇报整理结果。',
+  ].join('\n')
+
+  const collect = async () => {
+    const code = collectCode.trim()
+    if (!code) { setHint('请先填写标的代码'); return }
+    setBusy(true)
+    setHint('')
+    try {
+      const r = await apiPost<{ ok: boolean; saved?: number; skipped?: number; error?: string; hint?: string }>('/research/collect', {
+        code, kind: collectKind, size: 5,
+      })
+      setHint(r.ok ? `已收集 ${r.saved ?? 0} 条${r.skipped ? `，跳过重复 ${r.skipped} 条` : ''}` : (r.error ?? '收集失败'))
+      if (r.ok) await load()
+    } catch (err) { setHint(err instanceof Error ? err.message : String(err)) } finally { setBusy(false) }
+  }
+
+  const saveDraft = async () => {
+    if (!draft.title.trim() || !draft.source.trim()) { setHint('标题与来源必填'); return }
+    setBusy(true)
+    setHint('')
+    try {
+      const r = await apiPost<{ ok: boolean; error?: string }>('/research', {
+        title: draft.title.trim(),
+        source: draft.source.trim(),
+        date: draft.date.trim() || new Date().toISOString().slice(0, 10),
+        kind: 'note',
+        opinion: draft.opinion.trim() || undefined,
+      })
+      if (!r.ok) { setHint(r.error ?? '保存失败'); return }
+      setDraft({ title: '', source: '', date: '', opinion: '' })
+      setHint('已存入资料库')
+      await load()
+    } catch (err) { setHint(err instanceof Error ? err.message : String(err)) } finally { setBusy(false) }
+  }
+
+  const chip = (active: boolean, label: string, onClick: () => void, color?: string) => h('button', {
+    onClick,
+    style: { ...S.btn, padding: '2px 8px', background: active ? (color ?? BRAND) : S.btn.background, color: active ? '#fff' : S.btn.color },
+  }, label)
+
+  const clamp2 = { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' } as CSSProperties
+
+  // 分组视图：按资料时间（默认）/ 按关联标的 / 平铺
+  const buckets: Array<{ key: string; label: string; items: VaultItem[] }> = []
+  for (const it of items) {
+    const key = group === 'time' ? it.occurredAt.slice(0, 7) : group === 'code' ? (it.codes[0] ?? '未关联标的') : 'all'
+    let b = buckets.find((x) => x.key === key)
+    if (!b) buckets.push({ key, label: key === 'all' ? '' : key, items: [it] })
+    else b.items.push(it)
+  }
+
+  return h('div', { style: S.section },
+    h('div', { style: S.title }, '投研资料库',
+      h('span', { style: { ...S.muted, marginLeft: 'auto' } }, `共 ${stats.total} 条 · 待整理 ${stats.byStatus.inbox ?? 0} · 已归档 ${stats.byStatus.archived ?? 0}`)),
+    // 本地文件联动：vault 目录 + 同步状态 + 手动同步
+    vaultDir ? h('div', { style: { ...S.card, gap: 6 } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+        h('span', { style: RS.label }, '本地目录'),
+        h('span', { style: { fontSize: 11, color: watching ? DOWN : '#c98a1a' } }, watching ? '已监听 · 改文件自动回灌' : '未监听 · 需手动同步'),
+        h('button', { style: { ...S.btn, marginLeft: 'auto', padding: '2px 8px' }, disabled: busy, onClick: () => void sync() }, busy ? '…' : '同步本地文件'),
+        h('button', {
+          style: { ...S.btn, padding: '2px 8px' },
+          title: '把资料库现状交给 Agent 整理（补观点、改状态、去重归档）',
+          onClick: () => void ask(promptForTriage(), '已让 Agent 开始整理资料库'),
+        }, '让 Agent 整理')),
+      h('div', { style: { fontFamily: MONO, fontSize: 11, wordBreak: 'break-all', color: V('--dsw-alias-label-secondary', '#666') } }, vaultDir),
+      h('div', { style: { ...S.muted, fontSize: 11 } }, '正文就是工作区里的 Markdown：在编辑器或文件工具里改，改动会合并回这里。'),
+      stats.missing ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+        h('span', { style: { fontSize: 11, color: UP } }, `${stats.missing} 条资料的文件已不在磁盘上`),
+        h('button', {
+          style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' },
+          disabled: busy,
+          onClick: async () => {
+            const r = await apiPost<{ ok: boolean; removed?: number }>('/research/prune', {})
+            setHint(r.ok ? `已清理 ${r.removed ?? 0} 条缺失条目` : '清理失败')
+            await load()
+          },
+        }, '清理')) : null) : null,
+    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+      KIND_FILTERS.map((k) => chip(kind === k.id, k.label, () => setKind(k.id), KIND_COLOR[k.id])),
+      h('span', { style: { width: 8 } }),
+      STATUS_FILTERS.map((s) => chip(status === s.id, s.label, () => setStatus(s.id)))),
+    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
+      h('span', { style: RS.label }, '分组'),
+      chip(group === 'time', '按时间', () => setGroup('time')),
+      chip(group === 'code', '按标的', () => setGroup('code')),
+      chip(group === 'none', '不分组', () => setGroup('none')),
+      code ? h('button', {
+        style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto', color: BRAND },
+        onClick: () => setCode(''),
+      }, `标的 ${code} ×`) : null),
+    h('input', {
+      style: { ...S.input, width: '100%' },
+      placeholder: '搜索标题 / 观点 / 标签 / 标的…',
+      value: query,
+      onChange: (e: any) => setQuery(String(e.target.value ?? '')),
+    }),
+    h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+      h('input', {
+        style: { ...S.input, flex: 1 },
+        placeholder: '收集：标的代码 600519',
+        value: collectCode,
+        onChange: (e: any) => setCollectCode(String(e.target.value ?? '')),
+      }),
+      h('select', {
+        style: { ...S.input, width: 90 },
+        value: collectKind,
+        onChange: (e: any) => setCollectKind(String(e.target.value ?? 'report')),
+      }, h('option', { value: 'report' }, '研报'), h('option', { value: 'news' }, '资讯')),
+      h('button', { style: S.btn, disabled: busy, onClick: () => void collect() }, busy ? '…' : '收集')),
+    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+      h('input', { style: { ...S.input, flex: '1 1 40%' }, placeholder: '观点标题', value: draft.title, onChange: (e: any) => setDraft({ ...draft, title: String(e.target.value ?? '') }) }),
+      h('input', { style: { ...S.input, flex: '1 1 25%' }, placeholder: '来源（必填）', value: draft.source, onChange: (e: any) => setDraft({ ...draft, source: String(e.target.value ?? '') }) }),
+      h('input', { style: { ...S.input, flex: '1 1 20%' }, placeholder: '日期 YYYY-MM-DD', value: draft.date, onChange: (e: any) => setDraft({ ...draft, date: String(e.target.value ?? '') }) }),
+      h('button', { style: S.btn, disabled: busy, onClick: () => void saveDraft() }, '存观点')),
+    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
+    items.length ? buckets.map((b) => h('div', { key: b.key, style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+      b.label ? h('div', { style: { ...RS.label, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 } },
+        group === 'code' && b.key !== '未关联标的' ? `标的 ${b.label}` : b.label,
+        h('span', { style: { fontWeight: 400 } }, `${b.items.length} 条`)) : null,
+      b.items.map((it) => h('div', {
+        key: it.id,
+        style: { ...S.card, gap: 5, cursor: 'pointer', borderColor: detail?.item.id === it.id ? BRAND : undefined },
+        onClick: () => void open(it.id),
+      },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+          h('span', { style: { ...S.tag, background: `${KIND_COLOR[it.kind] ?? '#8a8f99'}1f`, color: KIND_COLOR[it.kind] ?? '#8a8f99' } }, KIND_LABEL[it.kind] ?? it.kind),
+          h('span', { style: { ...S.muted, fontSize: 11 } }, it.occurredAt),
+          it.missing ? h('span', { style: { ...S.tag, color: UP } }, '文件缺失') : null,
+          h('span', { style: { ...S.muted, fontSize: 11, marginLeft: 'auto' } }, STATUS_LABEL[it.status] ?? it.status)),
+        h('div', { style: { fontWeight: 500, lineHeight: 1.4, ...clamp2 } }, it.title),
+        it.summary ? h('div', { style: { ...S.muted, fontSize: 11, lineHeight: 1.5, ...clamp2 } }, it.summary) : null,
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
+          h('span', { style: { ...S.muted, fontSize: 11 } }, it.source),
+          it.codes.map((c) => h('span', {
+            key: c,
+            style: { ...S.tag, cursor: 'pointer' },
+            onClick: (e: any) => { e.stopPropagation(); setCode(c); close() },
+          }, c)),
+          it.origin === 'chat' ? h('span', { style: { ...S.tag, color: BRAND }, title: '由 Agent 对话收集/产出' }, '对话') : null,
+          it.notes.length ? h('span', { style: { ...S.muted, fontSize: 11, marginLeft: 'auto' } }, `${it.notes.length} 观点`) : null))))) : h('div', { style: S.muted }, '还没有资料：用上方「收集」拉取研报/资讯，或直接记录个人观点。'),
+
+    // 详情：左元数据 / 右正文，正文可直接编辑并写回本地文件
+    detail ? (() => {
+      const it = detail.item
+      const stale = detail.mtime && it.updatedAt
+        ? new Date(detail.mtime).getTime() - new Date(it.updatedAt).getTime() > 1500
+        : false
+      const metaRow = (label: string, node: any) => h('div', { style: { display: 'flex', gap: 8, alignItems: 'baseline' } },
+        h('span', { style: { ...RS.label, width: 52, flexShrink: 0 } }, label),
+        h('div', { style: { fontSize: 12, minWidth: 0, flex: 1, wordBreak: 'break-word' } }, node))
+      const notes = detail.notes.length ? detail.notes : it.notes
+      return h('div', null,
+        h('div', { style: RS.backdrop, onClick: close }),
+        h('div', { style: RS.panel },
+          h('div', { style: RS.side },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+              h('span', { style: { ...S.tag, background: `${KIND_COLOR[it.kind] ?? '#8a8f99'}1f`, color: KIND_COLOR[it.kind] ?? '#8a8f99' } }, KIND_LABEL[it.kind] ?? it.kind),
+              h('span', { style: S.tag }, STATUS_LABEL[it.status] ?? it.status),
+              h('button', { style: { ...S.btn, marginLeft: 'auto', padding: '2px 8px' }, onClick: close }, '关闭')),
+            metaRow('来源', it.sourceUrl ? h('a', { href: it.sourceUrl, target: '_blank', rel: 'noreferrer', style: { color: BRAND } }, `${it.source} ↗`) : it.source),
+            metaRow('渠道', h('span', { style: { color: it.origin === 'chat' ? BRAND : undefined } },
+              ORIGIN_LABEL[it.origin ?? 'panel'] ?? '面板')),
+            metaRow('时间', it.occurredAt),
+            metaRow('标的', it.codes.length
+              ? h('span', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } }, it.codes.map((c) => h('span', { key: c, style: { ...S.tag, cursor: 'pointer' }, onClick: () => { setCode(c); close() } }, c)))
+              : h('span', { style: S.muted }, '未关联')),
+            it.tags.length ? metaRow('标签', h('span', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } }, it.tags.map((t) => h('span', { key: t, style: S.tag }, t)))) : null,
+            // 本地文件联动区
+            h('div', { style: { ...S.card, gap: 6 } },
+              h('div', { style: RS.label }, '本地文件'),
+              h('div', { style: { fontFamily: MONO, fontSize: 11, wordBreak: 'break-all' } }, detail.path),
+              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void copyPath(detail.path) }, '复制路径'),
+                h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: busy, onClick: () => void sync() }, '同步目录'),
+                h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void open(it.id) }, '重新载入')),
+              h('div', { style: { ...S.muted, fontSize: 11 } },
+                `${watching ? '已监听目录，编辑即回灌' : '未监听，需手动同步'}${detail.mtime ? ` · 文件 ${new Date(detail.mtime).toLocaleString()}` : ''}`),
+              stale ? h('div', { style: { fontSize: 11, color: '#c98a1a' } }, '文件在外部被改过，点「同步目录」合并回索引') : null,
+              detail.exists ? null : h('div', { style: { fontSize: 11, color: UP } }, '文件已不在磁盘上（被外部删除或移动）')),
+            h('div', { style: { ...S.card, gap: 6 } },
+              h('div', { style: RS.label }, '观点'),
+              h('div', { style: { fontSize: 12, lineHeight: 1.6 } }, it.opinion || '（暂无结论，可在下方追加）'),
+              h('div', { style: { display: 'flex', gap: 6 } },
+                h('input', {
+                  style: { ...S.input, flex: 1, height: 28 },
+                  placeholder: '追加一条观点/批注（自动带时间戳）',
+                  value: note,
+                  onChange: (e: any) => setNote(String(e.target.value ?? '')),
+                }),
+                h('button', {
+                  style: { ...S.btn, padding: '2px 8px' },
+                  disabled: busy || !note.trim(),
+                  onClick: async () => {
+                    await act('/research/note', { id: it.id, note: note.trim() })
+                    setNote('')
+                    await open(it.id)
+                    await load()
+                  },
+                }, '追加')),
+              notes.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+                h('div', { style: RS.label }, `观点时间线 · ${notes.length}`),
+                notes.map((n, i) => h('div', { key: `${n.at}-${i}`, style: { ...S.muted, fontSize: 11, lineHeight: 1.5 } },
+                  h('div', { style: { color: V('--dsw-alias-label-tertiary', '#999') } }, new Date(n.at).toLocaleString()),
+                  h('div', null, n.text)))) : null),
+            h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+              h('button', {
+                style: { ...S.btn, padding: '2px 8px' },
+                disabled: busy,
+                onClick: async () => {
+                  await act('/research/archive', { id: it.id, restore: it.status === 'archived' })
+                  close()
+                  await load()
+                },
+              }, it.status === 'archived' ? '恢复' : '归档'),
+              h('button', {
+                style: { ...S.btn, padding: '2px 8px' },
+                disabled: busy,
+                onClick: async () => {
+                  await act('/research/delete', { id: it.id })
+                  close()
+                  await load()
+                },
+              }, '删除'))),
+          h('div', { style: RS.main },
+            h('div', { style: RS.head },
+              h('div', { style: { flex: '1 1 100%', minWidth: 0 } },
+                h('div', { style: RS.title }, it.title),
+                h('div', { style: S.muted }, `${it.source} · ${it.occurredAt}${it.tags.length ? ` · ${it.tags.join(' / ')}` : ''}`)),
+              h('button', {
+                style: { ...S.btn, color: BRAND },
+                title: '把这条资料带进对话，让 Agent 继续研究并回写观点',
+                onClick: () => void ask(promptForItem(it, detail.body ?? '')),
+              }, '问 Agent'),
+              h('button', { style: S.btn, onClick: () => { setEditing(!editing); setEditor(detail.body ?? '') } }, editing ? '取消编辑' : '编辑正文'),
+              h('button', { style: S.btn, onClick: () => setRaw(!raw) }, raw ? '渲染视图' : '查看原文'),
+              h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `${(detail.body ?? '').length} 字`)),
+            h('div', { style: RS.body },
+              editing ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, height: '100%' } },
+                h('textarea', {
+                  style: RS.editor,
+                  value: editor,
+                  onChange: (e: any) => setEditor(String(e.target.value ?? '')),
+                }),
+                h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+                  h('button', { style: S.btn, disabled: busy, onClick: () => void saveBody() }, '保存正文到文件'),
+                  h('span', { style: { ...S.muted, fontSize: 11, fontFamily: MONO } }, detail.path)))
+                : raw ? h('pre', { style: RS.pre }, detail.raw ?? '')
+                  : h('div', { style: { fontSize: 13.5, lineHeight: 1.7, wordBreak: 'break-word', maxWidth: 860 } },
+                    h(ReactMarkdown, { remarkPlugins: [remarkGfm], components: ANALYSIS_MARKDOWN_COMPONENTS },
+                      detail.body || '（无正文：点「编辑正文」补充，或直接编辑本地 Markdown 文件，随后同步）'))))))
+    })() : null,
+    // 兜底：拿不到对话服务时，把提问摊开复制
+    pendingPrompt ? h('div', null,
+      h('div', { style: RS.backdrop, onClick: () => setPendingPrompt('') }),
+      h('div', { style: { ...RS.panel, flexDirection: 'column', inset: '12vh 10vw', padding: 16, gap: 10 } },
+        h('div', { style: { fontWeight: 600 } }, '把这条提问发给 Agent'),
+        h('div', { style: { ...S.muted, fontSize: 11 } }, '当前环境不支持面板直连对话：复制后粘贴到输入框即可。'),
+        h('textarea', {
+          style: { ...RS.editor, minHeight: 220 },
+          value: pendingPrompt,
+          readOnly: true,
+          onFocus: (e: any) => e.target.select(),
+        }),
+        h('div', { style: { display: 'flex', gap: 6 } },
+          h('button', {
+            style: S.btn,
+            onClick: () => { void navigator.clipboard?.writeText(pendingPrompt).then(() => setHint('已复制')).catch(() => setHint('请手动全选复制')) },
+          }, '复制'),
+          h('button', { style: S.btn, onClick: () => setPendingPrompt('') }, '关闭')))) : null)
+}
+
 const TABS: Array<{ id: string; label: string }> = [
   { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'holdings', label: '持仓' },
   { id: 'funds', label: '基金' }, { id: 'kline', label: 'K线' }, { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
-  { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
+  { id: 'research', label: '资料' }, { id: 'discover', label: '发现' }, { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
 ]
 
 function findShellFrame(): HTMLElement | null {
@@ -1108,11 +1872,31 @@ function PanelBody(props: {
   })
   const selectTab = (id: string) => { setTab(id); try { window.localStorage.setItem(TAB_KEY, id) } catch { /* */ } }
   const [klineTarget, setKlineTarget] = useState<{ code: string; kind: string; at: number } | undefined>()
+  // 对话侧落库的即时回执：Agent 存了资料时在任何 tab 都能看到，并可一键跳到资料页。
+  const [agentSaved, setAgentSaved] = useState<{ text: string; at: number } | undefined>()
+  useEffect(() => {
+    if (!agentSaved) return
+    const t = window.setTimeout(() => setAgentSaved(undefined), 15_000)
+    return () => window.clearTimeout(t)
+  }, [agentSaved])
 
-  // Agent → panel direction: navigate commands, plus config-change refresh triggers.
+  // Agent → panel direction: navigate commands, config-change refresh, and research receipts.
   useBus((e) => {
     if (e.kind === 'providers' || e.kind === 'skills' || e.kind === 'mcp') {
       void loadLive()
+      return
+    }
+    if (e.kind === 'research') {
+      const r = e as BusMsg & { action?: string; title?: string; count?: number; origin?: string }
+      // 只提示「对话侧落库」；面板自己的操作已有本地反馈，不重复打扰。
+      if (r.origin === 'chat' && (r.action === 'save' || r.action === 'collect')) {
+        setAgentSaved({
+          text: r.action === 'collect'
+            ? `Agent 收集并存入资料库：${r.title ?? `${r.count ?? 0} 条`}`
+            : `Agent 存入资料：${r.title ?? ''}`,
+          at: Date.now(),
+        })
+      }
       return
     }
     if (e.kind !== 'panel') return
@@ -1138,14 +1922,25 @@ function PanelBody(props: {
       h('button', { style: { ...S.btn, padding: '4px 8px' }, title: docked ? '切换为浮动窗' : '停靠为侧栏页', onClick: onToggleDock }, docked ? '浮动' : '停靠'),
       h('button', { style: { ...S.btn, padding: '4px 8px' }, onClick: onClose }, '×')),
     h('div', { style: S.tabs }, TABS.map((t) => h('button', { key: t.id, style: S.tab(tab === t.id), onClick: () => selectTab(t.id) }, t.label))),
+    agentSaved ? h('div', {
+      style: {
+        display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: 12,
+        background: `${BRAND}14`, color: BRAND, borderBottom: `1px solid ${V('--dsw-alias-border-l2', '#eee')}`,
+      },
+    },
+      h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, agentSaved.text),
+      h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => { selectTab('research'); setAgentSaved(undefined) } }, '查看'),
+      h('button', { style: { ...S.btn, padding: '2px 6px' }, onClick: () => setAgentSaved(undefined) }, '×')) : null,
     h('div', { style: S.body },
-      tab === 'quotes' ? h(QuotesView, { data, quoteBy, loading, mutate, onOpen: props.onOpenAnalysis }) : null,
+      tab === 'quotes' ? h(QuotesView, { data, quoteBy, loading, mutate, onOpen: props.onOpenAnalysis, onRefresh: () => void loadLive() }) : null,
       tab === 'market' ? h(MarketView, { active: tab === 'market' }) : null,
       tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate, onOpen: props.onOpenAnalysis }) : null,
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
       tab === 'kline' ? h(KlineView, { data, requested: klineTarget }) : null,
+      tab === 'research' ? h(ResearchView, null) : null,
+      tab === 'discover' ? h(DiscoverView, null) : null,
       tab === 'sources' ? h(SourcesView, null) : null,
       tab === 'skills' ? h(SkillsView, null) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))
@@ -1167,11 +1962,31 @@ function DockedPanel(props: { onClose: () => void; onToggleDock: () => void; onO
 function FootAction(props: { scope: FinanceScope; wide?: boolean }) {
   useComposerImeFix()
   const { value } = useConfig(props.scope)
-  const open = value.panelOpen === true
-  const docked = value.panelDocked !== false // default: docked (page-like)
+  // profile 写入不一定成功（volatile 字段在本版本会返回不可写）。开关状态因此
+  // 以「本地优先 + localStorage 兜底」为准：面板一定打得开，且刷新后保持；
+  // profile 能写时仍然写回 profile（保持多端一致的语义）。
+  const [local, setLocal] = useState<PanelPrefs>(() => readLocalPrefs())
+  const [persistNote, setPersistNote] = useState('')
+  const open = local.panelOpen ?? value.panelOpen === true
+  const docked = local.panelDocked ?? value.panelDocked !== false // default: docked (page-like)
   const [analysisItem, setAnalysisItem] = useState<AnalysisItem>()
-  const setOpen = (v: boolean) => void props.scope.set('panelOpen', v)
-  const setDocked = (v: boolean) => void props.scope.set('panelDocked', v)
+
+  const persist = (field: 'panelOpen' | 'panelDocked', v: boolean) => {
+    setLocal((prev) => {
+      const next = { ...prev, [field]: v }
+      writeLocalPrefs(next)
+      return next
+    })
+    try {
+      void Promise.resolve(props.scope.set(field, v)).then((ok) => {
+        setPersistNote(ok === false ? '开关已存到浏览器本地（profile 配置不可写）' : '')
+      }).catch(() => setPersistNote('开关已存到浏览器本地（profile 写入失败）'))
+    } catch {
+      setPersistNote('开关已存到浏览器本地（profile 写入失败）')
+    }
+  }
+  const setOpen = (v: boolean) => persist('panelOpen', v)
+  const setDocked = (v: boolean) => persist('panelDocked', v)
   const wide = props.wide === true
   const trigger = h('button', {
     type: 'button', title: '金融面板', onClick: () => setOpen(!open),
@@ -1186,6 +2001,7 @@ function FootAction(props: { scope: FinanceScope; wide?: boolean }) {
     } as CSSProperties,
   }, h(IconChart, { size: wide ? 16 : 18 }), wide ? h('span', { style: { overflow: 'hidden', whiteSpace: 'nowrap' } }, '金融面板') : null)
   return h('div', null, trigger,
+    persistNote && open ? h('div', { style: { ...S.muted, fontSize: 10, padding: '0 4px', maxWidth: wide ? '100%' : 36 } }, persistNote) : null,
     open && docked ? h(DockedPanel, { onClose: () => setOpen(false), onToggleDock: () => setDocked(false), onOpenAnalysis: setAnalysisItem }) : null,
     open && !docked ? h(FloatingDrawer, { onClose: () => setOpen(false), onToggleDock: () => setDocked(true), onOpenAnalysis: setAnalysisItem }) : null,
     analysisItem ? h(PositionAnalysisView, { item: analysisItem, onClose: () => setAnalysisItem(undefined) }) : null)
@@ -1203,13 +2019,30 @@ type ClientCtx = {
     inject: (name: string, factory: () => Iterable<unknown>) => void
     register: (meta: Record<string, unknown>, component: unknown) => unknown
   }
-  settingsScope: { bind: (opts: { namespace: string }) => FinanceScope }
+  configForms: { get: (entryId: string) => FinanceScope }
+  /** 会话域服务（@deepseek-ai/dsh-api-session-controller/client）：定位当前会话作用域。 */
+  sessions?: SessionsFace
+  /** 对话服务（@deepseek-ai/dsh-client-ui-conversation）：面板可以把提问发进当前会话。 */
+  conversation?: ConversationFace
 }
 
 export function apply(ctx: ClientCtx): void {
-  const scope = ctx.settingsScope.bind({ namespace: 'dsn-finance' })
-  ctx.slots.inject('settings.plugin.item', function* () {
-    yield ctx.slots.register({ name: 'settings.plugin.item', key: 'dsn-finance' }, () => h(SettingsCard, null))
+  const scope = ctx.configForms.get('dsn-finance')
+  // 面板 → 对话的桥：记住客户端 ctx，发提问时按当前会话作用域投递；
+  // 读服务可能抛错（宿主未提供），必须兜住——否则整个面板都加载不了。
+  try {
+    if (ctx.conversation) panelCtx = ctx
+    ;(window as unknown as Record<string, unknown>).__DSN_FINANCE_CHAT__ = {
+      ok: !!ctx.conversation && !!ctx.sessions,
+      error: () => chatDeliveryError,
+    }
+  } catch (err) {
+    ;(window as unknown as Record<string, unknown>).__DSN_FINANCE_CHAT__ = { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+  // The Plugins settings page hosts feature-owned tabs; the plugin's own config
+  // form is generated from its Config schema, so this tab stays informational.
+  ctx.slots.inject('settings.plugins.tab', function* () {
+    yield ctx.slots.register({ name: 'settings.plugins.tab', id: 'dsn-finance', order: 20, label: 'DSN Finance' }, () => h(SettingsCard, null))
   })
   ctx.slots.inject('sidebar.footer.action', function* () {
     yield ctx.slots.register({ name: 'sidebar.footer.action', id: 'dsn-finance' }, (p: { wide?: boolean }) => h(FootAction, { ...p, scope }))

@@ -26,6 +26,7 @@ async function main() {
     httpTimeoutMs: 30_000,
     probeReportPath: 'data/probe-report.json',
     packageRoot: root,
+    dataDir: path.join(root, 'data'),
   })
   await registry.loadProbeReport()
 
