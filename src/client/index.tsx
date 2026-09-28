@@ -941,52 +941,102 @@ function HoldingsView(props: {
     if (!c || !Number.isFinite(q) || !Number.isFinite(av)) return
     mutate('upsertHolding', { code: c, quantity: q, avgCost: av, type: hType }); setHCode('')
   }
-  return h('div', { style: S.section },
-    h('div', { style: S.title }, '持仓 · 盈亏'),
-    data.holdings.length === 0 ? h('div', { style: S.muted }, '暂无持仓') : data.holdings.map((hd) => {
-      const q = quoteBy.get(keyOf(hd.code, hd.type))
-      const price = q?.price
-      const hpnl = typeof price === 'number' ? (price - hd.avgCost) * hd.quantity : undefined
-      return h('div', {
-        key: `h-${hd.type}-${hd.code}`,
-        style: { ...S.row, cursor: 'pointer' },
-        onClick: () => props.onOpen({ code: hd.code, type: hd.type, name: q?.name || hd.name }),
-      },
-        h('div', { style: { flex: 1, minWidth: 0 } },
-          h('div', { style: { fontWeight: 500 } }, h('span', { style: S.tag }, hd.type === 'fund' ? '基' : '股'), ' ', q?.name || hd.name || hd.code),
-          h('div', { style: S.muted }, `${hd.code} · ${hd.quantity} @ ${fmt(hd.avgCost, hd.type === 'fund' ? 4 : 2)}`)),
-        h('div', { style: { width: 128, textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 } },
-          typeof hpnl === 'number'
-            ? h('span', { style: { color: colorOf(hpnl), fontWeight: 600, fontVariantNumeric: 'tabular-nums' } }, `${hpnl >= 0 ? '+' : ''}${hpnl.toFixed(0)}`)
-            : h('span', { style: S.muted }, `现价 ${fmt(price, hd.type === 'fund' ? 4 : 2)}`),
-          typeof hpnl === 'number' ? h(PctPill, { pct: (hpnl / (hd.avgCost * hd.quantity || 1)) * 100, compact: true }) : null),
-        h('button', {
-          style: { ...S.btn, padding: '2px 6px' },
-          onClick: (e: any) => { e.stopPropagation(); mutate('removeHolding', { code: hd.code, type: hd.type }) },
-        }, '删'))
-    }),
-    data.holdings.length ? h('div', { style: { ...S.row, fontWeight: 600, alignItems: 'center' } },
-      h('div', { style: { flex: 1 } }, '合计',
-        h('span', { style: { ...S.muted, marginLeft: 6, fontWeight: 400 } }, `市值 ${totalValue.toFixed(0)}`)),
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-        h('span', { style: { color: colorOf(pnl), fontVariantNumeric: 'tabular-nums' } }, `${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}`),
-        h(PctPill, { pct: pnlPct }))) : null,
-    data.holdings.length ? h('div', { style: { ...S.card, marginTop: 2 } },
-      h('div', { style: S.title }, '配置 · 集中度'),
-      h('div', { style: { display: 'flex', height: 8, borderRadius: 999, overflow: 'hidden', background: V('--dsw-alias-bg-module-platform', '#eef0f3') } },
-        byType.stock > 0 ? h('div', { style: { width: `${byType.stock}%`, background: BRAND } }) : null,
-        byType.fund > 0 ? h('div', { style: { width: `${byType.fund}%`, background: '#e0a53f' } }) : null),
-      h('div', { style: { display: 'flex', gap: 12, ...S.muted } },
-        h('span', null, h('span', { style: { color: BRAND } }, '● '), `股票 ${byType.stock.toFixed(0)}%`),
-        h('span', null, h('span', { style: { color: '#e0a53f' } }, '● '), `基金 ${byType.fund.toFixed(0)}%`)),
-      h('div', { style: S.muted }, `集中度：最大 ${top1.toFixed(0)}%（${weights[0]?.name ?? '—'}）· 前三 ${top3.toFixed(0)}%`)) : null,
-    h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
-      h('input', { style: { ...S.input, flex: 2 }, placeholder: '代码', value: hCode, onChange: (e: any) => setHCode(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
-      h('input', { style: { ...S.input, flex: 1 }, placeholder: '数量', value: hQty, onChange: (e: any) => setHQty(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
-      h('input', { style: { ...S.input, flex: 1 }, placeholder: '成本', value: hCost, onChange: (e: any) => setHCost(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
-      h(SegToggle, { value: hType, onChange: setHType }),
-      h('button', { style: S.btn, onClick: addHolding }, '加')),
-    data.portfolioPath ? h('div', { style: { ...S.muted, fontSize: 11 } }, `持仓文件：${data.portfolioPath}（可让 Agent 识别截图后写入）`) : null)
+  const pnlColor = colorOf(pnl)
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    // 概览：先把"赚了多少"放大呈现，再往下才是逐仓明细。
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '持仓 · 盈亏总览'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, data.holdings.length ? `${data.holdings.length} 个标的` : '空仓')),
+      h('div', { style: { padding: 11, display: 'flex', flexDirection: 'column', gap: 8 } },
+        data.holdings.length === 0
+          ? h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '还没有持仓。在下方输入代码/数量/成本添加，或让 Agent 识别持仓截图后写入。' })
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+            h('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 10, flexWrap: 'wrap' } },
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+                h('span', { style: { ...S.muted, fontSize: 10.5 } }, '总市值'),
+                h('span', { style: { fontSize: 22, fontWeight: 700, fontVariantNumeric: 'tabular-nums', lineHeight: 1.1 } }, fmt(totalValue, 0))),
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginLeft: 'auto', alignItems: 'flex-end' } },
+                h('span', { style: { ...S.muted, fontSize: 10.5 } }, '浮动盈亏'),
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                  h('span', { style: { fontSize: 18, fontWeight: 700, color: pnlColor, fontVariantNumeric: 'tabular-nums' } }, `${pnl >= 0 ? '+' : ''}${fmt(pnl, 0)}`),
+                  h(PctPill, { pct: pnlPct })))),
+            // 成本 → 市值 的盈亏条：直观看到浮盈/浮亏占比
+            h('div', { style: { display: 'flex', height: 6, borderRadius: 999, overflow: 'hidden', background: `${pnlColor}22` } },
+              h('div', { style: { width: `${totalValue ? Math.min(100, (totalCost / totalValue) * 100) : 0}%`, background: V('--dsw-alias-label-tertiary', '#9aa0aa') } }),
+              h('div', { style: { width: `${totalValue ? Math.min(100, Math.abs(pnl / totalValue) * 100) : 0}%`, background: pnlColor } })),
+            h('div', { style: { ...S.muted, fontSize: 11 } }, `成本 ${fmt(totalCost, 0)} · 市值 ${fmt(totalValue, 0)}`)))),
+    data.holdings.length ? h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '逐仓明细'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, '点击看 AI 解读')),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 6 } },
+        data.holdings.map((hd) => {
+          const q = quoteBy.get(keyOf(hd.code, hd.type))
+          const price = q?.price
+          const cost = hd.avgCost * hd.quantity
+          const hpnl = typeof price === 'number' ? (price - hd.avgCost) * hd.quantity : undefined
+          const hpnlPct = typeof hpnl === 'number' && cost ? (hpnl / cost) * 100 : undefined
+          const weight = weights.find((w) => w.name === (q?.name || hd.name || hd.code))?.w ?? (valOf(hd) / denom) * 100
+          const c = colorOf(hpnl ?? 0)
+          return h('div', {
+            key: `h-${hd.type}-${hd.code}`,
+            className: 'dsn-row',
+            style: {
+              ...S.card, gap: 5, cursor: 'pointer',
+              borderLeft: `3px solid ${typeof hpnl === 'number' ? c : R.line}`,
+            },
+            onClick: () => props.onOpen({ code: hd.code, type: hd.type, name: q?.name || hd.name }),
+          },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
+              h('span', { style: S.tag }, hd.type === 'fund' ? '基' : '股'),
+              h('span', {
+                style: { fontWeight: 600, fontSize: 12.5, minWidth: 0, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+              }, q?.name || hd.name || hd.code),
+              h('span', { style: { ...S.muted, fontSize: 10, flex: '0 0 auto' } }, `仓位 ${weight.toFixed(1)}%`),
+              h('button', {
+                style: { ...S.btn, padding: '1px 6px', flex: '0 0 auto' },
+                title: '删除该持仓',
+                onClick: (e: any) => { e.stopPropagation(); mutate('removeHolding', { code: hd.code, type: hd.type }) },
+              }, '×')),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+              h('span', { style: { ...S.muted, fontSize: 11, minWidth: 0, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } },
+                `${hd.code} · ${hd.quantity} @ ${fmt(hd.avgCost, hd.type === 'fund' ? 4 : 2)}${typeof price === 'number' ? ` → ${fmt(price, hd.type === 'fund' ? 4 : 2)}` : ''}`),
+              typeof hpnl === 'number'
+                ? h('span', { style: { color: c, fontWeight: 600, fontSize: 12, fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' } }, `${hpnl >= 0 ? '+' : ''}${fmt(hpnl, 0)}`)
+                : h('span', { style: { ...S.muted, fontSize: 11, flex: '0 0 auto' } }, '无行情'),
+              typeof hpnlPct === 'number' ? h(PctPill, { pct: hpnlPct, compact: true }) : null),
+            typeof hpnlPct === 'number' ? h('div', { style: { display: 'flex', height: 4, borderRadius: 999, overflow: 'hidden', background: `${c}18` } },
+              h('div', { style: { width: `${Math.min(100, Math.abs(hpnlPct) * 4)}%`, background: c } })) : null)
+        }))) : null,
+    data.holdings.length ? h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '配置 · 集中度'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `前三 ${top3.toFixed(0)}%`)),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 7 } },
+        h('div', { style: { display: 'flex', height: 8, borderRadius: 999, overflow: 'hidden', background: V('--dsw-alias-bg-module-platform', '#eef0f3') } },
+          byType.stock > 0 ? h('div', { style: { width: `${byType.stock}%`, background: BRAND } }) : null,
+          byType.fund > 0 ? h('div', { style: { width: `${byType.fund}%`, background: '#e0a53f' } }) : null),
+        h('div', { style: { display: 'flex', gap: 12, ...S.muted } },
+          h('span', null, h('span', { style: { color: BRAND } }, '● '), `股票 ${byType.stock.toFixed(0)}%`),
+          h('span', null, h('span', { style: { color: '#e0a53f' } }, '● '), `基金 ${byType.fund.toFixed(0)}%`)),
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 3 } },
+          weights.slice(0, 5).map((w) => h('div', { key: w.name, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 } },
+            h('span', { style: { width: 72, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, w.name),
+            h('div', { style: { flex: 1, height: 5, borderRadius: 999, background: `${BRAND}18`, overflow: 'hidden', minWidth: 0 } },
+              h('div', { style: { width: `${Math.min(100, w.w)}%`, height: '100%', background: BRAND } })),
+            h('span', { style: { ...S.muted, width: 42, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, `${w.w.toFixed(1)}%`)))),
+        h('div', { style: { ...S.muted, fontSize: 11 } },
+          top1 > 40 ? `集中度偏高：${weights[0]?.name ?? '—'} 占 ${top1.toFixed(0)}%，注意单一标的风险。` : `最大 ${top1.toFixed(0)}%（${weights[0]?.name ?? '—'}）· 前三 ${top3.toFixed(0)}%`))) : null,
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead }, h('div', { style: { ...S.title, marginBottom: 0 } }, '添加持仓')),
+      h('div', { style: { padding: 9, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+        h('input', { style: { ...S.input, flex: '1 1 90px' }, placeholder: '代码', value: hCode, onChange: (e: any) => setHCode(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
+        h('input', { style: { ...S.input, flex: '1 1 60px' }, placeholder: '数量', value: hQty, onChange: (e: any) => setHQty(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
+        h('input', { style: { ...S.input, flex: '1 1 60px' }, placeholder: '成本', value: hCost, onChange: (e: any) => setHCost(e.target.value), onKeyDown: onEnterCommit(addHolding) }),
+        h(SegToggle, { value: hType, onChange: setHType }),
+        h('button', { style: S.btnPrimary, onClick: addHolding }, '添加'))),
+    data.portfolioPath ? h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px', wordBreak: 'break-all' } }, `持仓文件：${data.portfolioPath}（可让 Agent 识别截图后写入）`) : null)
 }
 
 // ---- 宏观 tab ----
@@ -999,21 +1049,47 @@ function MacroView(props: { active: boolean }) {
     try { const r = await apiGet<{ series: MacroSeries[] }>('/macro'); setSeries(r.series ?? []) } catch { /* */ } finally { setLoading(false) }
   }, [])
   useEffect(() => { if (props.active && !series.length) void load() }, [props.active]) // eslint-disable-line react-hooks/exhaustive-deps
-  return h('div', { style: S.section },
-    h('div', { style: S.title }, '中国宏观经济', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
-    series.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无数据') : series.map((s) => {
-      const pts = (s.points ?? []).map((p) => p.value).filter((n): n is number => typeof n === 'number')
-      const val = s.latest?.value
-      const dir = pts.length >= 2 ? (pts[pts.length - 1]! >= pts[0]! ? UP : DOWN) : BRAND
-      return h('div', { key: s.series, style: S.card },
-        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
-          h('span', { style: { fontWeight: 600 } }, s.label || s.series),
-          h('span', { style: { ...S.muted, marginLeft: 'auto' } }, s.latest?.time || '')),
-        s.error ? h('span', { style: S.muted }, '限流/暂无') : h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
-          h('span', { style: { fontSize: 20, fontWeight: 700, color: dir } }, typeof val === 'number' ? `${val}${s.unit || ''}` : '—'),
-          h(Sparkline, { data: pts.slice(-24), color: dir, w: 160 })))
-    }),
-    h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财 datacenter（对照 AkShare macro_china_*）'))
+  const ok = series.filter((s) => !s.error && typeof s.latest?.value === 'number')
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '中国宏观经济'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '加载中…' : `${ok.length}/${series.length} 项有数`),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
+      h('div', { style: { padding: 9, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(154px, 1fr))', gap: 6 } },
+        loading && series.length === 0
+          ? [h(Skeleton, { key: 0, w: '100%', h: 74 }), h(Skeleton, { key: 1, w: '100%', h: 74 }), h(Skeleton, { key: 2, w: '100%', h: 74 })]
+          : series.length === 0
+            ? h('div', { style: { gridColumn: '1 / -1' } }, h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无宏观数据，点刷新重试（上游可能限流）。' }))
+            : series.map((s) => {
+              const pts = (s.points ?? []).map((p) => p.value).filter((n): n is number => typeof n === 'number')
+              const val = s.latest?.value
+              // 与 12 期前对比，给出"在改善还是恶化"。
+              // 注意：CPI/PPI 这类本身就是百分比的指标要用「百分点差」，
+              // 用相对变化会把 0.2% → 0.8% 显示成 +300%，语义完全错了。
+              const prev = pts.length > 12 ? pts[pts.length - 13] : pts[0]
+              const isPct = (s.unit || '').includes('%')
+              const delta = typeof val === 'number' && typeof prev === 'number' && (isPct || prev)
+                ? (isPct ? val - prev : ((val - prev) / Math.abs(prev)) * 100)
+                : undefined
+              const dir = pts.length >= 2 ? (pts[pts.length - 1]! >= pts[0]! ? UP : DOWN) : BRAND
+              return h('div', { key: s.series, className: 'dsn-card', style: { ...S.card, gap: 3, padding: '9px 10px', minWidth: 0, overflow: 'hidden' } },
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
+                  h('span', { style: { fontWeight: 600, fontSize: 11.5, minWidth: 0, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, title: s.label || s.series }, s.label || s.series),
+                  typeof delta === 'number' ? h('span', {
+                    style: { fontSize: 10, color: colorOf(delta), fontWeight: 600, flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' },
+                    title: '与 12 期前对比',
+                  }, `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}${isPct ? 'pp' : '%'}`) : null),
+                h('span', { style: { ...S.muted, fontSize: 10 } }, s.latest?.time || ''),
+                s.error
+                  ? h('span', { style: { ...S.muted, fontSize: 11 } }, '限流/暂无')
+                  : h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 } },
+                    h('span', {
+                      style: { fontSize: 19, fontWeight: 700, color: dir, fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' },
+                    }, typeof val === 'number' ? `${val}${s.unit || ''}` : '—'),
+                    h(Sparkline, { data: pts.slice(-24), color: dir, w: 74 })))
+            }))),
+    h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源：东财 datacenter（对照 AkShare macro_china_*）· 百分比为与 12 期前对比'))
 }
 
 // ---- 基金 tab ----
@@ -1032,28 +1108,62 @@ function FundsView(props: { active: boolean; mutate: (a: string, p: Record<strin
     try { const r = await apiGet<{ ok: boolean; rows: FundRankRow[] }>(`/fundrank?type=${t}&size=20`); setRows(r.ok ? r.rows : []) } catch { setRows([]) } finally { setLoading(false) }
   }, [])
   useEffect(() => { if (props.active) void load(type) }, [props.active, type]) // eslint-disable-line react-hooks/exhaustive-deps
-  return h('div', { style: S.section },
-    h('div', { style: S.title }, '开放式基金排行 · 近6月'),
-    h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
-      FUND_TYPES.map((t) => h('button', { key: t.v, onClick: () => setType(t.v), style: { ...S.btn, padding: '3px 8px', background: type === t.v ? BRAND : S.btn.background, color: type === t.v ? '#fff' : S.btn.color } }, t.label))),
-    loading ? h('div', { style: S.muted }, '加载中…') : rows.length === 0 ? h('div', { style: S.muted }, '暂无数据') : rows.map((r, i) => h('div', { key: r.code, style: S.row },
-      h('span', { style: { ...S.muted, width: 18 } }, String(i + 1)),
-      h('div', { style: { flex: 1, minWidth: 0 } },
-        h('div', { style: { fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, r.name),
-        h('div', { style: S.muted }, `${r.code} · 净值 ${fmt(r.nav, 4)}`)),
-      h('div', { style: { width: 66, textAlign: 'right' } },
-        h('div', { style: { color: colorOf(r.m6) } }, pctStr(r.m6)),
-        h('div', { style: { ...S.muted, fontSize: 11 } }, `近1年 ${pctStr(r.y1)}`)),
-      h('button', {
-        style: { ...S.btn, padding: '2px 6px', color: added[r.code] ? DOWN : S.btn.color },
-        title: '加入自选（基金）',
-        onClick: () => { props.mutate('addWatch', { code: r.code, type: 'fund', name: r.name }); setAdded((a) => ({ ...a, [r.code]: true })) },
-      }, added[r.code] ? '✓' : '＋'))),
-    h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财基金排行（对照 AkShare fund_open_fund_rank_em）'))
+  const maxAbs = Math.max(1, ...rows.map((r) => Math.abs(r.m6 ?? 0)))
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '开放式基金排行 · 近6月'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '加载中…' : `${rows.length} 只`),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(type), disabled: loading }, loading ? '…' : '刷新')),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 8 } },
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
+          FUND_TYPES.map((t) => h('button', {
+            key: t.v,
+            onClick: () => setType(t.v),
+            style: {
+              ...S.btn, padding: '3px 9px', borderRadius: 999, border: `1px solid ${type === t.v ? BRAND : R.line}`,
+              background: type === t.v ? BRAND_SOFT : S.btn.background,
+              color: type === t.v ? BRAND : S.btn.color,
+              fontWeight: type === t.v ? 600 : 400,
+            },
+          }, t.label))),
+        loading
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+            h(Skeleton, { w: '100%', h: 34 }), h(Skeleton, { w: '100%', h: 34 }), h(Skeleton, { w: '100%', h: 34 }))
+          : rows.length === 0
+            ? h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无基金排行数据，点刷新重试。' })
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 5 } },
+              rows.map((r, i) => {
+                const c = colorOf(r.m6)
+                return h('div', { key: r.code, className: 'dsn-row', style: { ...S.card, gap: 4, padding: '7px 10px' } },
+                  h('div', { style: { display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 } },
+                    h('span', { style: { ...S.muted, width: 16, fontSize: 11, fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' } }, String(i + 1)),
+                    h('div', { style: { flex: 1, minWidth: 0 } },
+                      h('div', { style: { fontWeight: 600, fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, r.name),
+                      h('div', { style: { ...S.muted, fontSize: 10.5 } }, `${r.code} · 净值 ${fmt(r.nav, 4)}`)),
+                    h('div', { style: { textAlign: 'right', flex: '0 0 auto' } },
+                      h('div', { style: { color: c, fontWeight: 600, fontSize: 12, fontVariantNumeric: 'tabular-nums' } }, pctStr(r.m6)),
+                      h('div', { style: { ...S.muted, fontSize: 10 } }, `近1年 ${pctStr(r.y1)}`)),
+                    h('button', {
+                      style: { ...S.btn, padding: '1px 7px', flex: '0 0 auto', color: added[r.code] ? DOWN : S.btn.color },
+                      title: '加入自选（基金）',
+                      onClick: () => { props.mutate('addWatch', { code: r.code, type: 'fund', name: r.name }); setAdded((a) => ({ ...a, [r.code]: true })) },
+                    }, added[r.code] ? '✓' : '＋')),
+                  // 近6月涨跌条：排序之外再看量级
+                  h('div', { style: { display: 'flex', height: 4, borderRadius: 999, background: `${c}18`, overflow: 'hidden' } },
+                    h('div', { style: { width: `${Math.max(3, (Math.abs(r.m6 ?? 0) / maxAbs) * 100)}%`, background: c } })))
+              })))),
+    h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源：东财基金排行（对照 AkShare fund_open_fund_rank_em）'))
 }
 
 // ---- 市场 tab（股票侧：板块涨跌热度 → “今天风险在哪”）----
-interface Sector { code: string; name: string; price?: number; changePercent?: number }
+/** 板块行：上游字段名有 changePct（WeStock）与 changePercent（东财）两种，这里都兼容。 */
+interface Sector { code: string; name: string; price?: number; changePct?: number | string; changePercent?: number; mainNetInflow?: string; leader?: string }
+const sectorPct = (s: Sector): number | undefined => {
+  const raw = s.changePct ?? s.changePercent
+  const n = typeof raw === 'string' ? Number(raw) : raw
+  return typeof n === 'number' && Number.isFinite(n) ? n : undefined
+}
 function MarketView(props: { active: boolean }) {
   const [d, setD] = useState<{ indices: IndexQuote[]; gainers: Sector[]; losers: Sector[] }>({ indices: [], gainers: [], losers: [] })
   const [loading, setLoading] = useState(false)
@@ -1062,22 +1172,56 @@ function MarketView(props: { active: boolean }) {
     try { const r = await apiGet<{ indices: IndexQuote[]; gainers: Sector[]; losers: Sector[] }>('/market'); setD({ indices: r.indices ?? [], gainers: r.gainers ?? [], losers: r.losers ?? [] }) } catch { /* */ } finally { setLoading(false) }
   }, [])
   useEffect(() => { if (props.active && !d.gainers.length) void load() }, [props.active]) // eslint-disable-line react-hooks/exhaustive-deps
-  const sectorRow = (s: Sector) => h('div', { key: s.code, style: S.row },
-    h('div', { style: { flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, s.name),
-    h('div', { style: { width: 70, textAlign: 'right', color: colorOf(s.changePercent) } }, pctStr(s.changePercent)))
-  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
-    h('div', { style: S.section },
-      h('div', { style: S.title }, '市场总览', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
-      d.indices.length === 0
-        ? (loading ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
-          : h('div', { style: S.muted }, '暂无指数'))
-        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))', gap: 6 } },
-          d.indices.map((ix) => h(IndexCard, { key: ix.code, ix })))),
-    h('div', { style: S.section }, h('div', { style: S.title }, h('span', { style: { color: UP } }, '● '), '领涨板块'),
-      d.gainers.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无') : d.gainers.map(sectorRow)),
-    h('div', { style: S.section }, h('div', { style: S.title }, h('span', { style: { color: DOWN } }, '● '), '领跌板块 · 今日风险'),
-      d.losers.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无') : d.losers.map(sectorRow)),
-    h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财行业板块（对照 AkShare stock_board_industry_name_em）'))
+  // 板块用「横向条」而不是纯数字：一眼看出强度排序与量级差。
+  const sectorBar = (s: Sector, maxAbs: number) => {
+    const pct = sectorPct(s) ?? 0
+    const w = Math.max(4, (Math.abs(pct) / (maxAbs || 1)) * 100)
+    const c = typeof sectorPct(s) === 'number' ? colorOf(pct) : V('--dsw-alias-label-tertiary', '#9aa0aa')
+    const inflow = Number(s.mainNetInflow)
+    const inflowText = Number.isFinite(inflow) && inflow !== 0
+      ? `主力净${inflow > 0 ? '流入' : '流出'} ${Math.abs(inflow) >= 1e8 ? `${(Math.abs(inflow) / 1e8).toFixed(2)}亿` : `${(Math.abs(inflow) / 1e4).toFixed(0)}万`}`
+      : ''
+    return h('div', {
+      key: s.code,
+      style: { display: 'flex', alignItems: 'center', gap: 8 },
+      title: [s.name, inflowText, s.leader ? `龙头 ${s.leader}` : ''].filter(Boolean).join(' · '),
+    },
+      h('div', {
+        style: { flex: '0 0 92px', fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+      }, s.name),
+      h('div', { style: { flex: 1, height: 8, borderRadius: 999, background: `${c}1a`, overflow: 'hidden', minWidth: 0 } },
+        h('div', { style: { width: `${w}%`, height: '100%', background: c, borderRadius: 999 } })),
+      h('span', {
+        style: { flex: '0 0 auto', width: 56, textAlign: 'right', color: c, fontWeight: 600, fontSize: 11, fontVariantNumeric: 'tabular-nums' },
+      }, typeof sectorPct(s) === 'number' ? pctStr(sectorPct(s)) : '—'))
+  }
+  const panel = (title: string, color: string, list: Sector[], hint: string) => {
+    const maxAbs = Math.max(1, ...list.map((s) => Math.abs(sectorPct(s) ?? 0)))
+    return h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, h('span', { style: { color } }, '● '), title),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, hint)),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 5 } },
+        list.length === 0
+          ? h(EmptyState, { icon: h(IconChart, { size: 18 }), text: loading ? '加载中…' : '暂无板块数据' })
+          : list.slice(0, 12).map((s) => sectorBar(s, maxAbs))))
+  }
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '市场总览'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '刷新中…' : `${d.indices.length} 个指数`),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
+      h('div', { style: { padding: 9 } },
+        d.indices.length === 0
+          ? (loading
+            ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
+            : h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无指数数据，点刷新重试' }))
+          : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))', gap: 6 } },
+            d.indices.map((ix) => h(IndexCard, { key: ix.code, ix }))))),
+    panel('领涨板块', UP, d.gainers, '资金在往哪去'),
+    panel('领跌板块 · 今日风险', DOWN, d.losers, '风险集中区'),
+    h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源：东财行业板块（对照 AkShare stock_board_industry_name_em）'))
 }
 
 // ---- 快讯 tab（市场电报 + 按持仓/自选的个股新闻）----
@@ -1110,24 +1254,82 @@ function NewsView(props: { active: boolean; data: LiveData; quoteBy: Map<string,
     setCode(c); setSloading(true)
     try { const r = await apiGet<{ news: SNews[] }>(`/news?code=${encodeURIComponent(c)}`); setSnews(r.news ?? []) } catch { setSnews([]) } finally { setSloading(false) }
   }
-  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
-    h('div', { style: S.section },
-      h('div', { style: S.title }, '个股新闻 · 按持仓/自选'),
-      newsTargets.length === 0 ? h('div', { style: S.muted }, '暂无自选/持仓') : h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
-        newsTargets.map((t) => h('button', {
-          key: t.code,
-          title: t.code,
-          onClick: () => void loadCode(t.code),
-          style: { ...S.btn, padding: '2px 8px', background: code === t.code ? BRAND : S.btn.background, color: code === t.code ? '#fff' : S.btn.color },
-        }, t.name))),
-      sloading ? h('div', { style: S.muted }, '加载中…') : snews.map((n, i) => h('div', { key: i, style: { ...S.row, cursor: n.url ? 'pointer' : 'default' }, onClick: () => open(n.url) },
-        h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { style: { fontWeight: 500 } }, n.title), h('div', { style: S.muted }, `${n.date ?? ''} · ${n.source ?? ''}`))))),
-    h('div', { style: S.section },
-      h('div', { style: S.title }, '市场电报', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
-      flash.length === 0 ? h('div', { style: S.muted }, loading ? '加载中…' : '暂无') : flash.map((n, i) => h('div', { key: i, style: { ...S.row, cursor: n.url ? 'pointer' : 'default', alignItems: 'flex-start' }, onClick: () => open(n.url) },
-        h('div', { style: { ...S.muted, width: 44, flex: '0 0 auto' } }, (n.time || '').slice(11, 16) || (n.time || '').slice(5, 10)),
-        h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { style: { fontWeight: 500 } }, n.title), n.summary && n.summary !== n.title ? h('div', { style: { ...S.muted, fontSize: 11 } }, n.summary.slice(0, 80)) : null))),
-      h('div', { style: { ...S.muted, fontSize: 11 } }, '数据源：东财全球财经快讯（对照 AkShare stock_info_global_em）')))
+  // 关键词过滤：电报很长，能按持仓/自选相关词快速缩到几条。
+  const [q, setQ] = useState('')
+  const kw = q.trim().toLowerCase()
+  const shown = kw ? flash.filter((n) => `${n.title} ${n.summary ?? ''}`.toLowerCase().includes(kw)) : flash
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '个股新闻 · 按持仓/自选'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, newsTargets.length ? `${newsTargets.length} 个标的` : '暂无自选/持仓')),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 7 } },
+        newsTargets.length === 0
+          ? h(EmptyState, { icon: h(IconChart, { size: 18 }), text: '先在「行情」里添加自选或持仓，这里就能按标的看新闻。' })
+          : h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 5 } },
+            newsTargets.map((t) => h('button', {
+              key: t.code,
+              title: t.code,
+              onClick: () => void loadCode(t.code),
+              style: {
+                ...S.btn, padding: '3px 9px', borderRadius: 999, border: `1px solid ${code === t.code ? BRAND : R.line}`,
+                background: code === t.code ? BRAND_SOFT : S.btn.background,
+                color: code === t.code ? BRAND : S.btn.color, fontWeight: code === t.code ? 600 : 400,
+              },
+            }, t.name))),
+        code
+          ? (sloading
+            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } }, h(Skeleton, { w: '100%', h: 30 }), h(Skeleton, { w: '90%', h: 30 }))
+            : snews.length === 0
+              ? h(EmptyState, { icon: h(IconChart, { size: 18 }), text: '该标的暂无新闻。' })
+              : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+                snews.map((n, i) => h('div', {
+                  key: i,
+                  className: 'dsn-row',
+                  style: { ...S.card, gap: 3, padding: '7px 10px', cursor: n.url ? 'pointer' : 'default' },
+                  onClick: () => open(n.url),
+                },
+                  h('div', { style: { fontWeight: 500, fontSize: 12, lineHeight: 1.5 } }, n.title),
+                  h('div', { style: { ...S.muted, fontSize: 10.5 } }, `${n.date ?? ''}${n.source ? ` · ${n.source}` : ''}`)))))
+          : null)),
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '市场电报'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `${shown.length}/${flash.length} 条`),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 7 } },
+        h('input', {
+          style: { ...S.input, width: '100%', boxSizing: 'border-box' },
+          placeholder: '过滤关键词（如 美联储 / 茅台 / 降息）',
+          value: q,
+          onChange: (e: any) => setQ(String(e.target.value ?? '')),
+        }),
+        loading && flash.length === 0
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+            h(Skeleton, { w: '100%', h: 32 }), h(Skeleton, { w: '95%', h: 32 }), h(Skeleton, { w: '88%', h: 32 }))
+          : shown.length === 0
+            ? h(EmptyState, { icon: h(IconChart, { size: 18 }), text: kw ? `没有包含「${q.trim()}」的快讯。` : '暂无快讯，点刷新重试。' })
+            // 时间线：左侧竖线串起时间戳，比一行行文字更像"电报流"。
+            : h('div', { style: { display: 'flex', flexDirection: 'column' } },
+              shown.slice(0, 40).map((n, i) => h('div', {
+                key: i,
+                className: 'dsn-row',
+                style: {
+                  display: 'flex', gap: 8, padding: '6px 4px 6px 0', cursor: n.url ? 'pointer' : 'default',
+                  borderTop: i === 0 ? 'none' : `1px solid ${R.line}`,
+                },
+                onClick: () => open(n.url),
+              },
+                h('div', { style: { display: 'flex', flexDirection: 'column', alignItems: 'center', flex: '0 0 42px' } },
+                  h('span', { style: { fontSize: 10.5, color: V('--dsw-alias-label-tertiary', '#8a8f99'), fontVariantNumeric: 'tabular-nums' } },
+                    (n.time || '').slice(11, 16) || (n.time || '').slice(5, 10)),
+                  h('span', { style: { flex: 1, width: 1, background: R.line, marginTop: 3 } })),
+                h('div', { style: { flex: 1, minWidth: 0 } },
+                  h('div', { style: { fontWeight: 500, fontSize: 12, lineHeight: 1.5 } }, n.title),
+                  n.summary && n.summary !== n.title
+                    ? h('div', { style: { ...S.muted, fontSize: 11, lineHeight: 1.5, marginTop: 2 } }, n.summary.slice(0, 90))
+                    : null))))),
+      h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源：东财全球财经快讯（对照 AkShare stock_info_global_em）')))
 }
 
 // ---- K线 tab (local history + event markers) ----
@@ -1146,27 +1348,70 @@ function inferKlineKind(code: string, type?: AssetType): KlineKind {
 
 function KlineChart(props: { kline: HistBar[]; events: HistEvent[] }) {
   const { kline, events } = props
-  const W = 372, H = 168, padTop = 16, padBot = 18
+  const W = 372, H = 168, padTop = 16, padBot = 34, volH = 22
   if (kline.length < 2) return h('div', { style: S.muted }, '暂无K线，先点「同步」')
   const closes = kline.map((b) => b.close)
   const min = Math.min(...closes), max = Math.max(...closes)
   const span = max - min || 1
+  const rising = closes[closes.length - 1]! >= closes[0]!
+  const line = rising ? UP : DOWN
   const x = (i: number) => (i / (kline.length - 1)) * (W - 8) + 4
   const y = (v: number) => padTop + (1 - (v - min) / span) * (H - padTop - padBot)
   const points = closes.map((c, i) => `${x(i).toFixed(1)},${y(c).toFixed(1)}`).join(' ')
+  const area = `4,${H - padBot} ${points} ${(x(kline.length - 1)).toFixed(1)},${H - padBot}`
   const idxByDate = (d: string) => {
     let idx = kline.findIndex((b) => b.date >= d)
     if (idx < 0) idx = kline.length - 1
     return idx
   }
   const marks = events.filter((e) => e.date >= kline[0]!.date).map((e) => ({ e, xi: x(idxByDate(e.date)) }))
+  // 成交量：底部柱状，涨跌染色，判断"放量/缩量"比看数字快。
+  const maxVol = Math.max(1, ...kline.map((b) => b.volume))
+  const volTop = H - padBot + 6
+  const bw = Math.max(1, (W - 8) / kline.length - 1)
   return h('svg', { width: '100%', viewBox: `0 0 ${W} ${H}`, style: { display: 'block' } },
-    h('polyline', { points, fill: 'none', stroke: BRAND, strokeWidth: 1.5 }),
+    h('polygon', { points: area, fill: line, opacity: 0.1 }),
+    h('polyline', { points, fill: 'none', stroke: line, strokeWidth: 1.5 }),
     ...marks.map((m, i) => h('g', { key: i },
       h('line', { x1: m.xi, y1: padTop, x2: m.xi, y2: H - padBot, stroke: EVENT_COLOR(m.e.type), strokeWidth: 1, strokeDasharray: '3 3', opacity: 0.7 }),
       h('circle', { cx: m.xi, cy: padTop, r: 3, fill: EVENT_COLOR(m.e.type) }))),
+    ...kline.map((b, i) => h('rect', {
+      key: `v-${i}`,
+      x: x(i) - bw / 2,
+      y: volTop + (1 - b.volume / maxVol) * volH,
+      width: bw,
+      height: Math.max(0.6, (b.volume / maxVol) * volH),
+      fill: b.close >= b.open ? UP : DOWN,
+      opacity: 0.5,
+    })),
     h('text', { x: 4, y: 11, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${max.toFixed(2)}`),
     h('text', { x: 4, y: H - 4, fontSize: 10, fill: 'currentColor', opacity: 0.6 }, `${min.toFixed(2)} · ${kline[0]!.date}→${kline[kline.length - 1]!.date}`))
+}
+
+/** 区间统计：把"这段走势到底怎么样"量化成几个数，避免只靠肉眼。 */
+function KlineStats(props: { kline: HistBar[] }) {
+  const k = props.kline
+  if (k.length < 2) return null
+  const first = k[0]!, last = k[k.length - 1]!
+  const chg = ((last.close - first.close) / (first.close || 1)) * 100
+  const highs = k.map((b) => b.high), lows = k.map((b) => b.low)
+  const hi = Math.max(...highs), lo = Math.min(...lows)
+  const amplitude = ((hi - lo) / (lo || 1)) * 100
+  let peak = -Infinity, drawdown = 0
+  for (const b of k) {
+    peak = Math.max(peak, b.close)
+    drawdown = Math.min(drawdown, (b.close - peak) / (peak || 1) * 100)
+  }
+  const item = (label: string, value: string, color?: string) => h('div', { style: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 } },
+    h('span', { style: { ...S.muted, fontSize: 10 } }, label),
+    h('span', { style: { fontSize: 12.5, fontWeight: 600, color: color ?? V('--dsw-alias-label-primary', '#111'), fontVariantNumeric: 'tabular-nums' } }, value))
+  return h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(72px, 1fr))', gap: 8 } },
+    item('区间涨跌', `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`, colorOf(chg)),
+    item('振幅', `${amplitude.toFixed(1)}%`),
+    item('最大回撤', `${drawdown.toFixed(1)}%`, DOWN),
+    item('最高', hi.toFixed(2)),
+    item('最低', lo.toFixed(2)),
+    item('最新', last.close.toFixed(2), colorOf(last.close - first.close)))
 }
 
 function KlineView(props: { data: LiveData; requested?: { code: string; kind: string; at: number } }) {
@@ -1206,35 +1451,63 @@ function KlineView(props: { data: LiveData; requested?: { code: string; kind: st
   useBus((e) => {
     if (e.kind === 'history' && (e as BusMsg & { code?: string }).code === code.trim()) void load(code.trim())
   })
-  return h('div', { style: S.section },
-    h('div', { style: S.title }, 'K线与事件'),
-    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-      h('input', {
-        style: { ...S.input, flex: 1, minWidth: 90 },
-        placeholder: '代码 600519',
-        value: code,
-        onChange: (e: { target: { value: string } }) => {
-          const next = e.target.value
-          setCode(next)
-          setKind(inferKlineKind(next))
-        },
-      }),
-      h('select', { style: { ...S.input, width: 70 }, value: kind, onChange: (e: { target: { value: string } }) => setKind(e.target.value) },
-        h('option', { value: 'a' }, 'A股'), h('option', { value: 'hk' }, '港股'), h('option', { value: 'us' }, '美股'), h('option', { value: 'fund' }, '基金')),
-      h('button', { style: S.btn, disabled: busy, onClick: () => void sync() }, busy ? '同步中…' : '同步'),
-      h('button', { style: S.btn, onClick: () => void load(code.trim()) }, '查看')),
-    picks.length ? h('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } }, picks.map((p) => h('button', {
-      key: keyOf(p.code, p.type ?? 'stock'), style: { ...S.btn, padding: '2px 6px', fontSize: 11 },
-      onClick: () => { setCode(p.code); setKind(inferKlineKind(p.code, p.type)); void load(p.code) },
-    }, p.name || p.code))) : null,
-    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
-    hist ? h(KlineChart, { kline: hist.kline, events: hist.events }) : h('div', { style: S.muted }, '输入代码后「同步」拉取并本地保存历史'),
-    hist && hist.events.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 } },
-      h('div', { style: { ...S.muted, fontWeight: 600 } }, `事件标记 (${hist.events.length})`),
-      hist.events.slice(-12).reverse().map((e, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center' } },
-        h('span', { style: { width: 8, height: 8, borderRadius: 999, background: EVENT_COLOR(e.type), flex: '0 0 auto' } }),
-        h('span', { style: { ...S.muted, width: 82, flex: '0 0 auto' } }, e.date),
-        h('span', { style: { flex: 1 } }, e.label)))) : null)
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, 'K线与事件'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, hist?.updatedAt ? `本地更新 ${hist.updatedAt.slice(0, 10)}` : '本地历史库')),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 8 } },
+        h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+          h('input', {
+            style: { ...S.input, flex: '1 1 110px' },
+            placeholder: '代码 600519',
+            value: code,
+            onChange: (e: { target: { value: string } }) => {
+              const next = e.target.value
+              setCode(next)
+              setKind(inferKlineKind(next))
+            },
+            onKeyDown: onEnterCommit(() => void load(code.trim())),
+          }),
+          h('select', { style: { ...S.input, width: 74, flex: '0 0 auto' }, value: kind, onChange: (e: { target: { value: string } }) => setKind(e.target.value) },
+            h('option', { value: 'a' }, 'A股'), h('option', { value: 'hk' }, '港股'), h('option', { value: 'us' }, '美股'), h('option', { value: 'fund' }, '基金')),
+          h('button', { style: S.btnPrimary, disabled: busy, onClick: () => void sync() }, busy ? '同步中…' : '同步'),
+          h('button', { style: S.btn, onClick: () => void load(code.trim()) }, '查看')),
+        picks.length ? h('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } }, picks.map((p) => h('button', {
+          key: keyOf(p.code, p.type ?? 'stock'),
+          style: {
+            ...S.btn, padding: '2px 8px', fontSize: 11, borderRadius: 999,
+            border: `1px solid ${code.trim() === p.code ? BRAND : R.line}`,
+            background: code.trim() === p.code ? BRAND_SOFT : S.btn.background,
+            color: code.trim() === p.code ? BRAND : S.btn.color,
+          },
+          onClick: () => { setCode(p.code); setKind(inferKlineKind(p.code, p.type)); void load(p.code) },
+        }, p.name || p.code))) : null,
+        hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null)),
+    hist && hist.kline.length >= 2
+      ? h('div', { style: S.group },
+        h('div', { style: S.groupHead },
+          h('div', { style: { ...S.title, marginBottom: 0 } }, `${code.trim()} 走势`),
+          h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `${hist.kline.length} 根`)),
+        h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 8 } },
+          h(KlineChart, { kline: hist.kline, events: hist.events }),
+          h(KlineStats, { kline: hist.kline })))
+      : h('div', { style: S.group },
+        h('div', { style: S.groupHead }, h('div', { style: { ...S.title, marginBottom: 0 } }, 'K线与事件')),
+        h('div', { style: { padding: 9 } },
+          busy
+            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } }, h(Skeleton, { w: '100%', h: 120 }), h(Skeleton, { w: '70%', h: 14 }))
+            : h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '输入代码后点「同步」拉取历史并本地保存；之后离线也能看走势与事件标记。' }))),
+    hist && hist.events.length ? h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '事件标记'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `${hist.events.length} 个`)),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 3 } },
+        hist.events.slice(-12).reverse().map((e, i) => h('div', { key: i, className: 'dsn-row', style: { display: 'flex', gap: 8, alignItems: 'center', padding: '4px 4px', borderRadius: 6 } },
+          h('span', { style: { width: 8, height: 8, borderRadius: 999, background: EVENT_COLOR(e.type), flex: '0 0 auto' } }),
+          h('span', { style: { ...S.muted, width: 78, flex: '0 0 auto', fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, e.date),
+          h('span', { style: { flex: 1, minWidth: 0, fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, e.label),
+          typeof e.value === 'number' ? h('span', { style: { ...S.muted, fontSize: 11, flex: '0 0 auto' } }, fmt(e.value, 2)) : null)))) : null)
 }
 
 // ---- 技能 tab (local playbooks + 盈米 remote skills) ----
@@ -1263,20 +1536,56 @@ function SkillsView() {
   const toggle = (sel: string[], set: (v: string[]) => void, name: string) => set(sel.includes(name) ? sel.filter((n) => n !== name) : [...sel, name])
   const row = (sel: string[], set: (v: string[]) => void, s: SkillEntry) => {
     const on = sel.includes(s.name)
-    return h('div', { key: s.name, style: { display: 'flex', gap: 8, alignItems: 'flex-start', padding: '3px 0' } },
-      h('button', { onClick: () => toggle(sel, set, s.name), style: { ...S.btn, padding: '2px 8px', flex: '0 0 auto', background: on ? BRAND : S.btn.background, color: on ? '#fff' : S.btn.color } }, on ? '启用' : '停用'),
+    return h('div', {
+      key: s.name,
+      className: 'dsn-row',
+      style: {
+        ...S.card, gap: 4, padding: '8px 10px', flexDirection: 'row', alignItems: 'center',
+        borderLeft: `3px solid ${on ? DOWN : V('--dsw-alias-border-l2', '#dfe3e8')}`,
+        opacity: on ? 1 : 0.72,
+      },
+    },
       h('div', { style: { flex: 1, minWidth: 0 } },
-        h('div', { style: { fontWeight: 500 } }, s.name),
-        h('div', { style: { ...S.muted, fontSize: 11 } }, s.description.slice(0, 60))))
+        h('div', { style: { fontWeight: 600, fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, s.name),
+        h('div', { style: { ...S.muted, fontSize: 11, lineHeight: 1.5 } }, s.description.slice(0, 80))),
+      // 开关：一眼看出启用状态，而不是"启用/停用"两个词义相近的按钮。
+      h('button', {
+        onClick: () => toggle(sel, set, s.name),
+        title: on ? '点击停用' : '点击启用',
+        style: {
+          font: 'inherit', cursor: 'pointer', flex: '0 0 auto', border: 'none', borderRadius: 999,
+          width: 34, height: 18, padding: 0, position: 'relative',
+          background: on ? DOWN : V('--dsw-alias-border-l2', '#cfd4da'), transition: 'background .15s',
+        },
+      },
+        h('span', {
+          style: {
+            position: 'absolute', top: 2, left: on ? 18 : 2, width: 14, height: 14,
+            borderRadius: 999, background: '#fff', transition: 'left .15s', boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+          },
+        })))
   }
-  return h('div', { style: S.section },
-    h('div', { style: S.title }, '技能', h('button', { style: { ...S.btn, padding: '2px 8px', marginLeft: 'auto' }, disabled: busy, onClick: () => void save() }, busy ? '…' : '保存')),
-    hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, hint) : null,
-    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 4 } }, '本插件技能（进入 skill 目录，按需加载正文）'),
-    cat.local.map((s) => row(localSel, setLocalSel, s)),
-    h('div', { style: { ...S.muted, fontWeight: 600, marginTop: 8 } }, cat.yingmiAvailable ? '盈米金融场景 skill（标准 SKILL.md · scope 可见范围）' : '盈米 skill（需全局安装并接入 yingmi-skill-cli）'),
-    cat.yingmi.length ? cat.yingmi.map((s) => row(ymSel, setYmSel, s)) : h('div', { style: S.muted }, '—'),
-    h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6 } }, '盈米全部停用=清除 scope（默认全部可见）；启用项写入 remote-skill scope。'))
+  const section = (title: string, hintText: string, list: SkillEntry[], sel: string[], set: (v: string[]) => void) => h('div', { style: S.group },
+    h('div', { style: S.groupHead },
+      h('div', { style: { ...S.title, marginBottom: 0 } }, title),
+      h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `${sel.length}/${list.length} 启用`)),
+    h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 5 } },
+      list.length === 0
+        ? h(EmptyState, { icon: h(IconChart, { size: 18 }), text: hintText })
+        : list.map((s) => row(sel, set, s))))
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '技能开关'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, hint || '保存后即时生效'),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, disabled: busy, onClick: () => void save() }, busy ? '…' : '保存')),
+      h('div', { style: { padding: 9, ...S.muted, fontSize: 11 } },
+        '开启的技能会进入模型的可用技能目录（按需加载正文）；关闭则不占用上下文。')),
+    section('本插件技能', '暂无本地技能', cat.local, localSel, setLocalSel),
+    section(
+      cat.yingmiAvailable ? '盈米金融场景 skill' : '盈米 skill（未接入）',
+      cat.yingmiAvailable ? '暂无远端技能' : '需全局安装并接入 yingmi-skill-cli；全部停用=清除 scope（默认全部可见）。',
+      cat.yingmi, ymSel, setYmSel))
 }
 
 // ---- 数据源 tab (per-capability provider selection) ----
@@ -1758,27 +2067,47 @@ function DiscoverView() {
   }
 
   return h('div', { style: S.section },
-    h('div', { style: S.title }, '市场发现',
-      h('button', { style: { ...S.btn, marginLeft: 'auto' }, onClick: () => void load() }, '刷新')),
-    error ? h('div', { style: S.muted }, error) : null,
-    !data ? h('div', { style: S.muted }, '加载中…') : null,
-    breadth ? h('div', { style: S.card },
-      h('div', { style: { fontWeight: 600 } }, '涨跌分布（市场情绪）'),
-      h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 4 } },
-        h('span', { style: { color: UP } }, `上涨 ${breadth.upCount ?? '—'}`),
-        h('span', { style: { color: DOWN } }, `下跌 ${breadth.downCount ?? '—'}`),
-        h('span', { style: S.muted }, `涨停 ${breadth.upLimitCount ?? 0} / 跌停 ${breadth.downLimitCount ?? 0}`),
-        h('span', { style: S.muted }, `上涨占比 ${breadth.upRatio ?? '—'}`))) : (data && errOf(data.breadth) ? h('div', { style: S.muted }, `涨跌分布不可用：${errOf(data.breadth)}`) : null),
-    rows(data?.hotStocks).length ? h('div', { style: S.card },
-      h('div', { style: { fontWeight: 600 } }, '热搜股票'),
-      rows(data?.hotStocks).map((r, i) => h('div', { key: `${r.code}-${i}` }, rowLine(r, 'code', 'name', 'zdf', 'zxj')))) : null,
-    rows(data?.hotSectors).length ? h('div', { style: S.card },
-      h('div', { style: { fontWeight: 600 } }, '热门板块'),
-      rows(data?.hotSectors).map((r, i) => h('div', { key: `${r.symbol}-${i}` }, rowLine(r, 'symbol', 'name', 'zdf')))) : null,
-    rows(data?.lhb).length ? h('div', { style: S.card },
-      h('div', { style: { fontWeight: 600 } }, '龙虎榜（机构）'),
-      rows(data?.lhb).map((r, i) => h('div', { key: `${r.code}-${i}` }, rowLine(r, 'code', 'name', 'netBuyRate', 'netBuyAmt')))) : null,
-    data ? h('div', { style: S.muted }, `更新于 ${new Date(data.at).toLocaleTimeString()} · 数据源 WeStock`) : null)
+    h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '市场发现'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, data ? `更新于 ${new Date(data.at).toLocaleTimeString()}` : '加载中…'),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load() }, '刷新')),
+      h('div', { style: { padding: 9 } },
+        error ? h('div', { style: { fontSize: 12, color: UP } }, error) : null,
+        !data && !error ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } }, h(Skeleton, { w: '100%', h: 60 }), h(Skeleton, { w: '90%', h: 90 })) : null)),
+    breadth ? h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '涨跌分布（市场情绪）'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `上涨占比 ${breadth.upRatio ?? '—'}`)),
+      h('div', { style: { padding: 11, display: 'flex', flexDirection: 'column', gap: 8 } },
+        // 涨/跌对比条：把"今天普涨还是普跌"变成一根看得懂的条。
+        h('div', { style: { display: 'flex', height: 10, borderRadius: 999, overflow: 'hidden', background: `${DOWN}22` } },
+          h('div', { style: { width: `${Number(breadth.upRatio) || 0}%`, background: UP } })),
+        h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12 } },
+          h('span', { style: { color: UP, fontWeight: 600 } }, `上涨 ${breadth.upCount ?? '—'}`),
+          h('span', { style: { color: DOWN, fontWeight: 600 } }, `下跌 ${breadth.downCount ?? '—'}`),
+          h('span', { style: S.muted }, `涨停 ${breadth.upLimitCount ?? 0} · 跌停 ${breadth.downLimitCount ?? 0}`)))) : (data && errOf(data.breadth) ? h('div', { style: S.group },
+      h('div', { style: S.groupHead }, h('div', { style: { ...S.title, marginBottom: 0 } }, '涨跌分布（市场情绪）')),
+      h('div', { style: { padding: 9, ...S.muted, fontSize: 11 } }, `不可用：${errOf(data.breadth)}`)) : null),
+    rows(data?.hotStocks).length ? h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '热搜股票'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, '市场注意力')),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 3 } },
+        rows(data?.hotStocks).map((r, i) => h('div', { key: `${r.code}-${i}`, className: 'dsn-row', style: { padding: '4px 4px', borderRadius: 6 } }, rowLine(r, 'code', 'name', 'zdf', 'zxj'))))) : null,
+    rows(data?.hotSectors).length ? h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '热门板块'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, '资金关注')),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 3 } },
+        rows(data?.hotSectors).map((r, i) => h('div', { key: `${r.symbol}-${i}`, className: 'dsn-row', style: { padding: '4px 4px', borderRadius: 6 } }, rowLine(r, 'symbol', 'name', 'zdf'))))) : null,
+    rows(data?.lhb).length ? h('div', { style: S.group },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '龙虎榜（机构）'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, '净买入')),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 3 } },
+        rows(data?.lhb).map((r, i) => h('div', { key: `${r.code}-${i}`, className: 'dsn-row', style: { padding: '4px 4px', borderRadius: 6 } }, rowLine(r, 'code', 'name', 'netBuyRate', 'netBuyAmt'))))) : null,
+    data ? h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源 WeStock（本地 CLI，免鉴权）') : null)
 }
 
 // ---- 投研资料库 tab ----

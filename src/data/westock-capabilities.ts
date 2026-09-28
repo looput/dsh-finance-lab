@@ -192,10 +192,11 @@ export const WESTOCK_SPECS: WestockSpec[] = [
     capability: 'sectors',
     group: '板块',
     label: '全市场板块行情榜',
-    usage: 'westock sector ranking',
+    usage: 'westock sector ranking [--order desc|asc]',
     sampleArgs: {},
     codeKind: 'raw',
-    argv: () => ['sector', 'ranking'],
+    // order 必须传下去：CLI 默认按涨幅降序，写死会让「领跌榜」拿回的还是领涨榜。
+    argv: (a) => ['sector', 'ranking', ...flag('--order', String(a.order ?? '').trim())],
   },
   {
     id: 'ws_sector_constituent',

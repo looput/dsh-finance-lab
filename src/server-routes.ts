@@ -527,11 +527,23 @@ export function registerRoutes(
         if (req.method === 'GET' && sub === '/market') {
           const [gain, lose] = await Promise.all([finance.getSectorBoard('desc'), finance.getSectorBoard('asc')])
           const snapshot = await buildLiveSnapshot(finance, [])
+          const pctOf = (r: unknown): number => {
+            const o = (r ?? {}) as Record<string, unknown>
+            return Number(o.changePct ?? o.changePercent ?? o.zdf ?? NaN)
+          }
+          // 兜底：某些 provider 会忽略 order 参数（两个榜返回同一份数据），
+          // 这里按涨跌幅自行排序，保证「领跌 = 真的在跌」。
+          const sortByPct = (rows: unknown[], dir: 'desc' | 'asc') => [...rows]
+            .sort((a, b) => (dir === 'desc' ? pctOf(b) - pctOf(a) : pctOf(a) - pctOf(b)))
+          const g = gain.ok && Array.isArray(gain.data) ? gain.data as unknown[] : []
+          const l = lose.ok && Array.isArray(lose.data) ? lose.data as unknown[] : []
+          const gainers = sortByPct(g, 'desc').slice(0, 10)
+          const losers = sortByPct(l.length ? l : g, 'asc').slice(0, 10)
           return sendJson(res, 200, {
             at: new Date().toISOString(),
             indices: snapshot.indices,
-            gainers: gain.ok && Array.isArray(gain.data) ? (gain.data as unknown[]).slice(0, 10) : [],
-            losers: lose.ok && Array.isArray(lose.data) ? (lose.data as unknown[]).slice(0, 10) : [],
+            gainers,
+            losers,
           })
         }
         if (req.method === 'GET' && sub === '/news') {
