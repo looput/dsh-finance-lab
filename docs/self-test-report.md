@@ -327,3 +327,19 @@ CLI 实际提供 **65 个叶子命令**，插件此前已接入 55 个 capabilit
 上游以「数据为空 / 区间内未上龙虎榜」表示**正常空结果**，之前被当成失败并抛错，
 导致「个股无事件」「区间内未上榜」在面板里显示为错误。现在识别这类措辞，返回空集 + 原因。
 
+## 9. CLI 方式接入 WeStock
+
+插件本来就是 CLI 接入（`runWestock` spawn 二进制 + `parseMarkdownTables` 解析），
+本轮把它包装成可直接敲的命令：`scripts/westock.sh` + `scripts/westock-cli.ts`（`npm run westock`）。
+
+三种用法（均已实测）：
+1. **原生透传**：`./scripts/westock.sh quote sh600519` / `kline sh600519 --period day --limit 3` —— 输出 CLI 原文；
+2. **能力目录**：`--cap consensus --args '{"code":"600519"}'` —— 走 ProviderRegistry，带缓存、多源回落、表格解析，输出 JSON；
+3. **元信息**：`--list [--group 研究]`（4 条研究类能力）、`--status`（`westock 0.0.5 channel=workbuddy`）。
+
+细节：
+- 二进制定位顺序 `--bin` / `WESTOCK_BIN` / `<包>/.dsh-home/bin/westock` / `~/.westock/bin/westock`；
+  显式 `--bin` 指向不存在的文件时直接报错退出（不静默回退）。
+- 未找到二进制时输出安装命令而非堆栈。
+- system prompt 已告知 Agent 该命令与 `westock_call` 工具两种入口。
+

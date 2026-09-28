@@ -290,3 +290,22 @@ skills/               财务分析、组合、策略、风控与研究团队 pla
 scripts/              provider 探测、可用性测试和本地 Web 启动脚本
 cordis.patch.yml      Harness 插件注册与默认配置
 ```
+
+## 命令行方式使用 WeStock
+
+插件内部就是「spawn `westock` 二进制 + 解析 Markdown 表格」，因此可以直接在终端/Agent bash 里敲：
+
+```bash
+./scripts/westock.sh quote sh600519              # 透传原生子命令（输出 CLI 原文）
+./scripts/westock.sh kline sh600519 --period day --limit 10
+./scripts/westock.sh fund flow sh600519 --json   # 表格解析成 JSON
+./scripts/westock.sh --cap consensus --args '{"code":"600519"}'   # 走能力目录：缓存 + 多源回落 + JSON
+./scripts/westock.sh --list --group 研究          # 能力目录
+./scripts/westock.sh --status                     # 二进制与版本
+npm run westock -- quote sh600519                 # 等价写法
+```
+
+- 二进制定位：`--bin` / `WESTOCK_BIN` / `<包>/.dsh-home/bin/westock` / `~/.westock/bin/westock`；未安装时提示 `npm run westock:install`。
+- 超时用 `WESTOCK_TIMEOUT_MS` 控制（默认 20000）。
+- Agent 侧不需要 shell：用工具 `westock_call`（传 `argv` 或 `capability+args`）即可，同样是只读白名单。
+

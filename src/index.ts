@@ -247,6 +247,7 @@ export function apply(ctx: Context, config: Config) {
     text: [
       `## WeStock 数据源（腾讯自选股 CLI，免鉴权）— ${WESTOCK_SPECS.length} 个能力`,
       '- 不确定有什么数据时先调 `westock_capabilities`（分组列出全部能力、用法与示例参数）；想用目录外的子命令用 `westock_call` 传 argv（只读白名单）。',
+      `- 也可以直接用命令行：\`${packageRoot}/scripts/westock.sh <子命令...>\`（或 \`npm run westock -- <子命令>\`）。透传原生 CLI 原文；\`--cap <能力> --args '<JSON>'\` 走插件能力目录并输出 JSON（带缓存与多源回落）；\`--list\` 看能力目录，\`--status\` 看二进制版本。`,
       '- 常用专用工具：get_money_flow（资金流）· get_consensus（一致预期/目标价）· get_shareholder · get_dividend · get_stock_events / get_risk_events · get_disclosure_calendar · get_notice_list · get_dragon_tiger · get_margin_trade · get_chip_distribution · get_stock_score · get_institution_rating · get_north_holding。',
       '- 市场层面：get_market_breadth（涨跌分布/情绪温度）· get_hot_rank（热搜股票/板块/ETF/热文）· screen_stocks（排行/条件/策略/标签/事件选股）· get_market_calendar（新股/财报披露/投资/停复牌/交易日历）。',
       '- 投研建议链路：screen_stocks 初筛 → get_realtime_quote/get_stock_kline 看价格 → get_consensus/get_financial_indicators 看基本面 → get_money_flow/get_north_holding 看资金 → collect_research 沉淀研报 → add_research_note 记录观点。',
