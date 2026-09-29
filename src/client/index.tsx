@@ -1941,7 +1941,7 @@ function DataTable(props: { rows: Array<Record<string, string>>; maxRows?: numbe
         cols.map((c) => h('td', { key: c, style: cell, title: String(r[c] ?? '') }, String(r[c] ?? '—'))))))))
 }
 
-function DossierView(props: { initial?: string }) {
+function DossierView(props: { initial?: string; onOpen?: (item: AnalysisItem) => void }) {
   const [code, setCode] = useState(props.initial ?? '')
   const [data, setData] = useState<DossierPayload>()
   const [busy, setBusy] = useState(false)
@@ -1979,7 +1979,13 @@ function DossierView(props: { initial?: string }) {
           onChange: (e: any) => setCode(String(e.target.value ?? '')),
           onKeyDown: onEnterCommit(() => void load(code)),
         }),
-        h('button', { style: S.btnPrimary, disabled: busy || !code.trim(), onClick: () => void load(code) }, busy ? '取数中…' : '拉取档案')),
+        h('button', { style: S.btnPrimary, disabled: busy || !code.trim(), onClick: () => void load(code) }, busy ? '取数中…' : '拉取档案'),
+        // 档案是"数据"，解读是"结论"：看完 18 个维度后一键让模型给结论。
+        data && props.onOpen ? h('button', {
+          style: S.btn,
+          title: '基于这份档案生成 AI 解读',
+          onClick: () => props.onOpen!({ code: code.trim(), type: 'stock' }),
+        }, 'AI 解读') : null),
       error ? h('div', { style: { padding: '0 9px 9px', fontSize: 11, color: UP } }, error) : null),
 
     !data && !busy && !error
@@ -2110,6 +2116,59 @@ function DiscoverView() {
     data ? h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源 WeStock（本地 CLI，免鉴权）') : null)
 }
 
+/**
+ * 资料正文编辑器工具条：窄面板里做不了富文本，但常用 Markdown（标题/加粗/列表/引用/表格/分隔）
+ * 一键插入能省掉大量手写符号。插入逻辑按"整行"处理，避免破坏已有缩进。
+ */
+function EditorToolbar(props: {
+  editor: string
+  setEditor: (v: string) => void
+  preview: boolean
+  onTogglePreview: () => void
+}) {
+  const { editor, setEditor, preview, onTogglePreview } = props
+  const wrapLine = (prefix: string) => {
+    const el = document.activeElement as HTMLTextAreaElement | null
+    const start = el?.selectionStart ?? editor.length
+    const end = el?.selectionEnd ?? start
+    const sel = editor.slice(start, end)
+    const lineStart = editor.lastIndexOf('\n', Math.max(0, start - 1)) + 1
+    const body = sel || editor.slice(lineStart, start)
+    const next = editor.slice(0, lineStart) + prefix + body + editor.slice(end === start ? start : end)
+    setEditor(next)
+  }
+  const insertBlock = (text: string) => {
+    const at = editor.length
+    const sep = editor && !editor.endsWith('\n') ? '\n\n' : ''
+    setEditor(editor + sep + text)
+    return at
+  }
+  const btn = (label: string, title: string, fn: () => void) => h('button', {
+    key: label,
+    style: { ...S.btn, padding: '2px 7px', fontSize: 11, fontFamily: MONO },
+    title,
+    disabled: preview,
+    onClick: fn,
+  }, label)
+  return h('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' } },
+    btn('H2', '二级标题', () => wrapLine('## ')),
+    btn('B', '加粗', () => setEditor(`${editor}**粗体**`)),
+    btn('•', '无序列表', () => wrapLine('- ')),
+    btn('1.', '有序列表', () => wrapLine('1. ')),
+    btn('>', '引用', () => wrapLine('> ')),
+    btn('表', '插入表格', () => insertBlock('| 项目 | 数值 |\n| --- | --- |\n|  |  |')),
+    btn('—', '分隔线', () => insertBlock('\n---')),
+    h('button', {
+      style: {
+        ...S.btn, padding: '2px 8px', fontSize: 11, marginLeft: 'auto',
+        border: `1px solid ${preview ? BRAND : R.line}`,
+        background: preview ? BRAND_SOFT : S.btn.background,
+        color: preview ? BRAND : S.btn.color,
+      },
+      onClick: onTogglePreview,
+    }, preview ? '继续编辑' : '预览'))
+}
+
 // ---- 投研资料库 tab ----
 interface VaultNote { at: string; text: string; author?: string }
 interface VaultItem {
@@ -2198,6 +2257,10 @@ function ResearchView() {
   const [raw, setRaw] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editor, setEditor] = useState('')
+  /** 编辑态里的「编辑 / 预览」切换，窄面板下并排分栏太挤，用切换代替。 */
+  const [editPreview, setEditPreview] = useState(false)
+  /** 编辑器正文的基线值（进入编辑时快照），用于判断是否"未保存"。 */
+  const [editorBase, setEditorBase] = useState('')
   const [note, setNote] = useState('')
   const [hint, setHint] = useState('')
   const [busy, setBusy] = useState(false)
@@ -2277,6 +2340,8 @@ function ResearchView() {
       const r = await apiPost<{ ok: boolean; error?: string }>('/research/body', { id: detail.item.id, body: editor })
       if (!r.ok) { setHint(r.error ?? '保存失败'); return }
       setHint('正文已写入本地文件')
+      setEditorBase(editor)
+      setEditPreview(false)
       setEditing(false)
       await open(detail.item.id)
       await load()
@@ -2551,19 +2616,44 @@ function ResearchView() {
                 title: '把这条资料带进对话，让 Agent 继续研究并回写观点',
                 onClick: () => void ask(promptForItem(it, detail.body ?? '')),
               }, '问 Agent'),
-              h('button', { style: S.btn, onClick: () => { setEditing(!editing); setEditor(detail.body ?? '') } }, editing ? '取消编辑' : '编辑正文'),
+              h('button', {
+                style: S.btn,
+                onClick: () => {
+                  if (editing) { setEditing(false); setEditPreview(false) }
+                  else { setEditor(detail.body ?? ''); setEditorBase(detail.body ?? ''); setEditPreview(false); setEditing(true) }
+                },
+              }, editing ? '取消编辑' : '编辑正文'),
               h('button', { style: S.btn, onClick: () => setRaw(!raw) }, raw ? '渲染视图' : '查看原文'),
               h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, `${(detail.body ?? '').length} 字`)),
             h('div', { style: RS.body },
               editing ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, height: '100%' } },
-                h('textarea', {
-                  style: RS.editor,
-                  value: editor,
-                  onChange: (e: any) => setEditor(String(e.target.value ?? '')),
+                h(EditorToolbar, {
+                  editor,
+                  setEditor,
+                  preview: editPreview,
+                  onTogglePreview: () => setEditPreview(!editPreview),
                 }),
-                h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
-                  h('button', { style: S.btn, disabled: busy, onClick: () => void saveBody() }, '保存正文到文件'),
-                  h('span', { style: { ...S.muted, fontSize: 11, fontFamily: MONO } }, detail.path)))
+                editPreview
+                  ? h('div', { style: { ...RS.body, fontSize: 13, lineHeight: 1.7, wordBreak: 'break-word' } },
+                    h(ReactMarkdown, { remarkPlugins: [remarkGfm], components: ANALYSIS_MARKDOWN_COMPONENTS }, editor || '（空）'))
+                  : h('textarea', {
+                    style: RS.editor,
+                    value: editor,
+                    onChange: (e: any) => setEditor(String(e.target.value ?? '')),
+                    // Cmd/Ctrl+S 保存、Esc 退出编辑：在面板里编辑正文时不用摸鼠标。
+                    onKeyDown: (e: any) => {
+                      if ((e.metaKey || e.ctrlKey) && String(e.key).toLowerCase() === 's') {
+                        e.preventDefault(); void saveBody()
+                      } else if (e.key === 'Escape') {
+                        setEditing(false); setEditPreview(false)
+                      }
+                    },
+                  }),
+                h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+                  h('button', { style: S.btnPrimary, disabled: busy, onClick: () => void saveBody() }, '保存正文 (⌘S)'),
+                  editor !== editorBase ? h('span', { style: { fontSize: 11, color: '#c98a1a' } }, '● 未保存') : null,
+                  h('span', { style: { ...S.muted, fontSize: 11 } }, `${editor.length} 字`),
+                  h('span', { style: { ...S.muted, fontSize: 11, fontFamily: MONO, marginLeft: 'auto', wordBreak: 'break-all' } }, detail.path)))
                 : raw ? h('pre', { style: RS.pre }, detail.raw ?? '')
                   : h('div', { style: { fontSize: 13.5, lineHeight: 1.7, wordBreak: 'break-word', maxWidth: 860 } },
                     h(ReactMarkdown, { remarkPlugins: [remarkGfm], components: ANALYSIS_MARKDOWN_COMPONENTS },
@@ -2815,7 +2905,7 @@ function PanelBody(props: {
       tab === 'news' ? h(NewsView, { active: tab === 'news', data, quoteBy }) : null,
       tab === 'kline' ? h(KlineView, { data, requested: klineTarget }) : null,
       tab === 'research' ? h(ResearchView, null) : null,
-      tab === 'dossier' ? h(DossierView, { initial: klineTarget?.code }) : null,
+      tab === 'dossier' ? h(DossierView, { initial: klineTarget?.code, onOpen: props.onOpenAnalysis }) : null,
       tab === 'discover' ? h(DiscoverView, null) : null,
       tab === 'sources' ? h(SourcesView, null) : null,
       tab === 'skills' ? h(SkillsView, null) : null,
