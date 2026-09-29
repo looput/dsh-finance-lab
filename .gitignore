@@ -13,3 +13,8 @@ data/analysis-cache.json
 *.tgz
 .DS_Store
 package-lock.json
+
+# Private investor profile, reviews and research
+data/personal.json
+data/reminders.json
+data/research/

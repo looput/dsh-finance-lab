@@ -1,3 +1,4 @@
+import { valuation, quoteCurrency } from '../valuation.js'
 import type { AssetType, Holding, KlineBar, PortfolioHolding, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
 import { stripMarketSuffix } from './http.js'
 import type { ProviderRegistry } from './registry.js'
@@ -10,27 +11,8 @@ import {
 } from './westock.js'
 import type { Capability } from '../types.js'
 
-export interface RoutedCode { code: string; market: 'A股' | '港股' | '美股' | '基金' }
-
-/**
- * 统一市场路由：`600519`→A股、`00700`→港股、`AAPL`→美股，
- * 并且认得带前缀的写法（`sh515080`/`hk00700`/`usNVDA`）与后缀（`.SH`/`.HK`）。
- * 之前 `sh515080` 因含字母被判成美股 → 打到 Yahoo（不通）→ 首屏等超时。
- */
-export function routeCode(raw: string, type: AssetType = 'stock'): RoutedCode {
-  const s = String(raw ?? '').trim()
-  const upper = s.toUpperCase()
-  let m = upper.match(/^(?:SH|SZ|BJ)(\d{6})$/)
-  if (m) return { code: m[1]!, market: type === 'fund' ? '基金' : 'A股' }
-  m = upper.match(/^HK(\d{4,5})$/)
-  if (m) return { code: m[1]!.padStart(5, '0'), market: '港股' }
-  m = upper.match(/^US([A-Z][A-Z0-9._-]*)$/)
-  if (m) return { code: m[1]!, market: '美股' }
-  const c = stripMarketSuffix(s)
-  if (/[A-Za-z]/.test(c)) return { code: c.toUpperCase(), market: '美股' }
-  if (/^\d{4,5}$/.test(c)) return { code: c.padStart(5, '0'), market: '港股' }
-  return { code: c, market: type === 'fund' ? '基金' : 'A股' }
-}
+export { routeCode, type RoutedCode } from './route-code.js'
+import { routeCode } from './route-code.js'
 
 export function calculateMA(closes: number[], period: number): number[] {
   return closes.map((_, i) => {
@@ -164,35 +146,23 @@ export class FinanceDataService {
     codes: Array<string | { code: string; type?: AssetType }>,
     signal?: AbortSignal,
   ) {
-    const entries = codes
-      .map((c) => (typeof c === 'string' ? { code: c.trim(), type: undefined } : { code: c.code.trim(), type: c.type }))
-      .filter((c) => c.code)
-    const unique = new Map<string, { code: string; type?: AssetType }>()
-    for (const e of entries) if (!unique.has(e.code)) unique.set(e.code, e)
+    const entries = codes.map(c => typeof c === 'string' ? { code: c.trim(), type: 'stock' as AssetType } : { code: c.code.trim(), type: c.type ?? 'stock' }).filter(c => c.code)
+    const unique = new Map(entries.map(e => [`${e.type}:${routeCode(e.code, e.type).code}`, e]))
     if (!unique.size) return { ok: false as const, capability: 'quotes_batch' as const, error: 'empty codes' }
-    const list = [...unique.values()]
-    const batch = await this.registry.call<StockQuote[]>('quotes_batch', { codes: list.map((e) => e.code) }, { signal })
-    if (batch.ok && Array.isArray(batch.data) && batch.data.length) {
-      const got = new Set(batch.data.map((q) => q.code))
-      const missing = list.filter((e) => !got.has(e.code) && !got.has(routeCode(e.code, e.type).code))
-      if (!missing.length) return batch
-      // 批量里缺的标的（如场外基金）按各自市场单只补齐——带 type，避免基金被当成 A 股重试一堆源。
-      const filled = await Promise.all(missing.map((e) => this.getAutoQuote(e.code, signal, e.type ?? 'stock')))
-      const rows = [...batch.data]
-      for (const r of filled) if (r.ok && r.data) rows.push(r.data)
-      return { ...batch, data: rows }
-    }
-    const singles = await Promise.all(list.map((e) => this.getAutoQuote(e.code, signal, e.type ?? 'stock')))
-    const rows = singles.filter((r) => r.ok && r.data).map((r) => r.data as StockQuote)
-    if (!rows.length) {
-      return {
-        ok: false as const,
-        capability: 'quotes_batch' as const,
-        error: batch.ok ? 'batch returned no rows' : (batch.error ?? 'quotes unavailable'),
-        attempts: batch.attempts,
-      }
-    }
-    return { ok: true as const, capability: 'quotes_batch' as const, provider: 'fallback', data: rows }
+    const list = [...unique.values()], stocks = list.filter(e => e.type !== 'fund')
+    const batch = stocks.length ? await this.registry.call<StockQuote[]>('quotes_batch', { codes: stocks.map(e => e.code) }, { signal }) : undefined
+    const valid = (q: StockQuote) => typeof q?.price === 'number' && Number.isFinite(q.price) && q.price >= 0
+    const batched = new Map((batch?.ok && Array.isArray(batch.data) ? batch.data : []).filter(valid).map(q => [routeCode(q.code).code, q]))
+    const resolved = await Promise.all(list.map(async e => {
+      const code = routeCode(e.code, e.type).code
+      const hit = e.type !== 'fund' ? batched.get(code) : undefined
+      if (hit) return { ...hit, code, type: e.type, provider: batch?.provider }
+      const r = await this.getAutoQuote(e.code, signal, e.type)
+      return r.ok && r.data && valid(r.data) ? { ...r.data, code, type: e.type, provider: r.provider } : undefined
+    }))
+    const rows = resolved.filter(r => r !== undefined)
+    if (!rows.length) return { ok: false as const, capability: 'quotes_batch' as const, error: batch?.error ?? 'quotes unavailable', attempts: batch?.attempts }
+    return { ok: true as const, capability: 'quotes_batch' as const, provider: rows.every(r => r.provider === rows[0]?.provider) ? rows[0]?.provider : 'mixed', data: rows }
   }
 
   async getKline(
@@ -414,7 +384,7 @@ export class FinanceDataService {
   async analyzePortfolio(signal?: AbortSignal) {
     const holdings = this.getHoldings()
     // 一次批量行情拉全部持仓，拿不到再并发单取（原来是逐只串行）。
-    const batch = await this.getQuotes(holdings.map((h) => h.code), signal).catch(() => undefined)
+    const batch = await this.getQuotes(holdings.filter(h => h.type !== 'fund').map((h) => ({ code: h.code, type: h.type })), signal).catch(() => undefined)
     const batchBy = new Map<string, StockQuote>()
     for (const q of (batch?.ok && Array.isArray(batch.data) ? batch.data : [])) batchBy.set(q.code, q)
 
@@ -423,19 +393,19 @@ export class FinanceDataService {
     let quoteOk = false
     const loadOne = async (h: PortfolioHolding) => {
       const item: Holding = { ...h, type: h.type ?? 'stock' }
-      const batched = batchBy.get(h.code.trim())
+      const batched = item.type !== 'fund' ? batchBy.get(h.code.trim()) ?? batchBy.get(routeCode(h.code, item.type).code) : undefined
       const quote = batched
         ? { ok: true as const, market: routeCode(h.code, item.type).market, data: batched }
         : await this.getAutoQuote(h.code, signal, item.type)
       const market = quote.market ?? (item.type === 'fund' ? '基金' : 'A股')
       item.market = market
-      if (quote.ok && quote.data?.price != null) {
+      if (quote.ok && typeof quote.data?.price === 'number' && Number.isFinite(quote.data.price) && quote.data.price >= 0) {
         quoteOk = true
         item.currentPrice = quote.data.price
         item.name = item.name ?? quote.data.name
         item.marketValue = quote.data.price * h.quantity
         item.profit = (quote.data.price - h.avgCost) * h.quantity
-        item.profitPercent = ((quote.data.price - h.avgCost) / h.avgCost) * 100
+        item.profitPercent = h.avgCost > 0 ? ((quote.data.price - h.avgCost) / h.avgCost) * 100 : undefined
       }
       return { item, market }
     }
@@ -444,19 +414,21 @@ export class FinanceDataService {
       markets.push(market)
       enriched.push(item)
     }
-    const totalCost = enriched.reduce((s, h) => s + h.avgCost * h.quantity, 0)
-    const totalValue = enriched.reduce((s, h) => s + (h.marketValue ?? h.avgCost * h.quantity), 0)
+    const valued = valuation(enriched.map(h => ({ ...h, price: h.currentPrice, currency: quoteCurrency(h.code, h.type) })))
+    // Concentration/market weights are only meaningful with one currency and complete quotes.
+    const totalValue = valued.consolidated?.value
     return {
       ok: true as const,
       quoteAvailable: quoteOk,
       summary: {
         holdingCount: enriched.length,
-        totalCost,
-        totalValue,
-        totalProfit: totalValue - totalCost,
-        profitPercent: totalCost ? ((totalValue - totalCost) / totalCost) * 100 : 0,
+        totalCost: valued.consolidated?.cost ?? null,
+        totalValue: valued.consolidated?.value ?? null,
+        totalProfit: valued.consolidated?.profit ?? null,
+        profitPercent: valued.consolidated?.profitPercent ?? null,
+        valuation: valued,
       },
-      risk: computeRisk(enriched, markets, totalValue),
+      risk: totalValue != null ? computeRisk(enriched, markets, totalValue) : null,
       holdings: enriched,
     }
   }

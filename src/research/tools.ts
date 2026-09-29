@@ -7,6 +7,7 @@ import {
   RESEARCH_KINDS,
   RESEARCH_STATUSES,
   ResearchValidationError,
+  ResearchConfirmationRequired,
   type ResearchFilter,
   type ResearchItem,
   type ResearchKind,
@@ -277,7 +278,7 @@ export function registerResearchTools(
 
   ctx.tools.register(defineTool({
     name: 'update_research',
-    description: '更新一条资料的元数据/关联/状态（标题、摘要、观点、codes、tags、status）。归档用 archive_research。',
+    description: '更新一条资料的元数据/关联/状态（标题、摘要、观点、codes、tags、status）。观点修改仅创建待确认预览（confirmationRequired），须用户在首页确认，不能宣称已修改。归档用 archive_research。',
     parameters: {
       id: { type: 'string', required: true },
       title: { type: 'string' },
@@ -293,8 +294,8 @@ export function registerResearchTools(
       try {
         const item = await vault.update(String(args.id ?? ''), {
           ...(args.title ? { title: String(args.title) } : {}),
-          ...(args.summary ? { summary: String(args.summary) } : {}),
-          ...(args.opinion ? { opinion: String(args.opinion) } : {}),
+          ...(args.summary !== undefined ? { summary: String(args.summary) } : {}),
+          ...(args.opinion !== undefined ? { opinion: String(args.opinion) } : {}),
           ...(args.codes !== undefined ? { codes: normList(args.codes) } : {}),
           ...(args.tags !== undefined ? { tags: normList(args.tags) } : {}),
           ...(args.status ? { status: normStatus(args.status) } : {}),
@@ -303,6 +304,7 @@ export function registerResearchTools(
         bus.publish({ kind: 'research', action: 'update', id: item.id, title: item.title, origin: 'chat' })
         return asJson({ ok: true, item: brief(item) })
       } catch (err) {
+        if (err instanceof ResearchConfirmationRequired) return asJson({ ok: true, ...err.preview })
         return asJson({ ok: false, error: err instanceof Error ? err.message : String(err) })
       }
     },

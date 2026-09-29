@@ -1,3 +1,5 @@
+import { PersonalStore } from './personal.js'
+import { registerPersonalTools } from './personal-tools.js'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -148,6 +150,8 @@ export function apply(ctx: Context, config: Config) {
   })
 
   ctx.provide('financeData', finance)
+  const personal = new PersonalStore(path.join(dataDir, 'personal.json'))
+  registerPersonalTools(ctx, personal, finance, vault)
   registerTools(ctx, finance, store, analyses, bus)
   registerWestockTools(ctx, finance)
   registerHistoryTools(ctx, finance, history, bus)
@@ -155,7 +159,7 @@ export function apply(ctx: Context, config: Config) {
   const yingmiCommand = (config.mcpSources ?? []).find((s) => s.kind === 'cli' && s.enabled)?.command || undefined
   const skills = registerSkills(ctx, packageRoot, dataDir, yingmiCommand, logger)
   const mcp = registerMcpSources(ctx, config.mcpSources ?? [], dataDir)
-  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, ctx, bus, vault, logger, reminders, scanRemindersNow)
+  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, bus, vault, logger, reminders, scanRemindersNow, personal)
   registerReminderTools(ctx, reminders, scanRemindersNow, bus)
   // 定时扫描：10 分钟一次（插件卸载时随 effect 清理）。
   ctx.effect(() => {
@@ -174,7 +178,7 @@ export function apply(ctx: Context, config: Config) {
     text: [
       '## Finance portfolio file',
       `- Holdings/watchlist live in a local JSON file: ${store.path}`,
-      '- After reading a user-uploaded holdings screenshot, call import_holdings (bulk) or upsert_holding to write it; the "金融面板" sidebar refreshes live.',
+      '- After reading a user-uploaded holdings screenshot, call import_holdings to propose a preview; the user must confirm in the personal home before writing it; the "金融面板" sidebar refreshes live.',
       '- Market data uses direct HTTP endpoints (Eastmoney / Tencent), not akshare. If a market tool fails, call probe_finance_sources first.',
       '- Holdings CRUD works without quotes; P&L enrichment needs a healthy quote provider.',
       '- 历史K线/财报/分红可用 sync_history 落地到本地库，再用 get_history 读取（含事件标记）。',

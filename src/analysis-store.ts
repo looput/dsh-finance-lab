@@ -88,9 +88,9 @@ export class AnalysisStore {
 
   private async persist(): Promise<void> {
     this.data.updatedAt = new Date().toISOString()
-    await mkdir(path.dirname(this.file), { recursive: true })
+    await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 })
     const tmp = `${this.file}.tmp`
-    await writeFile(tmp, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8')
+    await writeFile(tmp, `${JSON.stringify(this.data, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
     await rename(tmp, this.file)
   }
 }
