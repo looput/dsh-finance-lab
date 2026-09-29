@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { FinanceDataService } from '../data/service.js'
 import type { PanelBus } from '../panel-bus.js'
 import type { HistoryStore } from './store.js'

@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { stripMarketSuffix } from './data/http.js'
+import type { Logger } from './log.js'
 import type { AssetType, PortfolioHolding, WatchItem } from './types.js'
 
 export interface PortfolioFile {
@@ -45,7 +46,10 @@ export class PortfolioStore {
   private loaded = false
   private readonly changeListeners = new Set<(file: PortfolioFile) => void>()
 
-  constructor(private readonly file: string) {}
+  constructor(
+    private readonly file: string,
+    private readonly logger?: Logger,
+  ) {}
 
   get path(): string {
     return this.file
@@ -80,8 +84,14 @@ export class PortfolioStore {
         }).filter((w) => w.code)),
         updatedAt: parsed.updatedAt ?? new Date().toISOString(),
       }
-    } catch {
+    } catch (err) {
       // missing/corrupt file: seed defaults and persist so the path exists for the Agent.
+      // A first-run ENOENT is expected (debug); a corrupt file is news (warn).
+      const code = (err as NodeJS.ErrnoException)?.code
+      this.logger?.[code === 'ENOENT' ? 'debug' : 'warn'](
+        'portfolio load failed, seeding defaults',
+        { file: this.file, error: err instanceof Error ? err.message : String(err) },
+      )
       this.data = { holdings: [], watchlist: DEFAULT_WATCHLIST, updatedAt: new Date().toISOString() }
       await this.persist().catch(() => {})
     }

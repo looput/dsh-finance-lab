@@ -1,5 +1,5 @@
 {
-  "name": "dsn-finance",
+  "name": "dsh-finance",
   "version": "0.1.0",
   "description": "DeepSeek Harness finance plugin: direct market HTTP APIs, portfolio settings, model tools",
   "type": "module",
@@ -25,8 +25,13 @@
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "prepare": "npm run build",
     "probe": "tsx scripts/probe_sources.ts --out data/probe-report.json",
+    "test:offline": "tsx scripts/test_offline.ts",
     "test:avail": "tsx scripts/test_availability.ts",
-    "web:restart": "bash scripts/restart_web.sh"
+    "test:westock": "tsx scripts/test_westock.ts",
+    "westock:install": "bash scripts/install_westock.sh",
+    "web": "bash scripts/dev_web.sh",
+    "web:restart": "bash scripts/restart_web.sh",
+    "westock": "tsx scripts/westock-cli.ts"
   },
   "dsh": {
     "bundle": {
@@ -35,19 +40,22 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-ui-settings-plugins"
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.0",
-    "@deepseek-ai/dsh-host-webserver": ">=0.1.0-rc.7",
-    "@deepseek-ai/dsh-skill": ">=0.1.0-rc.7",
-    "@deepseek-ai/dsh-skill-filesystem": ">=0.1.0-rc.7",
-    "@deepseek-ai/dsh-settings": ">=0.1.0-rc.7",
-    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.7",
-    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7",
-    "@deepseek-ai/dsh-web": ">=0.1.0-rc.7",
+    "@deepseek-ai/cordis": ">=4.0.4",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-skill": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-skill-filesystem": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-settings": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-tools": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-web": ">=0.1.7-rc.2",
     "@deepseek-ai/schemastery": ">=3.18.0",
     "react": ">=18"
   },
@@ -60,14 +68,14 @@
     }
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-settings": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-skill": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-skill-filesystem": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.7",
-    "@deepseek-ai/schemastery": "3.18.1",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-settings": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-skill": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-skill-filesystem": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^22.13.10",
     "@types/react": "^19.0.10",
     "esbuild": "^0.28.2",
@@ -78,29 +86,31 @@
     "typescript": "^5.8.2"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^22.19.0 || >=24.2.0"
   },
   "license": "MIT",
   "dependencies": {
-    "@deepseek-ai/cordis-plugin-group": "^1.0.1",
-    "@deepseek-ai/dsh-anonymous-user-id": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-atomic-write": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-bash-local": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-code-runtime": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-compaction": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-fs": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-mcp-client": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-output-retention": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-sandbox": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-scope": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-session-telemetry": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-session-title-llm": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-shell": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-spill": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-subagent-in-process-driver": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-timeout": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-workflow": "^0.1.0-rc.7"
-  }
+    "@deepseek-ai/cordis-plugin-group": "^1.0.4",
+    "@deepseek-ai/dsh-anonymous-user-id": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-atomic-write": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-bash-local": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-compaction": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-fs": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-invariants": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-mcp-client": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-output-retention": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-ptc-runtime": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-sandbox": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-scope": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-session-telemetry": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-session-title-llm": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-shell": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-spill": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-subagent-in-process-driver": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-subprocess": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-timeout": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-util-values": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-workflow": "^0.1.7-rc.2"
+  },
+  "packageManager": "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000"
 }

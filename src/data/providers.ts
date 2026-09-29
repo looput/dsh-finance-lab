@@ -17,6 +17,8 @@ import {
   toTxSymbol,
   type HttpGetOptions,
 } from './http.js'
+import { DEFAULT_INDEX_CODES, westockProviders } from './westock.js'
+import { WESTOCK_CAPABILITY_PROVIDERS, WESTOCK_SPECS } from './westock-capabilities.js'
 import type { Capability, KlineBar, ProviderContext, ProviderFn, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
 
 const execFileAsync = promisify(execFile)
@@ -552,9 +554,71 @@ function searchQuery(args: Record<string, unknown>): string {
   return query
 }
 
+/** 解析 Bing RSS（纯函数，可离线测试）：提取 title/link/description 并还原实体转义。 */
+/** 还原 XML 文本：CDATA 包裹 + 实体转义（Bing RSS 两者都会出现）。 */
+function decodeXmlText(s: string): string {
+  return s
+    .replace(/^<!\[CDATA\[/, '')
+    .replace(/\]\]>$/, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, '&')
+    .trim()
+}
+
+/** 取一个 XML 标签的文本（不用正则转义，避免 `\s` 之类的转义陷阱）。 */
+function pickXmlTag(item: string, tag: string): string {
+  const open = `<${tag}>`
+  const close = `</${tag}>`
+  const a = item.indexOf(open)
+  if (a < 0) return ''
+  const from = a + open.length
+  const b = item.indexOf(close, from)
+  return decodeXmlText(b < 0 ? item.slice(from) : item.slice(from, b))
+}
+
+/** 解析 Bing RSS（纯函数，可离线测试）：提取 title/link/description。 */
+export function parseBingRss(xml: string, max = 10): SearchResult[] {
+  const limit = Math.max(1, max)
+  const out: SearchResult[] = []
+  for (const chunk of xml.split('<item>').slice(1)) {
+    const end = chunk.indexOf('</item>')
+    const item = end >= 0 ? chunk.slice(0, end) : chunk
+    const title = pickXmlTag(item, 'title')
+    const url = pickXmlTag(item, 'link')
+    if (!title || !url) continue
+    out.push({ title, url, snippet: pickXmlTag(item, 'description').slice(0, 300), source: 'Bing' })
+    if (out.length >= limit) break
+  }
+  return out
+}
+
 /**
- * Python ddgs + primp → Brave/Bing/Google (no DuckDuckGo).
- * primp impersonates browser TLS/headers; Node fetch to the same hosts is blocked or timed out.
+ * 回补数据源：Node 原生网页搜索（Bing RSS）。
+ * 之前唯一实现是 Python `ddgs`，但宿主机没装（pip 依赖不可控），web_search 长期不可用。
+ * Bing 的 `&format=rss` 输出是稳定的 XML，Node 侧直接解析即可，零安装成本。
+ */
+async function rssWebSearch(args: Record<string, unknown>, ctx: ProviderContext) {
+  const query = searchQuery(args)
+  const max = Number(args.size ?? args.maxResults ?? 10)
+  const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&format=rss&count=${Math.min(30, Math.max(1, max))}`
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+      Accept: 'application/rss+xml, application/xml;q=0.9, */*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    },
+    signal: ctx.signal,
+  })
+  if (!res.ok) throw new Error(`bing rss http ${res.status}`)
+  const results = parseBingRss(await res.text(), max)
+  if (!results.length) throw new Error('bing rss: empty')
+  return { rows: results, data: results, sampleKeys: Object.keys(results[0]!) }
+}
+
+/**
+ * Python ddgs + primp → Bing/Google/Yandex (no DuckDuckGo)。
+ * 作为可选增强：装了 ddgs 就能拿到多引擎结果，没装也不影响搜索能力。
  */
 async function pyWebSearch(args: Record<string, unknown>, ctx: ProviderContext) {
   const query = searchQuery(args)
@@ -955,12 +1019,122 @@ export const PROVIDERS: ProviderMeta[] = [
     call: emStockInfo,
   },
   {
+    // 免安装的回补实现排在最前：没有 pip 依赖也能搜索。
+    id: 'rss_web_search',
+    capability: 'web_search',
+    endpointRef: 'Bing Search RSS — Node 原生解析，零依赖',
+    sampleArgs: { query: 'nvidia stock' },
+    call: rssWebSearch,
+  },
+  {
     id: 'py_web_search',
     capability: 'web_search',
-    endpointRef: 'Python ddgs + primp → Bing/Google/Yandex (pip install ddgs)',
+    endpointRef: 'Python ddgs + primp → Bing/Google/Yandex (可选，pip install ddgs)',
     sampleArgs: { query: 'nvidia stock' },
     call: pyWebSearch,
   },
+
+  // ---- WeStock CLI（腾讯自选股，免鉴权）----
+  {
+    id: 'ws_quote',
+    capability: 'quote',
+    endpointRef: 'westock quote <sh600519> — 腾讯自选股网关 (proxy.finance.qq.com)',
+    sampleArgs: { code: '600519' },
+    call: westockProviders.quote,
+  },
+  {
+    id: 'ws_kline',
+    capability: 'kline',
+    endpointRef: 'westock kline <sh600519> --period day',
+    sampleArgs: { code: '600519', days: 40 },
+    call: westockProviders.kline,
+  },
+  {
+    id: 'ws_hk_quote',
+    capability: 'hk_quote',
+    endpointRef: 'westock quote <hk00700>',
+    sampleArgs: { code: '00700' },
+    call: westockProviders.hkQuote,
+  },
+  {
+    id: 'ws_hk_kline',
+    capability: 'hk_kline',
+    endpointRef: 'westock kline <hk00700> --period day',
+    sampleArgs: { code: '00700', days: 40 },
+    call: westockProviders.hkKline,
+  },
+  {
+    id: 'ws_us_quote',
+    capability: 'us_quote',
+    endpointRef: 'westock quote <usAAPL>',
+    sampleArgs: { code: 'AAPL' },
+    call: westockProviders.usQuote,
+  },
+  {
+    id: 'ws_us_kline',
+    capability: 'us_kline',
+    endpointRef: 'westock kline <usAAPL> --period day',
+    sampleArgs: { code: 'AAPL', days: 40 },
+    call: westockProviders.usKline,
+  },
+  {
+    id: 'ws_research',
+    capability: 'research_report',
+    endpointRef: 'westock report list <sh600519> — 券商研报（标题/机构/评级/时间）',
+    sampleArgs: { code: '600519', size: 5 },
+    call: westockProviders.research,
+  },
+  {
+    id: 'ws_news',
+    capability: 'stock_news',
+    endpointRef: 'westock news list <sh600519>',
+    sampleArgs: { code: '600519', size: 5 },
+    call: westockProviders.news,
+  },
+  {
+    id: 'ws_financials',
+    capability: 'financials',
+    endpointRef: 'westock finance <sh600519> — 三大报表',
+    sampleArgs: { code: '600519' },
+    call: westockProviders.financials,
+  },
+  {
+    id: 'ws_profile',
+    capability: 'stock_info',
+    endpointRef: 'westock profile <sh600519> — 公司简况',
+    sampleArgs: { code: '600519' },
+    call: westockProviders.profile,
+  },
+  {
+    id: 'ws_search',
+    capability: 'symbol_search',
+    endpointRef: 'westock search <关键词> — 跨市场代码解析',
+    sampleArgs: { query: '腾讯' },
+    call: westockProviders.search,
+  },
+  {
+    id: 'ws_quotes_batch',
+    capability: 'quotes_batch',
+    endpointRef: 'westock quote <sh600519,sz000858,hk00700> — 一次调用拿多只标的',
+    sampleArgs: { codes: ['600519', '000858', '00700'] },
+    call: westockProviders.quotesBatch,
+  },
+  {
+    id: 'ws_indices',
+    capability: 'indices',
+    endpointRef: 'westock quote <sh000001,sz399001,…> — 指数批量行情',
+    sampleArgs: { codes: DEFAULT_INDEX_CODES },
+    call: westockProviders.indices,
+  },
+
+  // ---- WeStock CLI 扩展能力（表驱动，见 westock-capabilities.ts）----
+  ...WESTOCK_SPECS.map((spec) => ({
+    id: spec.id,
+    capability: spec.capability,
+    endpointRef: spec.usage,
+    sampleArgs: spec.sampleArgs,
+    call: WESTOCK_CAPABILITY_PROVIDERS[spec.id]!,
+  })),
 ]
 
 export const PROVIDER_BY_ID = new Map(PROVIDERS.map((p) => [p.id, p]))

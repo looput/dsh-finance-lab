@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /Users/lupu/workspace/harness/dsn-finance-lab
+cd /Users/lupu/workspace/harness/dsh-finance-lab
 ERR=/tmp/dsh-web-err.txt
 for i in $(seq 1 20); do
   echo "=== attempt $i ==="
@@ -15,7 +15,7 @@ for i in $(seq 1 20); do
   pkgs=$(rg -o "Cannot find package '@[^']+'" "$ERR" | sed "s/Cannot find package '//;s/'$//" | sort -u | tr '\n' ' ')
   if [[ -z "${pkgs// /}" ]]; then
     echo "NO_MORE_MISSING_PACKAGES"
-    rg -n "Error: dsh|failed to apply|TypeError|SyntaxError|dsn-finance" "$ERR" | head -40
+    rg -n "Error: dsh|failed to apply|TypeError|SyntaxError|dsh-finance" "$ERR" | head -40
     exit 1
   fi
   echo "installing: $pkgs"

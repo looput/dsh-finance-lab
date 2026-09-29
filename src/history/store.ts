@@ -1,5 +1,6 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import type { Logger } from '../log.js'
 import type { KlineBar } from '../types.js'
 
 /** A dated marker drawn on the K-line (财报 / 分红 / 拆分 / 自定义). */
@@ -29,7 +30,10 @@ function sanitize(code: string): string {
  * easy to inspect — no native DB build required.
  */
 export class HistoryStore {
-  constructor(private readonly dir: string) {}
+  constructor(
+    private readonly dir: string,
+    private readonly logger?: Logger,
+  ) {}
 
   private file(code: string): string {
     return path.join(this.dir, `${sanitize(code)}.json`)
@@ -38,7 +42,8 @@ export class HistoryStore {
   async read(code: string): Promise<SymbolHistory | null> {
     try {
       return JSON.parse(await readFile(this.file(code), 'utf8')) as SymbolHistory
-    } catch {
+    } catch (err) {
+      this.logger?.debug('history read miss', { code, error: err instanceof Error ? err.message : String(err) })
       return null
     }
   }
@@ -50,13 +55,18 @@ export class HistoryStore {
 
   async list(): Promise<Array<{ code: string; kind: string; bars: number; events: number; updatedAt: string }>> {
     let files: string[] = []
-    try { files = (await readdir(this.dir)).filter((f) => f.endsWith('.json')) } catch { return [] }
+    try { files = (await readdir(this.dir)).filter((f) => f.endsWith('.json')) } catch (err) {
+      this.logger?.debug('history dir empty', { dir: this.dir, error: err instanceof Error ? err.message : String(err) })
+      return []
+    }
     const out = []
     for (const f of files) {
       try {
         const h = JSON.parse(await readFile(path.join(this.dir, f), 'utf8')) as SymbolHistory
         out.push({ code: h.code, kind: h.kind, bars: h.kline.length, events: h.events.length, updatedAt: h.updatedAt })
-      } catch { /* skip */ }
+      } catch (err) {
+        this.logger?.warn('history file corrupt, skipped', { file: f, error: err instanceof Error ? err.message : String(err) })
+      }
     }
     return out
   }

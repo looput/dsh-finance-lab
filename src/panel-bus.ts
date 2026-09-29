@@ -28,9 +28,21 @@ export type BusEvent =
   | { kind: 'portfolio'; holdings: PortfolioHolding[]; watchlist: WatchItem[]; portfolioPath: string }
   | { kind: 'analysis'; code: string; type: AssetType; generatedAt: string }
   | { kind: 'history'; code: string; bars: number; addedBars: number }
+  | {
+      kind: 'research'
+      action: 'save' | 'update' | 'note' | 'archive' | 'restore' | 'collect' | 'sync'
+      id: string
+      /** 资料标题（面板 toast 用：让「Agent 刚存了什么」一眼可见）。 */
+      title?: string
+      /** 批量动作（collect/sync）的条数。 */
+      count?: number
+      /** 动作来源：chat=Agent 对话落库，panel=面板操作，file=外部文件同步。 */
+      origin?: 'chat' | 'panel' | 'file'
+    }
   | { kind: 'providers' }
   | { kind: 'skills' }
   | { kind: 'mcp' }
+  | { kind: 'reminder'; count: number; at: string }
   | { kind: 'panel'; command: PanelCommand }
 
 /**

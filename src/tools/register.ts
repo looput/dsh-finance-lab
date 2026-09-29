@@ -1,14 +1,16 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import '@deepseek-ai/dsh-tools'
 import type { AnalysisStore } from '../analysis-store.js'
 import type { FinanceDataService } from '../data/service.js'
 import type { PanelBus } from '../panel-bus.js'
+import { buildStockDossier, dossierSummary } from '../data/dossier.js'
 import { simulateRebalance } from '../rebalance.js'
 import type { PortfolioStore } from '../store.js'
 import type { AssetType } from '../types.js'
 
-const PANEL_TABS = ['quotes', 'market', 'holdings', 'funds', 'kline', 'macro', 'news', 'sources', 'skills', 'health'] as const
+const PANEL_TABS = ['quotes', 'market', 'holdings', 'funds', 'kline', 'macro', 'news', 'research', 'discover', 'sources', 'skills', 'health'] as const
 
 function text(lines: string | string[]) {
   const body = Array.isArray(lines) ? lines.join('\n') : lines
@@ -25,6 +27,35 @@ const jsonOut = {
 }
 
 export function registerTools(ctx: Context, finance: FinanceDataService, store: PortfolioStore, analyses: AnalysisStore, bus: PanelBus) {
+  // 个股深度档案：一次调用拿到 WeStock 上该标的的全部维度（研究/资金/股东/风险/资讯/产业链）。
+  ctx.tools.register(defineTool({
+    name: 'stock_dossier',
+    description: '个股深度档案：并发取回一致预期、股票评分、ESG、机构评级、资金流向、融资融券、大宗交易、龙虎榜、北向持仓、股东研究、分红、回购、风险事件、停复牌、公告、新闻、所属产业链。做深度研究/尽调时优先用它，比逐个命令调用快得多。',
+    parameters: {
+      code: { type: 'string', description: '标的代码，如 600519 / 00700 / AAPL' },
+      type: { type: 'string', description: 'stock（默认）或 fund' },
+    },
+    output: jsonOut,
+    async execute(args) {
+      const code = String(args.code ?? '').trim()
+      if (!code) throw new Error('code is required')
+      const type = String(args.type ?? 'stock') === 'fund' ? 'fund' as const : 'stock' as const
+      const d = await buildStockDossier(finance, code, type)
+      return asJson({
+        ok: true,
+        summary: dossierSummary(d),
+        code: d.code,
+        ready: d.ready,
+        total: d.total,
+        elapsedMs: d.elapsedMs,
+        sections: d.sections.map((s) => ({
+          key: s.key, label: s.label, group: s.group, ok: s.ok, rows: s.rows,
+          provider: s.provider, ms: s.ms, error: s.error,
+        })),
+      })
+    },
+  }))
+
   ctx.tools.register(defineTool({
     name: 'probe_finance_sources',
     description: '逐个探测公开行情 HTTP 端点健康状态（串行、有间隔）。公开源不稳定时应先运行本工具。',
@@ -86,6 +117,22 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
       const res = await finance.getRealtimeQuote(args.code, exec.signal)
       if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
       return asJson({ ok: true, provider: res.provider, data: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_quotes',
+    description: '批量实时行情：一次调用拿多只标的（优先 WeStock `quote a,b,c`）。要对比多只股票/持仓时用这个，别逐只调用 get_realtime_quote。',
+    parameters: {
+      codes: { type: 'string', required: true, description: '代码列表，逗号分隔，如 600519,00700,AAPL' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const codes = String(args.codes ?? '').split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
+      if (!codes.length) return asJson({ ok: false, error: 'codes is required' })
+      const res = await finance.getQuotes(codes, exec.signal)
+      if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, provider: res.provider, count: (res.data as unknown[])?.length ?? 0, data: res.data })
     },
   }))
 
@@ -279,6 +326,33 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
       const res = await finance.getStockNews(args.code, args.size ?? 10, exec.signal)
       if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, error: res.error ?? 'unavailable' })
       return asJson({ ok: true, provider: res.provider, count: res.data.length, news: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_research_reports',
+    description: '获取券商研报列表（WeStock）：标题、机构、评级、发布时间。用于投研资料收集与交叉验证。',
+    parameters: {
+      code: { type: 'string', required: true, description: '标的代码，如 600519 / 00700' },
+      size: { type: 'number', description: '返回条数（1-20，默认 10）' },
+    },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getResearchReports(String(args.code ?? '').trim(), Math.min(Math.max(Number(args.size ?? 10), 1), 20), exec.signal)
+      if (!res.ok || !Array.isArray(res.data)) return asJson({ ok: false, error: res.error ?? '研报数据源不可用' })
+      return asJson({ ok: true, provider: res.provider, code: args.code, count: res.data.length, reports: res.data })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_research_report_detail',
+    description: '按研报 ID 读取研报正文（WeStock report detail）。ID 来自 get_research_reports。',
+    parameters: { id: { type: 'string', required: true, description: '研报 ID，如 res843401040115' } },
+    output: jsonOut,
+    async execute(args, exec) {
+      const res = await finance.getResearchReportDetail(String(args.id ?? '').trim(), exec.signal)
+      if (!res.ok) return asJson({ ok: false, error: res.error ?? 'unavailable' })
+      return asJson({ ok: true, id: res.data.id, title: res.data.title, body: res.data.body })
     },
   }))
 

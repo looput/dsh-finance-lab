@@ -7,10 +7,15 @@
  *   npx tsx scripts/test_availability.ts
  *   npx tsx scripts/test_availability.ts --group us   # only one group
  */
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ProviderRegistry } from '../src/data/registry.ts'
 import { FinanceDataService } from '../src/data/service.ts'
+import { ResearchVault } from '../src/research/store.ts'
+import { collectResearch } from '../src/research/tools.ts'
+import { configureWestock } from '../src/data/westock.ts'
 
 interface CaseResult { ok: boolean; provider?: string; info?: string; error?: string }
 interface TestCase { group: string; label: string; run: (f: FinanceDataService) => Promise<CaseResult> }
@@ -51,6 +56,18 @@ const CASES: TestCase[] = [
   { group: 'tools', label: 'stock_info 600519', run: (f) => q(f.getStockInfo('600519'), (d: any) => `mcap=${d?.marketCap}`) },
   { group: 'tools', label: 'stock_info 00700', run: (f) => q(f.getStockInfo('00700'), (d: any) => `${d?.market} mcap=${d?.marketCap}`) },
 
+  // WeStock CLI（腾讯自选股，免鉴权；未安装 CLI 时会 FAIL 并标注原因）
+  { group: 'westock', label: 'quote 600519 (ws)', run: (f) => q(f.getRealtimeQuote('600519'), (d: any) => `price=${d?.price}`) },
+  { group: 'westock', label: 'quote 00700 (ws)', run: (f) => q(f.getHkQuote('00700'), (d: any) => `price=${d?.price}`) },
+  { group: 'westock', label: 'quote AAPL (ws)', run: (f) => q(f.getUsQuote('AAPL'), (d: any) => `price=${d?.price}`) },
+  { group: 'westock', label: 'kline 600519 (ws)', run: (f) => q(f.getKline('600519'), (d: any) => `bars=${d?.length}`) },
+  {
+    group: 'westock',
+    label: 'research_report 600519 研报',
+    run: (f) => q(f.getResearchReports('600519', 5), (d: any) => `n=${(d as unknown[])?.length} top=${(d as any[])?.[0]?.org ?? '-'}`),
+  },
+  { group: 'westock', label: 'stock_info 600519 (ws profile)', run: (f) => q(f.getStockInfo('600519'), (d: any) => `${d?.name ?? '-'} ${d?.industry ?? ''}`) },
+
   // 免费网页搜索（DuckDuckGo）—— 多类 Query
   { group: 'search', label: 'entity "Apple Inc"', run: (f) => q(f.webSearch('Apple Inc'), topTitle) },
   { group: 'search', label: 'news "nvidia earnings report"', run: (f) => q(f.webSearch('nvidia earnings report'), topTitle) },
@@ -80,10 +97,14 @@ async function main() {
     httpTimeoutMs: 30_000,
     probeReportPath: path.join(root, 'data/probe-report.json'),
     packageRoot: root,
+    dataDir: path.join(root, 'data'),
   })
   await registry.loadProbeReport()
   const holdings: never[] = []
   const finance = new FinanceDataService(registry, () => holdings, async () => {})
+
+  // WeStock CLI: honor an explicit binary (WESTOCK_BIN), else PATH / default locations.
+  configureWestock({ enabled: true, binPath: process.env.WESTOCK_BIN ?? '', timeoutMs: 30_000, autoUpgrade: false })
 
   const cases = only ? CASES.filter((c) => c.group === only) : CASES
   let ok = 0
@@ -107,6 +128,34 @@ async function main() {
     if (res.ok) ok++
   }
   console.log(`\n[avail] ${ok}/${cases.length} queries available`)
+
+  // ---- 投研资料库：真实收集（网络）----
+  const vaultRoot = await mkdtemp(path.join(tmpdir(), 'dsh-finance-vault-'))
+  try {
+    const vault = new ResearchVault(vaultRoot)
+    await vault.load()
+    console.log('\n== vault ==')
+    const started = Date.now()
+    try {
+      const result = await collectResearch(finance, vault, { code: '600519', kind: 'report', size: 3, status: 'inbox' })
+      console.log(`  [${result.ok ? 'OK  ' : 'FAIL'}] collect_research 600519 研报        ${`${Date.now() - started}ms`.padStart(7)}  ${result.ok ? `saved=${result.saved} skipped=${result.skipped}` : (result.error ?? 'unavailable')}`)
+      if (result.ok) {
+        const again = await collectResearch(finance, vault, { code: '600519', kind: 'report', size: 3 })
+        console.log(`  [${again.saved === 0 ? 'OK  ' : 'FAIL'}] 重复收集去重                               saved=${again.saved} skipped=${again.skipped}`)
+        const stats = vault.stats()
+        console.log(`  [OK  ] vault stats                              total=${stats.total} byKind=${JSON.stringify(stats.byKind)} topCodes=${JSON.stringify(stats.topCodes.slice(0, 3))}`)
+        const first = vault.list({ limit: 1 })[0]
+        if (first) {
+          console.log(`  [OK  ] 落盘文件 ${first.file} · 来源 ${first.source} · 时间 ${first.occurredAt} · 标的 ${first.codes.join('/')}`)
+        }
+      }
+    } catch (err) {
+      console.log(`  [FAIL] collect_research                          ${err instanceof Error ? err.message : String(err)}`)
+    }
+  } finally {
+    await rm(vaultRoot, { recursive: true, force: true })
+  }
+
   process.exitCode = ok > 0 ? 0 : 1
 }
 

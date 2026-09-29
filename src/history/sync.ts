@@ -51,9 +51,15 @@ export async function syncHistory(
     const fin = await finance.getFinancials(code, signal)
     if (fin.ok && Array.isArray(fin.data)) {
       for (const row of fin.data as Array<Record<string, unknown>>) {
-        const rd = String(row.REPORT_DATE ?? row.REPORTDATE ?? '').slice(0, 10)
+        // 字段随 provider 不同：东财 REPORT_DATE / WeStock EndDate。
+        const rd = String(row.REPORT_DATE ?? row.REPORTDATE ?? row.EndDate ?? row.END_DATE ?? '').slice(0, 10)
         if (/^\d{4}-\d{2}-\d{2}$/.test(rd)) {
-          events.push({ date: rd, type: '财报', label: reportLabel(rd), value: numeric(row.EPSJB ?? row.BASIC_EPS) })
+          events.push({
+            date: rd,
+            type: '财报',
+            label: reportLabel(rd),
+            value: numeric(row.EPSJB ?? row.BASIC_EPS ?? row.BasicEPS ?? row.EPSTTM),
+          })
         }
       }
     }
