@@ -8,6 +8,14 @@ DSH Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 
 <img width="1331" height="804" alt="DSH Finance panel" src="https://github.com/user-attachments/assets/3fa063b1-22ef-404b-8fb9-1d230b7e66c0" />
 
+## 个人投资首页（MVP）
+
+新增建档 → 投资理由/验证指标/证伪条件 → 有来源的周复盘 → 用户复核流程。持仓导入和观点修改须到首页预览确认；面板任务先明确选择目标会话。收益按原币展示，缺汇率不合并。当前周复盘需主动触发，尚非后台自动调度。
+
+面板导航现分为「我的工作台 / 市场研究 / 数据与设置」，首页采用概览、档案与判断、每周复盘、待确认四个分区。正确性回归可运行 `npm run test:personal`、`npm run test:regressions` 和 `npm run test:offline`；交付边界与验证说明见 [个人首页说明](docs/personal-home-mvp.md)。
+
+**安全变更：** API默认仅本机访问。远程部署需认证代理、受保护的后端端口及 `DSH_FINANCE_TRUSTED_ORIGIN` 配置；不能将Origin检查当作登录鉴权。详见[实现范围、指标定义与验收边界](docs/personal-home-mvp.md)。以下旧功能说明中的直接写入和跨币种模拟，以此处新约束为准。
+
 ## 你可以用它做什么
 
 - **跨市场看行情**：A 股、港股、美股和公募基金的报价、K 线、列表与代码解析。

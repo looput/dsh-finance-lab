@@ -1,3 +1,4 @@
+import { quoteCurrency } from './valuation.js'
 /**
  * What-if rebalance simulation: pure, deterministic, never touches real data.
  * Computes a before/after snapshot of the local portfolio under either an
@@ -292,10 +293,12 @@ export function simulateRebalance(input: SimulateInput): RebalanceResult {
   const caveats = [
     '按最新价成交，未计滑点、手续费与税费',
     '数量未按交易单位取整（A股一手=100股，基金可零碎申购）',
-    '总市值为各币种原始价格直接加总，未做汇率折算；分币种敞口见 byCurrency',
+    '仅支持同币种模拟；现金必须与持仓同币种，不计汇兑损益',
     '仅为本地模拟，不修改持仓文件、不执行任何真实交易，不构成投资建议',
   ]
 
+  const currencies = new Set([...input.holdings, ...(input.trades ?? []), ...(input.targets ?? [])].map(h => quoteCurrency(h.code, h.type)))
+  if (currencies.size > 1) return { ok: false, error: '缺少汇率口径，拒绝跨币种再平衡；请按币种分别模拟', asOf, warnings, caveats }
   const hasTrades = Array.isArray(input.trades) && input.trades.length > 0
   const hasTargets = Array.isArray(input.targets) && input.targets.length > 0
   if (hasTrades && hasTargets) {

@@ -810,7 +810,7 @@ async function emNewsFlash(args: Record<string, unknown>, ctx: ProviderContext) 
 }
 
 // Source: eastmoney 搜索 (search-api-web jsonp). 供 stock_news 复用。
-async function emArticleSearch(keyword: string, size: number, ctx: ProviderContext): Promise<SearchResult[]> {
+async function emArticleSearch(keyword: string, size: number, ctx: ProviderContext): Promise<Array<SearchResult & { date?: string; source?: string }>> {
   const param = JSON.stringify({
     uid: '', keyword, type: ['cmsArticleWebOld'], client: 'web', clientType: 'web', clientVersion: 'curr',
     param: { cmsArticleWebOld: { searchScope: 'default', sort: 'default', pageIndex: 1, pageSize: size, preTag: '', postTag: '' } },
@@ -823,6 +823,8 @@ async function emArticleSearch(keyword: string, size: number, ctx: ProviderConte
     title: stripHtml(String(it.title ?? '')),
     url: it.url ? String(it.url) : undefined,
     snippet: stripHtml(String(it.content ?? '')).slice(0, 200),
+    date: typeof it.date === 'string' ? it.date : undefined,
+    source: typeof it.mediaName === 'string' ? it.mediaName : undefined,
   })).filter((r) => r.title)
 }
 
@@ -833,8 +835,8 @@ async function emStockNews(args: Record<string, unknown>, ctx: ProviderContext) 
   const results = await emArticleSearch(keyword, size, ctx)
   const rows = results.map((r) => ({
     title: r.title,
-    date: '',
-    source: '',
+    date: r.date ?? '',
+    source: r.source ?? '',
     url: r.url,
     summary: r.snippet,
   }))

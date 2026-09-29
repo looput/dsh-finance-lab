@@ -1,4 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import { accessError } from './api-security.js'
+import { confirmations } from './confirmations.js'
+import type { PersonalStore } from './personal.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AnalysisStore } from './analysis-store.js'
 import type { FinanceDataService } from './data/service.js'
@@ -14,7 +16,7 @@ import { buildLiveSnapshot, type SnapshotItem } from './live.js'
 import type { Logger } from './log.js'
 import { westockCapabilityCatalog } from './data/westock-capabilities.js'
 import { collectResearch } from './research/tools.js'
-import type { ResearchKind, ResearchStatus, ResearchVault } from './research/store.js'
+import { ResearchConfirmationRequired, type ResearchKind, type ResearchStatus, type ResearchVault } from './research/store.js'
 import type { AssetType } from './types.js'
 
 /** Keep SSE connections alive through proxies/idle timeouts. */
@@ -32,20 +34,6 @@ interface WebServerLike {
   }): () => void
 }
 
-interface ModelAgentLike {
-  followup(message: {
-    id: string
-    role: 'user'
-    content: [{ type: 'text'; text: string }]
-    source: { kind: 'user' }
-  }): void
-}
-
-interface ModelContextLike {
-  agent?: unknown
-  agents?: { roots(): unknown[] }
-}
-
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body)
   res.writeHead(status, {
@@ -55,14 +43,19 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(text)
 }
 
-async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+class RequestError extends Error { constructor(message: string, readonly status = 400) { super(message) } }
+
+export async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []
-  for await (const c of req) chunks.push(c as Buffer)
+  let size = 0
+  for await (const c of req) { size += Buffer.byteLength(c); if (size > 1_048_576) throw new RequestError('请求超过1MB', 413); chunks.push(Buffer.from(c)) }
   if (!chunks.length) return {}
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+    const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('JSON正文必须为对象')
+    return value as Record<string, unknown>
   } catch {
-    return {}
+    throw new RequestError('JSON正文必须是有效对象')
   }
 }
 
@@ -82,27 +75,6 @@ function snapshotItems(store: PortfolioStore): SnapshotItem[] {
     items.push({ code: w.code, type: w.type, name: w.name })
   }
   return items
-}
-
-/**
- * 找到可以注入「追问」的宿主会话。
- * 注意顺序：`ctx.agent` 在插件里没有 inject，直接读会抛
- * `cannot get property "agent" without inject`（cordis 的惰性服务访问），
- * 所以先走已注入的 `ctx.agents`，再兜底，且每一步都要吞掉读属性本身抛的错。
- */
-function currentAgent(context: ModelContextLike): ModelAgentLike | undefined {
-  try {
-    const roots = context.agents?.roots?.() ?? []
-    for (const r of roots) {
-      const a = r as ModelAgentLike | undefined
-      if (a && typeof a.followup === 'function') return a
-    }
-  } catch { /* 服务不可用 */ }
-  try {
-    const a = context.agent as ModelAgentLike | undefined
-    if (a && typeof a.followup === 'function') return a
-  } catch { /* 未注入 */ }
-  return undefined
 }
 
 /**
@@ -180,19 +152,14 @@ export function registerRoutes(
   history: HistoryStore | undefined,
   skills: SkillManager | undefined,
   analyses: AnalysisStore,
-  modelContext: ModelContextLike,
   bus: PanelBus,
   vault?: ResearchVault,
   logger?: Logger,
   reminders?: ReminderStore,
   /** 手动触发一次提醒扫描（面板/工具调用）。 */
   scan?: (options?: ReminderOptions) => Promise<ReminderScanResult>,
+  personal?: PersonalStore,
 ): () => void {
-  const pendingAnalyses = new Map<string, number>()
-  // 分析写回后立刻解除「生成中」占位，否则同一个标的 10 分钟内无法重新生成。
-  analyses.onChange((a) => {
-    pendingAnalyses.delete(`${a.type}:${a.code}`)
-  })
   return webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -200,6 +167,30 @@ export function registerRoutes(
       const url = new URL(req.url ?? '', 'http://localhost')
       const sub = url.pathname.slice(API_PREFIX.length) || '/'
       try {
+        const denied = accessError(req)
+        if (denied) return sendJson(res, 403, { ok: false, error: denied })
+        if (req.method === 'POST' && !req.headers['content-type']?.startsWith('application/json')) return sendJson(res, 415, { ok: false, error: '仅接受application/json' })
+        await store.load()
+        if (personal && (sub === '/personal' || sub.startsWith('/personal/'))) {
+          await personal.load()
+          if (vault) await vault.load()
+          if (req.method === 'GET' && sub === '/personal') return sendJson(res, 200, { ok: true, ...personal.get(), metrics: personal.metrics(), pending: confirmations.list(), holdings: store.get().holdings, research: vault?.list({ limit: 8 }) ?? [], reminders: reminders?.list() ?? [] })
+          if (req.method === 'POST') {
+            const body = await readBody(req)
+            if (sub === '/personal/profile') await personal.profile(body)
+            else if (sub === '/personal/thesis') {
+              const thesis = personal.thesis(body)
+              const before = personal.get().theses.find(t => t.id === thesis.id) ?? null
+              return sendJson(res, 200, { ok: true, ...confirmations.propose('保存投资观点', before, thesis, () => personal.get().theses.find(t => t.id === thesis.id) ?? null, () => personal.saveThesis(thesis)) })
+            } else if (sub === '/personal/confirm') await confirmations.confirm(String(body.id))
+            else if (sub === '/personal/cancel') confirmations.cancel(String(body.id))
+            else if (sub === '/personal/prepare') return sendJson(res, 200, { ok: true, cards: await personal.prepare(finance, vault) })
+            else if (sub === '/personal/decision') await personal.decide(String(body.id), String(body.action), typeof body.reason === 'string' ? body.reason : '')
+            else return sendJson(res, 404, { ok: false, error: 'not found' })
+            return sendJson(res, 200, { ok: true })
+          }
+          return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+        }
         if (req.method === 'GET' && sub === '/events') {
           res.writeHead(200, {
             'Content-Type': 'text/event-stream',
@@ -375,6 +366,7 @@ export function registerRoutes(
             bus.publish({ kind: 'research', action: 'update', id: item.id, title: item.title, origin: 'panel' })
             return sendJson(res, 200, { ok: true, item })
           } catch (err) {
+            if (err instanceof ResearchConfirmationRequired) return sendJson(res, 202, { ok: true, ...err.preview })
             return sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) })
           }
         }
@@ -579,32 +571,10 @@ export function registerRoutes(
           const key = `${type}:${code}`
           const cached = analyses.get(code, type)
           if (cached && !force) return sendJson(res, 200, { ok: true, status: 'cached', analysis: cached })
-          const pendingAt = pendingAnalyses.get(key)
-          if (pendingAt && Date.now() - pendingAt < 10 * 60_000) {
-            return sendJson(res, 202, { ok: true, status: 'generating', code, type })
-          }
-          const agent = currentAgent(modelContext)
-          if (!agent) {
-            return sendJson(res, 503, {
-              ok: false,
-              error: '当前没有可用的会话，无法生成解读：请先在对话里发一条消息（或新建会话）再点生成。',
-            })
-          }
           const holding = store.get().holdings.find((h) => h.code === code && h.type === type)
-          pendingAnalyses.set(key, Date.now())
-          try {
-            agent.followup({
-              id: randomUUID(),
-              role: 'user',
-              content: [{ type: 'text', text: analysisPrompt(code, type, holding, vault) }],
-              source: { kind: 'user' },
-            })
-            return sendJson(res, 202, { ok: true, status: 'generating', code, type })
-          } catch (err) {
-            pendingAnalyses.delete(key)
-            return sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
-          }
+          return sendJson(res, 200, { ok: true, status: 'prompt', prompt: analysisPrompt(code, type, holding, vault) })
         }
+
         // ---- 观点触发式提醒 ----
         if (reminders && req.method === 'GET' && sub === '/reminders') {
           await reminders.load()
@@ -635,7 +605,7 @@ export function registerRoutes(
           const code = String(p.code ?? '').trim()
           const type = normType(p.type)
           if (action === 'upsertHolding' && code) {
-            await store.upsertHolding({ code, name: p.name ? String(p.name) : undefined, quantity: Number(p.quantity) || 0, avgCost: Number(p.avgCost) || 0, type })
+            return sendJson(res, 200, { ok: true, ...store.previewHolding({ code, name: p.name ? String(p.name) : undefined, quantity: Number(p.quantity), avgCost: Number(p.avgCost), type }) })
           } else if (action === 'removeHolding' && code) {
             await store.removeHolding(code, p.type ? type : undefined)
           } else if (action === 'addWatch' && code) {
@@ -652,7 +622,7 @@ export function registerRoutes(
       } catch (err) {
         // Previously silent: a failing route left no trace anywhere.
         logger?.fail(`route ${req.method} ${sub} failed`, err)
-        return sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
+        return sendJson(res, err instanceof RequestError ? err.status : 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
       }
     },
   })

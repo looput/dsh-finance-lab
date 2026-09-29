@@ -1,3 +1,4 @@
+import { confirmations } from '../confirmations.js'
 import { randomUUID } from 'node:crypto'
 import { watch, type FSWatcher } from 'node:fs'
 import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
@@ -106,6 +107,13 @@ export interface ResearchFilter {
   tag?: string
   query?: string
   limit?: number
+}
+
+export class ResearchConfirmationRequired extends Error {
+  constructor(public readonly preview: { confirmationRequired: boolean; id: string; label: string; before: unknown; after: unknown; expiresAt: string }) {
+    super('观点未修改：请在首页预览并确认')
+    this.name = 'ResearchConfirmationRequired'
+  }
 }
 
 export class ResearchValidationError extends Error {
@@ -311,9 +319,15 @@ function docList(meta: DocMeta, key: string): string[] {
   return Array.isArray(v) ? normCodes(v) : []
 }
 
+interface VaultTransaction { data: VaultFile; docs: Map<string, { before: string | null; after: string | null }> }
+
 export class ResearchVault {
   private data: VaultFile = { version: 1, updatedAt: new Date(0).toISOString(), items: [] }
   private loaded = false
+  private loading?: Promise<void>
+  private indexRaw: string | null = null
+  private recoveryRequired = false
+  private queue: Promise<unknown> = Promise.resolve()
   private readonly listeners = new Set<(items: ResearchItem[]) => void>()
   private watcher?: FSWatcher
   private pollTimer?: NodeJS.Timeout
@@ -340,22 +354,32 @@ export class ResearchVault {
   }
 
   async load(): Promise<void> {
+    if (this.loaded) return
+    this.loading ??= this.loadOnce().catch(err => { this.loading = undefined; throw err })
+    return this.loading
+  }
+
+  private async loadOnce(): Promise<void> {
     try {
-      const parsed = JSON.parse(await readFile(this.indexPath, 'utf8')) as Partial<VaultFile>
+      this.indexRaw = await readFile(this.indexPath, 'utf8')
+      const parsed = JSON.parse(this.indexRaw) as Partial<VaultFile>
+      if (!Array.isArray(parsed.items)) throw new Error('资料库索引结构无效')
       this.data = {
         version: 1,
         updatedAt: parsed.updatedAt ?? new Date().toISOString(),
         items: (parsed.items ?? []).map((i) => this.normalize(i)),
       }
     } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err
       this.data = { version: 1, updatedAt: new Date().toISOString(), items: [] }
       this.logger?.debug('vault index missing, starting empty', { path: this.indexPath, error: err instanceof Error ? err.message : String(err) })
-      await this.persist().catch(() => {})
+      await this.persist()
     }
     this.loaded = true
   }
 
   private normalize(item: ResearchItem): ResearchItem {
+    this.docPath(item.file)
     return {
       ...item,
       kind: normKind(item.kind),
@@ -366,28 +390,91 @@ export class ResearchVault {
     }
   }
 
+  private docPath(file: string): string {
+    const root = path.resolve(this.root), absolute = path.resolve(root, file)
+    if (!absolute.startsWith(root + path.sep)) throw new ResearchValidationError('资料路径越界')
+    return absolute
+  }
+  private async readRaw(file: string): Promise<string | null> {
+    try { return await readFile(file, 'utf8') }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null; throw e }
+  }
+  private async atomic(file: string, raw: string | null) {
+    if (raw === null) { await unlink(file).catch(e => { if (e.code !== 'ENOENT') throw e }); return }
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+    const temp = `${file}.${randomUUID()}.tmp`
+    try {
+      await writeFile(temp, raw, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+      await rename(temp, file)
+    } finally { await unlink(temp).catch(() => {}) }
+  }
   private async persist(): Promise<void> {
-    this.data.updatedAt = new Date().toISOString()
-    await mkdir(this.root, { recursive: true })
-    const tmp = `${this.indexPath}.tmp`
-    await writeFile(tmp, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8')
-    await rename(tmp, this.indexPath)
+    const raw = `${JSON.stringify(this.data, null, 2)}\n`
+    await this.atomic(this.indexPath, raw)
+    this.indexRaw = raw
+  }
+  private transaction<T>(fn: (tx: VaultTransaction) => Promise<T>): Promise<T> {
+    const task = this.queue.then(async () => {
+      await this.load()
+      if (this.recoveryRequired) throw new ResearchValidationError('资料写入回滚失败；请备份并重新加载插件、同步文件后再操作')
+      const tx: VaultTransaction = { data: structuredClone(this.data), docs: new Map() }
+      const result = await fn(tx)
+      if (!tx.docs.size && JSON.stringify(tx.data) === JSON.stringify(this.data)) return structuredClone(result)
+      const applied: Array<[string, { before: string | null; after: string | null }]> = []
+      try {
+        for (const [file, op] of tx.docs) {
+          if (await this.readRaw(file) !== op.before) throw new ResearchValidationError('资料文件已变化，请重新同步后预览')
+          await this.atomic(file, op.after); applied.push([file, op])
+        }
+        tx.data.updatedAt = new Date().toISOString()
+        if (await this.readRaw(this.indexPath) !== this.indexRaw) throw new ResearchValidationError('资料索引被外部修改，请重新加载插件')
+        const raw = `${JSON.stringify(tx.data, null, 2)}\n`
+        await this.atomic(this.indexPath, raw)
+        this.indexRaw = raw
+      } catch (error) {
+        // Best-effort rollback for ordinary I/O failures, never overwrite an
+        // intervening external edit. This is not multi-file crash atomicity.
+        for (const [file, op] of applied.reverse()) {
+          try { if (await this.readRaw(file) === op.after) await this.atomic(file, op.before); else this.recoveryRequired = true }
+          catch (e) { this.recoveryRequired = true; this.logger?.error('vault rollback failed; resync required', { file, error: String(e) }) }
+        }
+        throw error
+      }
+      this.data = tx.data
+      this.emit()
+      return structuredClone(result)
+    })
+    this.queue = task.catch(() => {})
+    return task
+  }
+  private assertMetadataCurrent(cur: ResearchItem, raw: string) {
+    const actual = splitDoc(raw), expected = splitDoc(renderResearchDoc(cur, actual.body))
+    const keys = new Set([...Object.keys(actual.meta), ...Object.keys(expected.meta)])
+    if ([...keys].some(key => JSON.stringify(actual.meta[key] ?? '') !== JSON.stringify(expected.meta[key] ?? '')) ||
+        JSON.stringify(actual.notes) !== JSON.stringify(expected.notes)) {
+      throw new ResearchValidationError('资料文件与索引不一致，请先同步本地文件后再修改')
+    }
+  }
+  private async stageDoc(tx: VaultTransaction, item: ResearchItem, body: string | null, expected?: string | null) {
+    const file = this.docPath(item.file)
+    const before = tx.docs.has(file) ? tx.docs.get(file)!.before : (expected !== undefined ? expected : await this.readRaw(file))
+    tx.docs.set(file, { before, after: body === null ? null : renderResearchDoc(item, body) })
   }
 
   private emit(): void {
     for (const fn of [...this.listeners]) {
       try {
-        fn(this.data.items)
+        fn(this.all())
       } catch { /* listener errors must not break persistence */ }
     }
   }
 
   all(): ResearchItem[] {
-    return [...this.data.items]
+    return structuredClone(this.data.items)
   }
 
   find(id: string): ResearchItem | undefined {
-    return this.data.items.find((i) => i.id === id)
+    return structuredClone(this.data.items.find((i) => i.id === id))
   }
 
   /**
@@ -396,7 +483,7 @@ export class ResearchVault {
    * are stripped, because the panel/agent render them from structured fields.
    */
   async readDoc(item: ResearchItem): Promise<{ body: string; notes: ResearchNote[]; raw: string; mtime?: string; exists: boolean }> {
-    const abs = path.join(this.root, item.file)
+    const abs = this.docPath(item.file)
     try {
       const raw = await readFile(abs, 'utf8')
       const { body, notes } = splitDoc(raw)
@@ -414,26 +501,23 @@ export class ResearchVault {
     return (await this.readDoc(item)).body
   }
 
-  private async writeDoc(item: ResearchItem, body: string): Promise<void> {
-    const file = path.join(this.root, item.file)
-    await mkdir(path.dirname(file), { recursive: true })
-    await writeFile(file, renderResearchDoc(item, body), 'utf8')
-  }
-
   /** 面板/工具直接改正文：只改正文段落，frontmatter 与观点时间线保持不变。 */
   async writeBody(id: string, body: string): Promise<ResearchItem> {
-    const idx = this.data.items.findIndex((i) => i.id === id)
+    return this.transaction(tx => this.writeBodyIn(tx, id, body))
+  }
+
+  private async writeBodyIn(tx: VaultTransaction, id: string, body: string): Promise<ResearchItem> {
+    const idx = tx.data.items.findIndex((i) => i.id === id)
     if (idx < 0) throw new ResearchValidationError(`资料不存在：${id}`)
-    const cur = this.data.items[idx]!
+    const cur = tx.data.items[idx]!
     const doc = await this.readDoc(cur)
+    if (doc.exists) this.assertMetadataCurrent(cur, doc.raw)
     // 磁盘上的观点时间线优先（外部可能在文件里手写过批注）。
     const notes = mergeNotes(cur.notes, doc.notes)
-    const next: ResearchItem = { ...cur, notes, missing: !doc.exists, updatedAt: new Date().toISOString() }
-    this.data.items[idx] = next
-    await this.writeDoc(next, unplaceholder(body))
-    await this.persist()
+    const next: ResearchItem = { ...cur, notes, missing: false, updatedAt: new Date().toISOString() }
+    tx.data.items[idx] = next
+    await this.stageDoc(tx, next, unplaceholder(body), doc.exists ? doc.raw : null)
     this.logger?.info('research body saved', { id, file: next.file, chars: body.length })
-    this.emit()
     return next
   }
 
@@ -461,7 +545,7 @@ export class ResearchVault {
   async syncFromDisk(): Promise<SyncResult> {
     if (!this.loaded) await this.load()
     if (this.syncing) return this.syncing
-    this.syncing = this.doSync()
+    this.syncing = this.transaction(tx => this.doSync(tx))
     try {
       return await this.syncing
     } finally {
@@ -469,15 +553,15 @@ export class ResearchVault {
     }
   }
 
-  private async doSync(): Promise<SyncResult> {
+  private async doSync(tx: VaultTransaction): Promise<SyncResult> {
     const files = await this.markdownFiles()
     const result: SyncResult = { scanned: files.length, added: 0, updated: 0, missing: 0, changed: [], watched: this.watcher !== undefined }
     const seen = new Set<string>()
     // 同一条资料可能被两种身份命中：文件里的 id，或索引里记录的相对路径。
     // 先按 id 命中；未命中再按路径命中，否则外部新建的文件会被反复当成新资料。
-    const byId = new Map(this.data.items.map((i) => [i.id, i]))
+    const byId = new Map(tx.data.items.map((i) => [i.id, i]))
     const byFile = new Map<string, ResearchItem>()
-    for (const i of this.data.items) if (!byFile.has(i.file)) byFile.set(i.file, i)
+    for (const i of tx.data.items) if (!byFile.has(i.file)) byFile.set(i.file, i)
     let dirty = false
 
     for (const rel of files) {
@@ -493,7 +577,7 @@ export class ResearchVault {
       const cur = (docId ? byId.get(docId) : undefined) ?? byFile.get(rel)
 
       if (cur) {
-        const idx = this.data.items.findIndex((i) => i.id === cur.id)
+        const idx = tx.data.items.findIndex((i) => i.id === cur.id)
         if (idx < 0) continue
         seen.add(cur.id)
         const merged: ResearchItem = {
@@ -506,7 +590,7 @@ export class ResearchVault {
           codes: docList(meta, 'codes').length ? docList(meta, 'codes') : cur.codes,
           tags: docList(meta, 'tags').length ? docList(meta, 'tags') : cur.tags,
           summary: docString(meta, 'summary') || cur.summary,
-          opinion: docString(meta, 'opinion') || cur.opinion,
+          opinion: Object.hasOwn(meta, 'opinion') ? docString(meta, 'opinion') : cur.opinion,
           sourceUrl: docString(meta, 'url') || cur.sourceUrl,
           file: rel,
           notes: mergeNotes(cur.notes, notes),
@@ -519,13 +603,13 @@ export class ResearchVault {
         const changed = snapshotOf(merged) !== snapshotOf(cur)
         if (changed) {
           merged.updatedAt = new Date().toISOString()
-          this.data.items[idx] = merged
+          tx.data.items[idx] = merged
           result.updated++
           result.changed.push(merged.id)
           dirty = true
         }
         // 文件里没有（或写错了）id → 回写一次，保证下次同步按 id 命中、不会重复入库。
-        if (docId !== merged.id) await this.writeDoc(merged, body)
+        if (docId !== merged.id) await this.stageDoc(tx, merged, body, raw)
         continue
       }
 
@@ -548,17 +632,17 @@ export class ResearchVault {
         notes,
         origin: docString(meta, 'origin') ? normOrigin(docString(meta, 'origin')) : 'file',
       }
-      this.data.items.push(item)
+      tx.data.items.push(item)
       byId.set(item.id, item)
       seen.add(item.id)
       // 认领外部文件：把 id 写回 frontmatter，后续同步即幂等。
-      await this.writeDoc(item, body)
+      await this.stageDoc(tx, item, body, raw)
       result.added++
       result.changed.push(item.id)
       dirty = true
     }
 
-    for (const item of this.data.items) {
+    for (const item of tx.data.items) {
       if (seen.has(item.id)) continue
       if (!item.missing) {
         item.missing = true
@@ -568,9 +652,7 @@ export class ResearchVault {
     }
 
     if (dirty) {
-      await this.persist()
       this.logger?.info('vault synced from disk', { ...result, changed: result.changed.length })
-      this.emit()
     }
     return result
   }
@@ -634,6 +716,10 @@ export class ResearchVault {
 
   /** Validate + create. `source` and `occurredAt` are mandatory by design. */
   async create(input: ResearchInput): Promise<ResearchItem> {
+    return this.transaction(tx => this.createIn(tx, structuredClone(input)))
+  }
+
+  private async createIn(tx: VaultTransaction, input: ResearchInput): Promise<ResearchItem> {
     const title = String(input.title ?? '').trim()
     const source = String(input.source ?? '').trim()
     const occurredAt = normDate(input.occurredAt)
@@ -661,20 +747,36 @@ export class ResearchVault {
       notes: [],
       origin: normOrigin(input.origin ?? 'panel'),
     }
-    await this.writeDoc(item, input.body ?? '')
-    this.data.items.push(item)
-    await this.persist()
+    await this.stageDoc(tx, item, input.body ?? '', null)
+    tx.data.items.push(item)
     this.logger?.info('research saved', { id, kind: item.kind, codes: item.codes, source })
-    this.emit()
     return item
   }
 
   async update(id: string, patch: Partial<ResearchInput> & { status?: ResearchStatus }): Promise<ResearchItem> {
-    const idx = this.data.items.findIndex((i) => i.id === id)
+    return this.transaction(tx => this.updateIn(tx, id, structuredClone(patch)))
+  }
+
+  private async updateIn(tx: VaultTransaction, id: string, patch: Partial<ResearchInput> & { status?: ResearchStatus }, confirmed = false, expected?: string, expectedDoc?: string): Promise<ResearchItem> {
+    const idx = tx.data.items.findIndex((i) => i.id === id)
     if (idx < 0) throw new ResearchValidationError(`资料不存在：${id}`)
-    const cur = this.data.items[idx]!
+    const cur = tx.data.items[idx]!
+    if (expected !== undefined && JSON.stringify(cur) !== expected) throw new ResearchValidationError('资料已变化，请重新预览')
+    if (!confirmed && patch.opinion !== undefined && patch.opinion.trim() !== (cur.opinion ?? '')) {
+      patch = structuredClone(patch)
+      const before = JSON.stringify(cur)
+      const doc = await this.readDoc(cur)
+      if (!doc.exists) throw new ResearchValidationError('资料文件已变化或缺失，请先同步再预览')
+      this.assertMetadataCurrent(cur, doc.raw)
+      const proposal = confirmations.propose('修改资料观点', cur, { ...cur, ...patch }, () => this.find(id), () => this.transaction(inner => this.updateIn(inner, id, patch, true, before, doc.raw)))
+      throw new ResearchConfirmationRequired(proposal)
+    }
+    const auditNotes = confirmed && patch.opinion !== undefined && patch.opinion.trim() !== (cur.opinion ?? '')
+      ? [...cur.notes, { at: new Date().toISOString(), text: `修改前观点：${cur.opinion ?? '（无）'}`, author: 'audit' }]
+      : cur.notes
     const next: ResearchItem = {
       ...cur,
+      notes: auditNotes,
       title: patch.title?.trim() || cur.title,
       kind: patch.kind ? normKind(patch.kind) : cur.kind,
       source: patch.source?.trim() || cur.source,
@@ -688,31 +790,38 @@ export class ResearchVault {
       updatedAt: new Date().toISOString(),
       archivedAt: patch.status ? (normStatus(patch.status) === 'archived' ? new Date().toISOString() : undefined) : cur.archivedAt,
     }
-    this.data.items[idx] = next
-    await this.writeDoc(next, unplaceholder(await this.readBody(cur)))
-    await this.persist()
+    tx.data.items[idx] = next
+    const doc = await this.readDoc(cur)
+    if (expectedDoc !== undefined && doc.raw !== expectedDoc) throw new ResearchValidationError('资料文件已变化，请同步后重新预览')
+    if (!doc.exists) throw new ResearchValidationError('资料正文不可读，拒绝覆盖；请先恢复文件')
+    this.assertMetadataCurrent(cur, doc.raw)
+    await this.stageDoc(tx, next, unplaceholder(doc.body), doc.raw)
     this.logger?.info('research updated', { id, status: next.status })
-    this.emit()
     return next
   }
 
   /** Append a dated opinion/annotation (个人观点持续积累). */
   async addNote(id: string, text: string, author?: string): Promise<ResearchItem> {
+    return this.transaction(tx => this.addNoteIn(tx, id, text, author))
+  }
+
+  private async addNoteIn(tx: VaultTransaction, id: string, text: string, author?: string): Promise<ResearchItem> {
     const note = String(text ?? '').trim()
     if (!note) throw new ResearchValidationError('note 不能为空')
-    const idx = this.data.items.findIndex((i) => i.id === id)
+    const idx = tx.data.items.findIndex((i) => i.id === id)
     if (idx < 0) throw new ResearchValidationError(`资料不存在：${id}`)
-    const cur = this.data.items[idx]!
+    const cur = tx.data.items[idx]!
     const next: ResearchItem = {
       ...cur,
       notes: [...cur.notes, { at: new Date().toISOString(), text: note, author: author?.trim() || undefined }],
       updatedAt: new Date().toISOString(),
     }
-    this.data.items[idx] = next
-    await this.writeDoc(next, unplaceholder(await this.readBody(cur)))
-    await this.persist()
+    tx.data.items[idx] = next
+    const doc = await this.readDoc(cur)
+    if (!doc.exists) throw new ResearchValidationError('资料正文不可读，拒绝覆盖；请先恢复文件')
+    this.assertMetadataCurrent(cur, doc.raw)
+    await this.stageDoc(tx, next, unplaceholder(doc.body), doc.raw)
     this.logger?.info('research note added', { id, notes: next.notes.length })
-    this.emit()
     return next
   }
 
@@ -725,14 +834,16 @@ export class ResearchVault {
    * 下一次目录同步又会被当成「外部新建」重新入库——所以文件与索引一起走。
    */
   async remove(id: string): Promise<boolean> {
-    const idx = this.data.items.findIndex((i) => i.id === id)
+    return this.transaction(tx => this.removeIn(tx, id))
+  }
+
+  private async removeIn(tx: VaultTransaction, id: string): Promise<boolean> {
+    const idx = tx.data.items.findIndex((i) => i.id === id)
     if (idx < 0) return false
-    const item = this.data.items[idx]!
-    this.data.items.splice(idx, 1)
-    await unlink(path.join(this.root, item.file)).catch(() => {})
-    await this.persist()
+    const item = tx.data.items[idx]!
+    tx.data.items.splice(idx, 1)
+    await this.stageDoc(tx, item, null)
     this.logger?.info('research removed', { id })
-    this.emit()
     return true
   }
 
@@ -757,20 +868,18 @@ export class ResearchVault {
       ].filter(Boolean).join(' ').toLowerCase().includes(q))
     }
     items = [...items].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt) || b.createdAt.localeCompare(a.createdAt))
-    return filter.limit && filter.limit > 0 ? items.slice(0, filter.limit) : items
+    return structuredClone(filter.limit && filter.limit > 0 ? items.slice(0, filter.limit) : items)
   }
 
   /** Remove index entries whose Markdown file no longer exists on disk. */
   async pruneMissing(): Promise<number> {
-    await this.syncFromDisk()
-    const keep = this.data.items.filter((i) => !i.missing)
-    const removed = this.data.items.length - keep.length
-    if (!removed) return 0
-    this.data.items = keep
-    await this.persist()
-    this.logger?.info('vault pruned', { removed })
-    this.emit()
-    return removed
+    return this.transaction(async tx => {
+      await this.doSync(tx)
+      const keep = tx.data.items.filter(i => !i.missing)
+      const removed = tx.data.items.length - keep.length
+      tx.data.items = keep
+      return removed
+    })
   }
 
   /**

@@ -9,7 +9,7 @@ export interface SnapshotItem { code: string; type: AssetType; name?: string }
 
 /** WeStock 前缀码 → 面板代码：sh600519 → 600519。 */
 function normalizeCode(symbol: string): string {
-  return String(symbol ?? '').replace(/^(sh|sz|bj|hk|us)/i, '')
+  return routeCode(symbol).code
 }
 
 /**
@@ -64,7 +64,7 @@ async function buildQuotes(
   if (!items.length) return []
 
   // 1) 批量行情：一次调用覆盖所有标的。
-  const batch = await finance.getQuotes(items.map((it) => ({ code: it.code, type: it.type })), signal).catch(() => undefined)
+  const batch = await finance.getQuotes(items.filter(it => it.type !== 'fund').map((it) => ({ code: it.code, type: it.type })), signal).catch(() => undefined)
   const byCode = new Map<string, StockQuote>()
   if (batch?.ok && Array.isArray(batch.data)) {
     for (const q of batch.data) {
@@ -74,14 +74,14 @@ async function buildQuotes(
   }
 
   // 2) 逐个补齐（批量没覆盖到的，如场外基金/批量失败）。
-  const missing = items.filter((it) => !byCode.has(it.code) && !byCode.has(normalizeCode(it.code)))
+  const missing = items.filter((it) => it.type === 'fund' || (!byCode.has(it.code) && !byCode.has(normalizeCode(it.code))))
   const singles = await Promise.all(missing.map(async (it) => {
     const r = await finance.getAutoQuote(it.code, signal, it.type).catch(() => undefined)
     return { item: it, r }
   }))
   const singleBy = new Map<string, { market?: string; quote?: StockQuote; error?: string }>()
   for (const { item, r } of singles) {
-    singleBy.set(item.code, r ? { market: r.market, quote: r.ok ? r.data : undefined, error: r.ok ? undefined : r.error } : { error: '获取失败' })
+    singleBy.set(`${item.type}:${item.code}`, r ? { market: r.market, quote: r.ok ? r.data : undefined, error: r.ok ? undefined : r.error } : { error: '获取失败' })
   }
 
   // 3) sparkline 并发拉取（失败就省略，不拖慢主流程）。
@@ -90,18 +90,18 @@ async function buildQuotes(
       const kl = await finance.getAutoKline(it.code, signal, it.type)
       if (kl.ok && Array.isArray(kl.data) && kl.data.length) {
         const spark = kl.data.map((b) => b.close).filter((n) => Number.isFinite(n)).slice(-40)
-        return { code: it.code, spark: spark.length >= 2 ? spark : undefined }
+        return { code: `${it.type}:${it.code}`, spark: spark.length >= 2 ? spark : undefined }
       }
     } catch { /* omit sparkline on failure */ }
-    return { code: it.code, spark: undefined }
+    return { code: `${it.type}:${it.code}`, spark: undefined }
   }))
   const sparkBy = new Map(sparks.map((s) => [s.code, s.spark]))
 
   return items.map((it) => {
-    const batched = byCode.get(it.code) ?? byCode.get(normalizeCode(it.code))
-    const single = singleBy.get(it.code)
+    const batched = it.type === 'fund' ? undefined : byCode.get(it.code) ?? byCode.get(normalizeCode(it.code))
+    const single = singleBy.get(`${it.type}:${it.code}`)
     const price = batched?.price ?? single?.quote?.price
-    const hasPrice = typeof price === 'number' && Number.isFinite(price)
+    const hasPrice = typeof price === 'number' && Number.isFinite(price) && price >= 0
     const changePercent = batched?.changePercent ?? single?.quote?.changePercent
     return {
       code: it.code,
@@ -110,7 +110,7 @@ async function buildQuotes(
       name: (batched?.name ?? single?.quote?.name) || it.name,
       price: hasPrice ? price : undefined,
       changePercent,
-      spark: sparkBy.get(it.code),
+      spark: sparkBy.get(`${it.type}:${it.code}`),
       provider: batched ? batch?.provider : undefined,
       error: hasPrice ? undefined : (single?.error ?? '暂无行情'),
     }

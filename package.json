@@ -31,7 +31,9 @@
     "westock:install": "bash scripts/install_westock.sh",
     "web": "bash scripts/dev_web.sh",
     "web:restart": "bash scripts/restart_web.sh",
-    "westock": "tsx scripts/westock-cli.ts"
+    "westock": "tsx scripts/westock-cli.ts",
+    "test:personal": "tsx scripts/test_personal.ts",
+    "test:regressions": "tsx scripts/test_regressions.ts"
   },
   "dsh": {
     "bundle": {

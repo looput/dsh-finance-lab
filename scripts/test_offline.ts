@@ -25,9 +25,7 @@ import { ProviderRegistry } from '../src/data/registry.ts'
 import { CAPABILITIES, DEFAULT_PROVIDER_ORDER } from '../src/types.ts'
 import { ReminderStore } from '../src/reminders.js'
 import { buildStockDossier, dossierSummary } from '../src/data/dossier.js'
-import { configureWestock } from '../src/data/westock.ts'
 import { advisorMemory } from '../src/server-routes.js'
-import { ResearchVault } from '../src/research/store.js'
 import { parseBingRss } from '../src/data/providers.js'
 
 let passed = 0
@@ -58,6 +56,14 @@ function eq<T>(name: string, actual: T, expected: T): void {
 
 async function main() {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-finance-offline-'))
+  const realFetch = globalThis.fetch
+  // A truly offline suite: no external requests. Exercise the real HTTP parser
+  // and provider fallback with a deterministic JSONP response.
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input))
+    if (url.hostname === 'search-api-web.eastmoney.com') return new Response('x(' + JSON.stringify({ result: { cmsArticleWebOld: [{ title: '离线新闻', content: '摘要', url: 'https://example.com/news', date: '2026-09-27 09:00:00', mediaName: '测试来源' }] } }) + ')', { status: 200 })
+    throw new Error(`offline: blocked network ${url.hostname}`)
+  }
   try {
     // ---- 1. Markdown table parsing ----
     console.log('\n== markdown table parsing ==')
@@ -626,6 +632,7 @@ esac
       process.exitCode = 1
     }
   } finally {
+    globalThis.fetch = realFetch
     await rm(root, { recursive: true, force: true })
   }
 }
