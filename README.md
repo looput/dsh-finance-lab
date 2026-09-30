@@ -132,12 +132,12 @@ npx tsx scripts/probe_sources.ts --only kline.em_kline
 
 ### 3. 接入 DeepSeek Harness
 
-将当前项目目录注册到 `web` profile（`dsh plugin` 在 profile 目录里执行 pnpm；CLI 版本需与插件依赖一致，对本仓库即 `0.1.7-rc.2`）：
+将当前项目目录注册到 `web` profile（`dsh plugin` 在 profile 目录里执行 pnpm；CLI 版本需与插件依赖一致，对本仓库即 `0.2.0-rc.2`）：
 
 ```bash
-npx @deepseek-ai/dsh@0.1.7-rc.2 plugin \
+npx @deepseek-ai/dsh@0.2.0-rc.2 plugin \
   --profile web add /absolute/path/to/dsh-finance-lab
-npx @deepseek-ai/dsh@0.1.7-rc.2 web
+npx @deepseek-ai/dsh@0.2.0-rc.2 web
 ```
 
 `dsh web` 等价于 `dsh --profile web`；profile 由第一个位置参数选择，其余参数转发给应用。
@@ -165,7 +165,7 @@ npm run westock:install        # → <repo>/.dsh-home/bin/westock，脚本自动
 如果需要使用开发期的绝对路径 overlay（只挂载宿主半，不含面板客户端 bundle）：
 
 ```bash
-npx @deepseek-ai/dsh@0.1.7-rc.2 web --patch ./cordis.dev.yml
+npx @deepseek-ai/dsh@0.2.0-rc.2 web --patch ./cordis.dev.yml
 ```
 
 注册插件后，从 Harness 左下角的 **📈 金融面板** 打开 UI；模型工具会自动出现在工具列表中。
@@ -195,7 +195,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.2 web --patch ./cordis.dev.yml
 
 `dataDir` 的相对路径以插件包目录为基准。同一份源码被注册进多个 dsh profile 时，请在 profile 层把 `dataDir` 指到各自的目录（或给 `portfolioPath` / `probeReportPath` 绝对路径），否则几个 profile 会共用同一份数据。这些文件属于本地运行数据，不会被提交。
 
-`panelOpen` / `panelDocked` 在 Config schema 中声明为 **volatile**：dsh 0.1.7 的配置面板只暴露 volatile 字段，并把它们的值写到 profile 用户层（`$DSH_HOME/profiles/<name>/cordis.patch.yml`）。面板开关按钮经 `ctx.configForms` 读写该条目，因此重启后开关状态仍然保留；其余字段属于组合配置，改动后由 Loader 重新应用条目。
+`panelOpen` / `panelDocked` 在 Config schema 中声明为 **volatile**：dsh 0.2.0 的配置面板只暴露 volatile 字段，并把它们的值写到 profile 用户层（`$DSH_HOME/profiles/<name>/cordis.patch.yml`）。面板开关按钮经 `ctx.configForms` 读写该条目，因此重启后开关状态仍然保留；其余字段属于组合配置，改动后由 Loader 重新应用条目。
 
 ## 可用性测试
 

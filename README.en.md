@@ -104,12 +104,12 @@ The report is written to `data/probe-report.json` by default. If all public prov
 
 ### 3. Connect to DeepSeek Harness
 
-Register the current project directory in the `web` profile (`dsh plugin` runs pnpm inside the profile; the CLI version must match the plugin's dependencies, i.e. `0.1.7-rc.2` for this repository):
+Register the current project directory in the `web` profile (`dsh plugin` runs pnpm inside the profile; the CLI version must match the plugin's dependencies, i.e. `0.2.0-rc.2` for this repository):
 
 ```bash
-npx @deepseek-ai/dsh@0.1.7-rc.2 plugin \
+npx @deepseek-ai/dsh@0.2.0-rc.2 plugin \
   --profile web add /absolute/path/to/dsh-finance-lab
-npx @deepseek-ai/dsh@0.1.7-rc.2 web
+npx @deepseek-ai/dsh@0.2.0-rc.2 web
 ```
 
 `dsh web` is shorthand for `dsh --profile web`: the profile is the first positional argument and every other argument is forwarded to the app.
@@ -123,7 +123,7 @@ bash scripts/dev_web.sh
 If you need the development overlay with absolute paths (host half only, no panel client bundle):
 
 ```bash
-npx @deepseek-ai/dsh@0.1.7-rc.2 web --patch ./cordis.dev.yml
+npx @deepseek-ai/dsh@0.2.0-rc.2 web --patch ./cordis.dev.yml
 ```
 
 After registration, open **📈 Finance Panel** in the lower-left corner of Harness. The model tools are loaded automatically.
@@ -145,7 +145,7 @@ The default configuration is in `cordis.patch.yml`:
 
 A relative `dataDir` resolves from the plugin package directory. When the same source checkout is linked into more than one dsh profile, point `dataDir` at a per-profile directory (or give `portfolioPath` / `probeReportPath` absolute paths), otherwise those profiles share one data set. These files are local runtime data and are ignored by Git.
 
-`panelOpen` / `panelDocked` are declared **volatile** in the Config schema: dsh 0.1.7 surfaces only volatile fields in its configuration forms and stores them in the profile's user layer (`$DSH_HOME/profiles/<name>/cordis.patch.yml`). The panel trigger reads and writes that entry through `ctx.configForms`, so the open/docked state survives a reload; every other field is ordinary composition configuration and a change re-applies the entry.
+`panelOpen` / `panelDocked` are declared **volatile** in the Config schema: dsh 0.2.0 surfaces only volatile fields in its configuration forms and stores them in the profile's user layer (`$DSH_HOME/profiles/<name>/cordis.patch.yml`). The panel trigger reads and writes that entry through `ctx.configForms`, so the open/docked state survives a reload; every other field is ordinary composition configuration and a change re-applies the entry.
 
 ## Availability tests
 
