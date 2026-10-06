@@ -2,15 +2,18 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import '@deepseek-ai/dsh-tools'
-import type { AnalysisStore } from '../analysis-store.js'
+import type { AnalysisRefs, AnalysisStore } from '../analysis-store.js'
 import type { FinanceDataService } from '../data/service.js'
 import type { PanelBus } from '../panel-bus.js'
 import { buildStockDossier, dossierSummary } from '../data/dossier.js'
 import { simulateRebalance } from '../rebalance.js'
 import type { PortfolioStore } from '../store.js'
+import type { PersonalStore } from '../personal.js'
+import { StrategyConfirmationRequired, type StrategyLibrary } from '../strategy/library.js'
 import type { AssetType } from '../types.js'
 
-const PANEL_TABS = ['home', 'quotes', 'market', 'holdings', 'funds', 'kline', 'macro', 'news', 'research', 'discover', 'sources', 'skills', 'health'] as const
+// 'kline' 为兼容别名（K线工作区已并入 quotes「行情」，导航时等价 quotes 并聚焦K线）。
+const PANEL_TABS = ['home', 'quotes', 'market', 'holdings', 'funds', 'kline', 'macro', 'news', 'research', 'dossier', 'discover', 'sources', 'skills', 'health'] as const
 
 function text(lines: string | string[]) {
   const body = Array.isArray(lines) ? lines.join('\n') : lines
@@ -26,7 +29,7 @@ const jsonOut = {
   render: (_args: unknown, value: unknown) => text(JSON.stringify(value, null, 2)),
 }
 
-export function registerTools(ctx: Context, finance: FinanceDataService, store: PortfolioStore, analyses: AnalysisStore, bus: PanelBus) {
+export function registerTools(ctx: Context, finance: FinanceDataService, store: PortfolioStore, analyses: AnalysisStore, bus: PanelBus, personal?: PersonalStore, library?: StrategyLibrary) {
   // 个股深度档案：一次调用拿到 WeStock 上该标的的全部维度（研究/资金/股东/风险/资讯/产业链）。
   ctx.tools.register(defineTool({
     name: 'stock_dossier',
@@ -41,16 +44,19 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
       if (!code) throw new Error('code is required')
       const type = String(args.type ?? 'stock') === 'fund' ? 'fund' as const : 'stock' as const
       const d = await buildStockDossier(finance, code, type)
+      // 登记快照 id：报告 save_position_analysis 可回引它（证明基于哪一版档案）。
+      await analyses.noteSnapshot(d.snapshotId, code, type)
       return asJson({
         ok: true,
         summary: dossierSummary(d),
         code: d.code,
+        snapshotId: d.snapshotId,
         ready: d.ready,
         total: d.total,
         elapsedMs: d.elapsedMs,
         sections: d.sections.map((s) => ({
-          key: s.key, label: s.label, group: s.group, ok: s.ok, rows: s.rows,
-          provider: s.provider, ms: s.ms, error: s.error,
+          key: s.key, label: s.label, group: s.group, ok: s.ok, status: s.status, rows: s.rows,
+          provider: s.provider, ms: s.ms, error: s.error, dataAsOf: s.dataAsOf, missing: s.missing,
         })),
       })
     },
@@ -528,15 +534,15 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
 
   ctx.tools.register(defineTool({
     name: 'remove_holding',
-    description: '删除本地持仓。',
+    description: '预览删除本地持仓，用户在个人首页确认差异后才会写入；未确认前持仓文件不变。',
     parameters: {
       code: { type: 'string', required: true },
       type: { type: 'string', enum: ['stock', 'fund'] },
     },
     output: jsonOut,
     async execute(args) {
-      const file = await store.removeHolding(args.code, args.type as AssetType | undefined)
-      return asJson({ ok: true, path: store.path, holdings: file.holdings })
+      await store.load()
+      return asJson({ ok: true, ...store.previewRemoveHolding(args.code, args.type as AssetType | undefined) })
     },
   }))
 
@@ -591,25 +597,127 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
 
   ctx.tools.register(defineTool({
     name: 'save_position_analysis',
-    description: '保存主动解读请求生成的股票/基金分析报告。只有在完成数据收集并写出完整中文报告后调用；报告会缓存到本地。',
+    description: '保存主动解读请求生成的股票/基金分析报告。只有在完成数据收集并写出完整中文报告后调用；报告会缓存到本地。若提示词给出档案快照/原判断版本/上次报告 id 必须原样回引（只校验存在性，不证明语义真实）。',
     parameters: {
       code: { type: 'string', required: true, description: '股票或基金代码' },
       type: { type: 'string', required: true, enum: ['stock', 'fund'], description: '资产类型' },
       report: { type: 'string', required: true, description: '完整中文 Markdown 解读报告' },
       dataAsOf: { type: 'string', description: '报告使用的最新数据时间' },
+      dossierSnapshotId: { type: 'string', description: '报告引用的档案快照 id（来自分析提示词）' },
+      thesisRevision: { type: 'number', description: '对照的原判断版本号（来自分析提示词）' },
+      previousReportId: { type: 'string', description: '对照的上次报告 id（来自分析提示词）' },
     },
     output: jsonOut,
     async execute(args) {
       const code = String(args.code ?? '').trim()
       const report = String(args.report ?? '').trim()
       if (!code || !report) return asJson({ ok: false, error: 'code and report are required' })
+      const type = (args.type === 'fund' ? 'fund' : 'stock') as AssetType
+      // 契约校验：只证明引用存在（快照已登记 / 版本是当前或上一版 / 报告在历史里），不证明语义真实。
+      // 校验不通过则拒绝保存，报告内容不落盘。
+      const refs: AnalysisRefs = {}
+      const problems: string[] = []
+      if (args.dossierSnapshotId !== undefined) {
+        const id = String(args.dossierSnapshotId)
+        if (!analyses.hasSnapshot(id, code, type)) {
+          problems.push(`档案快照 ${id} 不存在或未登记（应来自 stock_dossier / 分析提示词）`)
+        } else {
+          refs.dossierSnapshotId = id
+        }
+      }
+      if (args.thesisRevision !== undefined) {
+        const rev = Number(args.thesisRevision)
+        if (!Number.isInteger(rev) || rev < 1) {
+          problems.push(`thesisRevision=${String(args.thesisRevision)} 不是正整数`)
+        } else if (personal) {
+          const thesis = personal.get().theses.find((t) => t.code === code && (t.type ?? 'stock') === type)
+          if (!thesis) {
+            problems.push('无该标的原判断，thesisRevision 不应提供')
+          } else if (rev !== thesis.revision && rev !== thesis.revision - 1) {
+            problems.push(`thesisRevision=${rev} 既不是当前版本（v${thesis.revision}）也不是上一版本（v${Math.max(1, thesis.revision - 1)}）`)
+          } else {
+            refs.thesisRevision = rev
+          }
+        } else {
+          refs.thesisRevision = rev
+        }
+      }
+      if (args.previousReportId !== undefined) {
+        const id = String(args.previousReportId)
+        if (!analyses.hasReportId(id)) {
+          problems.push(`previousReportId=${id} 不在研究历史中`)
+        } else {
+          refs.previousReportId = id
+        }
+      }
+      if (problems.length > 0) {
+        return asJson({ ok: false, error: `引用契约校验未通过，报告未保存：${problems.join('；')}`, problems })
+      }
       const analysis = await analyses.set({
         code,
-        type: (args.type === 'fund' ? 'fund' : 'stock') as AssetType,
+        type,
         report,
         dataAsOf: args.dataAsOf ? String(args.dataAsOf) : undefined,
+        refs,
       })
-      return asJson({ ok: true, code: analysis.code, type: analysis.type, generatedAt: analysis.generatedAt })
+      return asJson({
+        ok: true,
+        code: analysis.code,
+        type: analysis.type,
+        generatedAt: analysis.generatedAt,
+        version: analysis.version,
+        reportId: analysis.reportId,
+        refs: analysis.refs,
+        note: '引用有效≠语义真实，结论需用户审阅。',
+      })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'submit_strategy',
+    description: '提交一个受限策略 DSL 草案到策略库（status=proposed）。DSL 只允许价格序列信号与显式交易规则；提交只校验与保存，绝不执行/不回测/不下单。升级为生效跟踪策略需要用户在面板显式批准。',
+    parameters: {
+      spec: { type: 'object', additionalProperties: true, description: '策略 DSL 对象（dslVersion/name/codes/signal/allocation/trading）' },
+      reason: { type: 'string', description: '提出该草案的理由' },
+    },
+    output: jsonOut,
+    async execute(args) {
+      if (!library) return asJson({ ok: false, error: '策略库未挂载' })
+      try {
+        const entry = await library.propose(args.spec, String(args.reason ?? ''))
+        return asJson({
+          ok: true,
+          entry: { id: entry.id, name: entry.spec.name, specHash: entry.specHash, status: entry.status, version: entry.version },
+          note: '已保存为 proposed 草案；未执行任何回测或交易。生效跟踪需用户批准。',
+        })
+      } catch (err) {
+        return asJson({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'get_strategy_library',
+    description: '读取策略库（proposed/tested/watchlisted/retired 与理由、前向记录）。只读，不改状态；激活/退役等变更需用户确认。',
+    parameters: {
+      status: { type: 'string', enum: ['proposed', 'tested', 'watchlisted', 'retired'], description: '按状态过滤（可选）' },
+    },
+    output: jsonOut,
+    async execute(args) {
+      if (!library) return asJson({ ok: false, error: '策略库未挂载' })
+      const status = args.status as 'proposed' | 'tested' | 'watchlisted' | 'retired' | undefined
+      return asJson({
+        ok: true,
+        entries: library.list(status).map((e) => ({
+          id: e.id,
+          name: e.spec.name,
+          specHash: e.specHash,
+          status: e.status,
+          version: e.version,
+          reason: e.reason,
+          forwardRecords: e.forwardRecords.length,
+        })),
+      })
     },
   }))
 
@@ -621,11 +729,11 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
         type: 'string',
         required: true,
         enum: [...PANEL_TABS],
-        description: '目标标签页：quotes 行情 / market 市场 / holdings 持仓 / funds 基金 / kline K线 / macro 宏观 / news 快讯 / sources 数据源 / skills 技能 / health 接口',
+        description: '目标标签页：home 首页 / quotes 行情（含K线工作区） / market 市场 / holdings 持仓 / funds 基金 / kline K线（兼容别名，等价 quotes 并聚焦K线） / macro 宏观 / news 快讯 / research 资料 / dossier 深度 / discover 发现 / sources 数据源 / skills 技能 / health 接口',
       },
       code: { type: 'string', description: '可选，聚焦的代码（如 600519 / 00700 / AAPL / 110022）' },
       type: { type: 'string', enum: ['stock', 'fund'], description: '资产类型，默认 stock' },
-      kind: { type: 'string', enum: ['a', 'hk', 'us', 'fund'], description: 'K线页市场类型（仅 tab=kline 生效），默认按 type 推断' },
+      kind: { type: 'string', enum: ['a', 'hk', 'us', 'fund'], description: 'K线工作区市场类型（tab=quotes/kline 生效），默认按 type/code 推断' },
       open_analysis: { type: 'boolean', description: '同时打开该代码的 AI 解读视图，默认 false' },
     },
     output: jsonOut,

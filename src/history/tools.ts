@@ -46,7 +46,11 @@ export function registerHistoryTools(ctx: Context, finance: FinanceDataService, 
       const h = await store.read(String(args.code))
       if (!h) return asJson({ ok: false, error: '本地无历史，请先 sync_history' })
       const kline = args.limit ? h.kline.slice(-Number(args.limit)) : h.kline
-      return asJson({ ok: true, code: h.code, kind: h.kind, updatedAt: h.updatedAt, bars: kline.length, kline, events: h.events })
+      return asJson({
+        ok: true, code: h.code, kind: h.kind, updatedAt: h.updatedAt, period: h.period,
+        adjustment: h.adjustment, provider: h.provider, fetchedAt: h.fetchedAt,
+        bars: kline.length, kline, events: h.events,
+      })
     },
   }))
 
@@ -59,10 +63,11 @@ export function registerHistoryTools(ctx: Context, finance: FinanceDataService, 
       type: { type: 'string', required: true, description: '事件类型，如 分红/拆分/公告' },
       label: { type: 'string', required: true, description: '标注文本' },
       value: { type: 'number', description: '可选数值，如每股分红' },
+      kind: { type: 'string', enum: KINDS, description: '市场类型，默认 a；基金请传 fund，避免与同代码股票混库' },
     },
     output: jsonOut,
     async execute(args) {
-      const added = await store.mergeEvents(String(args.code), 'a', [{ date: String(args.date), type: String(args.type), label: String(args.label), value: typeof args.value === 'number' ? args.value : undefined }])
+      const added = await store.mergeEvents(String(args.code), (KINDS.includes(args.kind as SymbolKind) ? args.kind : 'a') as SymbolKind, [{ date: String(args.date), type: String(args.type), label: String(args.label), value: typeof args.value === 'number' ? args.value : undefined }])
       return asJson({ ok: true, added })
     },
   }))

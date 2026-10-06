@@ -28,7 +28,7 @@ try {
   await assert.rejects(store.decide(c.id, 'keep', '覆盖历史'))
   await assert.rejects(store.saveAgent(c.id, '覆盖报告', [0]))
   assert.equal(store.metrics().consecutiveWeeks, 1)
-  const changed = store.thesis({ ...t, rationale: '修正理由' }); await store.saveThesis(changed)
+  const changed = store.thesis({ ...t, rationale: '修正理由', changeReason: '根据最新财报修正' }); await store.saveThesis(changed)
   assert.equal(store.get().history[0]?.rationale, '盈利改善')
   assert.equal(store.get().cards[0]?.thesis.revision, 1)
   const loaded = new PersonalStore(path.join(dir, 'personal.json')); await loaded.load(); assert.deepEqual(loaded.get(), store.get())

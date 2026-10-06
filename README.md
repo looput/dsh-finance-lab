@@ -203,8 +203,12 @@ npx @deepseek-ai/dsh@0.2.0-rc.2 web --patch ./cordis.dev.yml
 
 ```bash
 npm run build
-npm run test:offline    # 离线功能正确性：解析/映射/持久化/校验/日志/registry/能力目录（99 条）
-npm run test:westock    # WeStock 可用性（真实网络）：精选用例 15 条 + 能力全量扫描 55 项
+npm run test:offline    # 离线功能正确性：解析/映射/持久化/校验/日志/registry/能力目录/K线数学/请求校验
+npm run test:quant      # 量化金样本：确定性回测/稳健性/搜索/策略库/分币种采样（手工推演基准）
+npm run test:personal   # 个人工作台：档案、观点版本、每周证据任务
+npm run test:regressions # 跨模块回归（总线/确认/历史/分析引用契约等）
+npm run test:ui         # UI 冒烟（真实浏览器）：无浏览器/无 DSH_UI_URL 时诚实 SKIPPED
+npm run test:westock    # WeStock 可用性（真实网络）：精选用例 + 能力全量扫描
 npm run test:avail      # 全量数据源 + 资料库真实收集
 
 # 只测试某个分组
