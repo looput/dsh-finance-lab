@@ -10,7 +10,7 @@ import { simulateRebalance } from '../rebalance.js'
 import type { PortfolioStore } from '../store.js'
 import type { AssetType } from '../types.js'
 
-const PANEL_TABS = ['quotes', 'market', 'holdings', 'funds', 'kline', 'macro', 'news', 'research', 'discover', 'sources', 'skills', 'health'] as const
+const PANEL_TABS = ['home', 'quotes', 'market', 'holdings', 'funds', 'kline', 'macro', 'news', 'research', 'discover', 'sources', 'skills', 'health'] as const
 
 function text(lines: string | string[]) {
   const body = Array.isArray(lines) ? lines.join('\n') : lines
@@ -469,7 +469,7 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
 
   ctx.tools.register(defineTool({
     name: 'upsert_holding',
-    description: '新增或更新一条本地持仓（写入持仓文件，不依赖行情源）。基金用 type:"fund"，股票用 type:"stock"。',
+    description: '预览新增或更新本地持仓，用户在个人首页确认后写入。基金用 type:"fund"，股票用 type:"stock"。',
     parameters: {
       code: { type: 'string', required: true },
       name: { type: 'string' },
@@ -479,20 +479,21 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
     },
     output: jsonOut,
     async execute(args) {
-      const holdings = await finance.upsertHolding({
+      await store.load()
+      const preview = store.previewHolding({
         code: args.code,
         name: args.name,
         quantity: args.quantity,
         avgCost: args.avgCost,
         type: (args.type as AssetType) ?? 'stock',
       })
-      return asJson({ ok: true, path: store.path, holdings })
+      return asJson({ ok: true, ...preview })
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'import_holdings',
-    description: '批量导入/覆盖本地持仓（适合识别持仓截图后一次性写入）。整表替换现有持仓。基金 type:"fund"，股票 type:"stock"。',
+    description: '预览批量导入持仓，必须让用户在个人首页确认才会整表替换。基金 type:"fund"，股票 type:"stock"。',
     parameters: {
       holdings: {
         type: 'array',
@@ -516,12 +517,12 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
       const rows = input.map((row) => ({
         code: String(row.code ?? '').trim(),
         name: row.name ? String(row.name) : undefined,
-        quantity: Number(row.quantity) || 0,
-        avgCost: Number(row.avgCost) || 0,
+        quantity: Number(row.quantity),
+        avgCost: Number(row.avgCost),
         type: (row.type === 'fund' ? 'fund' : 'stock') as AssetType,
-      })).filter((row) => row.code)
-      const file = await store.setHoldings(rows)
-      return asJson({ ok: true, path: store.path, count: rows.length, holdings: file.holdings })
+      }))
+      await store.load()
+      return asJson({ ok: true, ...store.previewHoldings(rows) })
     },
   }))
 

@@ -8,6 +8,14 @@ DSH Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 
 <img width="1331" height="804" alt="DSH Finance panel" src="https://github.com/user-attachments/assets/3fa063b1-22ef-404b-8fb9-1d230b7e66c0" />
 
+## 个人投资首页（MVP）
+
+新增建档 → 投资理由/验证指标/证伪条件 → 有来源的周复盘 → 用户复核流程。持仓导入和观点修改须到首页预览确认；面板任务先明确选择目标会话。收益按原币展示，缺汇率不合并。当前周复盘需主动触发，尚非后台自动调度。
+
+面板导航现分为「我的工作台 / 市场研究 / 数据与设置」，首页采用概览、档案与判断、每周复盘、待确认四个分区。正确性回归可运行 `npm run test:personal`、`npm run test:regressions` 和 `npm run test:offline`；交付边界与验证说明见 [个人首页说明](docs/personal-home-mvp.md)。
+
+**安全变更：** API默认仅本机访问。远程部署需认证代理、受保护的后端端口及 `DSH_FINANCE_TRUSTED_ORIGIN` 配置；不能将Origin检查当作登录鉴权。详见[实现范围、指标定义与验收边界](docs/personal-home-mvp.md)。以下旧功能说明中的直接写入和跨币种模拟，以此处新约束为准。
+
 ## 你可以用它做什么
 
 - **跨市场看行情**：A 股、港股、美股和公募基金的报价、K 线、列表与代码解析。
@@ -124,12 +132,12 @@ npx tsx scripts/probe_sources.ts --only kline.em_kline
 
 ### 3. 接入 DeepSeek Harness
 
-将当前项目目录注册到 `web` profile（`dsh plugin` 在 profile 目录里执行 pnpm；CLI 版本需与插件依赖一致，对本仓库即 `0.1.7-rc.2`）：
+将当前项目目录注册到 `web` profile（`dsh plugin` 在 profile 目录里执行 pnpm；CLI 版本需与插件依赖一致，对本仓库即 `0.2.0-rc.2`）：
 
 ```bash
-npx @deepseek-ai/dsh@0.1.7-rc.2 plugin \
+npx @deepseek-ai/dsh@0.2.0-rc.2 plugin \
   --profile web add /absolute/path/to/dsh-finance-lab
-npx @deepseek-ai/dsh@0.1.7-rc.2 web
+npx @deepseek-ai/dsh@0.2.0-rc.2 web
 ```
 
 `dsh web` 等价于 `dsh --profile web`；profile 由第一个位置参数选择，其余参数转发给应用。
@@ -157,7 +165,7 @@ npm run westock:install        # → <repo>/.dsh-home/bin/westock，脚本自动
 如果需要使用开发期的绝对路径 overlay（只挂载宿主半，不含面板客户端 bundle）：
 
 ```bash
-npx @deepseek-ai/dsh@0.1.7-rc.2 web --patch ./cordis.dev.yml
+npx @deepseek-ai/dsh@0.2.0-rc.2 web --patch ./cordis.dev.yml
 ```
 
 注册插件后，从 Harness 左下角的 **📈 金融面板** 打开 UI；模型工具会自动出现在工具列表中。
@@ -187,7 +195,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.2 web --patch ./cordis.dev.yml
 
 `dataDir` 的相对路径以插件包目录为基准。同一份源码被注册进多个 dsh profile 时，请在 profile 层把 `dataDir` 指到各自的目录（或给 `portfolioPath` / `probeReportPath` 绝对路径），否则几个 profile 会共用同一份数据。这些文件属于本地运行数据，不会被提交。
 
-`panelOpen` / `panelDocked` 在 Config schema 中声明为 **volatile**：dsh 0.1.7 的配置面板只暴露 volatile 字段，并把它们的值写到 profile 用户层（`$DSH_HOME/profiles/<name>/cordis.patch.yml`）。面板开关按钮经 `ctx.configForms` 读写该条目，因此重启后开关状态仍然保留；其余字段属于组合配置，改动后由 Loader 重新应用条目。
+`panelOpen` / `panelDocked` 在 Config schema 中声明为 **volatile**：dsh 0.2.0 的配置面板只暴露 volatile 字段，并把它们的值写到 profile 用户层（`$DSH_HOME/profiles/<name>/cordis.patch.yml`）。面板开关按钮经 `ctx.configForms` 读写该条目，因此重启后开关状态仍然保留；其余字段属于组合配置，改动后由 Loader 重新应用条目。
 
 ## 可用性测试
 

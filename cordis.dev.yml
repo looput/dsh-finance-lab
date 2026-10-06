@@ -1,4 +1,4 @@
-# Local overlay for `npx @deepseek-ai/dsh@0.1.7-rc.2 web --patch ./cordis.dev.yml`
+# Local overlay for `npx @deepseek-ai/dsh@0.2.0-rc.2 web --patch ./cordis.dev.yml`
 # Replace the paths below with this package's absolute paths if it lives elsewhere.
 # Note: --patch mounts the host half only; scripts/dev_web.sh registers the
 # package into the web profile instead, which also loads the client UI bundle.

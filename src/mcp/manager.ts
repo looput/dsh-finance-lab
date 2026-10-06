@@ -113,8 +113,8 @@ export function registerMcpSources(ctx: Context, sources: McpSource[], dataDir: 
       try { map = JSON.parse(await readFile(secretsPath, 'utf8')) as Record<string, string> } catch { /* new file */ }
       if (token.trim()) map[name] = token.trim()
       else delete map[name]
-      await mkdir(path.dirname(secretsPath), { recursive: true })
-      await writeFile(secretsPath, JSON.stringify(map, null, 2) + '\n', 'utf8')
+      await mkdir(path.dirname(secretsPath), { recursive: true, mode: 0o700 })
+      await writeFile(secretsPath, JSON.stringify(map, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
       await reload()
     },
   }
