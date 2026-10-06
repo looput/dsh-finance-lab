@@ -352,15 +352,26 @@ async function westockKline(args: Record<string, unknown>, ctx: ProviderContext,
   // WeStock 返回最新在前；东财/Yahoo 是时间升序。这里统一升序，
   // 否则 sparkline、分时迷你图、指标计算都会被画反。
   const rows = [...firstTable(stdout)].sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')))
-  const bars: KlineBar[] = rows.map((r) => ({
-    date: String(r.date ?? '').slice(0, 10),
-    open: num(r.open) ?? 0,
-    close: num(r.last ?? r.close) ?? 0,
-    high: num(r.high) ?? 0,
-    low: num(r.low) ?? 0,
-    volume: num(r.volume) ?? 0,
-  })).filter((b) => b.date)
-  if (!bars.length) throw new Error(`westock kline ${symbol}: empty result`)
+  // 缺失价格绝不能补 0（那是真实数据缺失，不是零价格）：逐行严格校验，
+  // 无效行丢弃并记警告；volume 缺失标记 volumeMissing，而不是冒充零成交。
+  const bars: KlineBar[] = []
+  let dropped = 0
+  for (const r of rows) {
+    const date = String(r.date ?? '').slice(0, 10)
+    const open = num(r.open), close = num(r.last ?? r.close), high = num(r.high), low = num(r.low)
+    const volume = num(r.volume)
+    const ok = /^\d{4}-\d{2}-\d{2}$/.test(date)
+      && open !== undefined && close !== undefined && high !== undefined && low !== undefined
+      && open > 0 && close > 0 && high > 0 && low > 0
+      && high >= low && high >= open && high >= close && low <= open && low <= close
+      && (volume === undefined || volume >= 0)
+    if (!ok) { dropped++; continue }
+    const bar: KlineBar = { date, open, close, high, low, volume: volume ?? 0 }
+    if (volume === undefined) bar.volumeMissing = true
+    bars.push(bar)
+  }
+  if (dropped) logger?.warn('westock kline: dropped invalid rows', { dropped, total: rows.length })
+  if (!bars.length) throw new Error(`westock kline ${symbol}: empty result${dropped ? `（${dropped} 行数据无效被丢弃）` : ''}`)
   return { rows: bars, sampleKeys: Object.keys(bars[0]!) }
 }
 

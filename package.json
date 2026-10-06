@@ -33,6 +33,8 @@
     "web:restart": "bash scripts/restart_web.sh",
     "westock": "tsx scripts/westock-cli.ts",
     "test:personal": "tsx scripts/test_personal.ts",
+    "test:quant": "tsx scripts/test_quant.ts",
+    "test:ui": "tsx scripts/test_ui.ts",
     "test:regressions": "tsx scripts/test_regressions.ts"
   },
   "dsh": {

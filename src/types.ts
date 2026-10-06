@@ -100,6 +100,15 @@ export type Capability =
   | 'forex_list'
   | 'bond_detail'
 
+  // ---- T4 东财 F10 七维（仅 A 股；F10 专属能力默认东财源）----
+  | 'company_survey'
+  | 'business_composition'
+  | 'main_financials'
+  | 'core_concepts'
+  | 'shareholder_count'
+  | 'valuation_analysis'
+  | 'peer_comparison'
+
 export const CAPABILITIES: Capability[] = [
   'stock_list',
   'quote',
@@ -177,6 +186,13 @@ export const CAPABILITIES: Capability[] = [
   'futures_detail',
   'forex_list',
   'bond_detail',
+  'company_survey',
+  'business_composition',
+  'main_financials',
+  'core_concepts',
+  'shareholder_count',
+  'valuation_analysis',
+  'peer_comparison',
 ]
 
 /** Default fallback order; probe may reorder to put green providers first. */
@@ -264,6 +280,17 @@ export const DEFAULT_PROVIDER_ORDER: Record<Capability, string[]> = {
   futures_detail: ['ws_futures'],
   forex_list: ['ws_forex'],
   bond_detail: ['ws_bond'],
+
+  // T4 东财 F10 七维：F10 专属能力只有东财源，默认即东财优先；
+  // 用户显式策略（数据源页）永远最高，registry 不做二次提权。
+  company_survey: ['em_f10_survey'],
+  business_composition: ['em_f10_business'],
+  main_financials: ['em_f10_financials'],
+  core_concepts: ['em_f10_concepts'],
+  shareholder_count: ['em_f10_holders'],
+  valuation_analysis: ['em_f10_valuation'],
+  // 同行比较上游契约未核实；默认先试上游（防御式解析），失败时工具层做显式标注的本地比较。
+  peer_comparison: ['em_f10_peers'],
 }
 
 /** Asset kind for a portfolio/watchlist entry. Funds share a 6-digit code shape with A-shares, so the kind is explicit. */
@@ -331,6 +358,8 @@ export interface KlineBar {
   low: number
   close: number
   volume: number
+  /** 真值缺失时为 true：此处 volume=0 表示「未知」，不是「无成交」。 */
+  volumeMissing?: boolean
 }
 
 export interface SearchResult {

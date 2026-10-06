@@ -743,3 +743,15 @@ export function westockCapabilityCatalog() {
     sampleArgs: s.sampleArgs,
   }))
 }
+
+/**
+ * 能力 → 中文名/分组。数据源页用它把 50+ 扩展能力归组显示
+ * （同一能力先出现的 spec 优先；核心能力的展示名仍由面板 CAP_LABEL 覆盖）。
+ */
+export function westockCapabilityMeta(): Map<string, { label: string; group: string }> {
+  const m = new Map<string, { label: string; group: string }>()
+  for (const s of WESTOCK_SPECS) {
+    if (!m.has(s.capability)) m.set(s.capability, { label: s.label, group: s.group })
+  }
+  return m
+}

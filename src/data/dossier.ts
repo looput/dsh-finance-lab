@@ -1,5 +1,6 @@
 import type { FinanceDataService } from './service.js'
 import type { AssetType } from '../types.js'
+import { createHash } from 'node:crypto'
 
 /**
  * 个股深度档案（Dossier）：把一个标的在 WeStock 上的全部维度一次性并发取回。
@@ -19,6 +20,11 @@ export interface DossierSection {
   label: string
   group: string
   ok: boolean
+  /**
+   * 维度状态：ready=有数据；empty=正常空；unsupported=该资产不适用；
+   * error=取数失败。「数据为空」不再与失败混同。
+   */
+  status: 'ready' | 'empty' | 'unsupported' | 'error'
   /** 实际命中的 provider（WeStock 优先，失败时回落 HTTP 源）。 */
   provider?: string
   /** 行数（数组长度或对象字段数）。 */
@@ -26,6 +32,9 @@ export interface DossierSection {
   /** 结构化行（已由 Markdown 表格解析为对象数组）。 */
   data?: unknown
   error?: string
+  /** 数据时点（如 F10 报告期/统计截止日；不是抓取时间）。 */
+  dataAsOf?: string
+  missing?: string[]
   ms: number
 }
 
@@ -33,6 +42,8 @@ export interface StockDossier {
   code: string
   type: AssetType
   at: string
+  /** 内容寻址快照 id：报告引用它证明「基于哪次档案」；同数据重取得到同 id。 */
+  snapshotId: string
   /** 成功的维度数 / 总维度数。 */
   ready: number
   total: number
@@ -47,6 +58,8 @@ interface SectionSpec {
   /** registry capability 名。 */
   capability: string
   args?: (ctx: { code: string; start: string; end: string }) => Record<string, unknown>
+  /** 仅股票（如 F10 七维）：基金直接标 unsupported，不发无效请求。 */
+  onlyStock?: boolean
 }
 
 const iso = (d: Date) => d.toISOString().slice(0, 10)
@@ -94,6 +107,14 @@ const SPECS: SectionSpec[] = [
     capability: 'industry_chain',
     args: ({ code }) => ({ view: 'stock', code }),
   },
+  // ---- T4 东财 F10 七维（仅 A 股；港美/基金显式 unsupported）----
+  { key: 'company_survey', label: '公司概况（F10）', group: '基本面', capability: 'company_survey', onlyStock: true },
+  { key: 'business_composition', label: '主营构成（产品/地区/行业）', group: '基本面', capability: 'business_composition', onlyStock: true },
+  { key: 'main_financials', label: '主要财务指标（分期）', group: '基本面', capability: 'main_financials', onlyStock: true },
+  { key: 'core_concepts', label: '核心题材（概念标签）', group: '基本面', capability: 'core_concepts', onlyStock: true },
+  { key: 'shareholder_count', label: '股东户数（时点统计）', group: '股东与回报', capability: 'shareholder_count', onlyStock: true },
+  { key: 'valuation_analysis', label: '估值分位（PE/PB 历史）', group: '估值与同业', capability: 'valuation_analysis', onlyStock: true },
+  { key: 'peer_comparison', label: '同行比较（口径见行内标注）', group: '估值与同业', capability: 'peer_comparison', onlyStock: true },
 ]
 
 function rowCount(data: unknown): number {
@@ -113,19 +134,50 @@ export async function buildStockDossier(
 
   const sections = await Promise.all(SPECS.map(async (spec): Promise<DossierSection> => {
     const t0 = Date.now()
+    if (spec.onlyStock && type === 'fund') {
+      return {
+        key: spec.key, label: spec.label, group: spec.group, ok: false, status: 'unsupported', rows: 0,
+        error: 'F10 七维仅支持 A 股股票，基金不适用', ms: Date.now() - t0,
+      }
+    }
     try {
       const args = spec.args?.(ctx) ?? { code }
       const r = await finance.westock<unknown>(spec.capability, args)
       // 空数据是正常结果（如当前无事件），只标记行数 0，不算失败。
+      const rows = r.ok ? rowCount(r.data) : 0
+      const meta = (r.data && typeof r.data === 'object' && 'meta' in (r.data as object))
+        ? (r.data as { meta?: { asOf?: string; reportPeriod?: string; missing?: string[] } }).meta
+        : undefined
+      const missing = meta?.missing?.length ? meta.missing : undefined
+      // 空判定看「有意义字段」：meta/latest/percentile 壳不算数据；空数组/空对象算空。
+      const meaningful = (() => {
+        const d = r.data as unknown
+        if (d === undefined || d === null) return 0
+        if (Array.isArray(d)) return d.length
+        if (typeof d !== 'object') return 1
+        let n = 0
+        for (const [k, v] of Object.entries(d as Record<string, unknown>)) {
+          if (k === 'meta' || k === 'latest' || k === 'percentile') continue
+          if (k === 'history') { if (Array.isArray(v) && v.length) n += v.length; continue }
+          if (Array.isArray(v)) n += v.length
+          else if (v && typeof v === 'object') n += Object.keys(v).length
+          else if (v !== undefined && v !== null && v !== '') n++
+        }
+        return n
+      })()
+      const empty = r.ok && meaningful === 0
       return {
         key: spec.key,
         label: spec.label,
         group: spec.group,
         ok: r.ok,
+        status: r.ok ? (empty ? 'empty' : 'ready') : 'error',
         provider: r.provider,
-        rows: r.ok ? rowCount(r.data) : 0,
+        rows,
         data: r.ok ? r.data : undefined,
         error: r.ok ? undefined : r.error,
+        dataAsOf: meta?.asOf ?? meta?.reportPeriod,
+        missing,
         ms: Date.now() - t0,
       }
     } catch (err) {
@@ -134,6 +186,7 @@ export async function buildStockDossier(
         label: spec.label,
         group: spec.group,
         ok: false,
+        status: 'error',
         rows: 0,
         error: err instanceof Error ? err.message : String(err),
         ms: Date.now() - t0,
@@ -145,11 +198,34 @@ export async function buildStockDossier(
     code,
     type,
     at: new Date().toISOString(),
-    ready: sections.filter((s) => s.ok && s.rows > 0).length,
+    snapshotId: dossierSnapshotId({ code, type, sections }),
+    ready: sections.filter((s) => s.status === 'ready').length,
     total: sections.length,
     elapsedMs: Date.now() - started,
     sections,
   }
+}
+
+/** 快照哈希剔除抓取时间/耗时等易变字段：同数据重取得到同 id，报告引用才可校验。 */
+export function dossierSnapshotId(d: { code: string; type: AssetType; sections: DossierSection[] }): string {
+  const stripVolatile = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(stripVolatile)
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+        if (k === 'retrievedAt' || k === 'ms') continue
+        out[k] = stripVolatile(x)
+      }
+      return out
+    }
+    return v
+  }
+  const canonical = JSON.stringify(stripVolatile({
+    code: d.code,
+    type: d.type,
+    sections: d.sections.map((s) => ({ key: s.key, status: s.status, rows: s.rows, data: s.data })),
+  }))
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 32)
 }
 
 /** 面板/工具用：把档案压成一段可读摘要（喂给模型或展示概览）。 */

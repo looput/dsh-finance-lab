@@ -18,6 +18,17 @@ import {
   type HttpGetOptions,
 } from './http.js'
 import { DEFAULT_INDEX_CODES, westockProviders } from './westock.js'
+import {
+  F10_ENDPOINTS,
+  isAShareCode,
+  normalizeBusinessComposition,
+  normalizeCompanySurvey,
+  normalizeCoreConcepts,
+  normalizeMainFinancials,
+  normalizePeers,
+  normalizeShareholderCount,
+  normalizeValuation,
+} from './eastmoney-f10.js'
 import { WESTOCK_CAPABILITY_PROVIDERS, WESTOCK_SPECS } from './westock-capabilities.js'
 import type { Capability, KlineBar, ProviderContext, ProviderFn, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
 
@@ -306,6 +317,90 @@ async function emMainFinadata(args: Record<string, unknown>, ctx: ProviderContex
   const rows = json.result?.data ?? []
   if (!rows.length) throw new Error('empty financial main data')
   return { rows, sampleKeys: Object.keys(rows[0]!) }
+}
+
+// ---- T4 东财 F10 七维（仅 A 股）----
+// 规范化/口径在 eastmoney-f10.ts（纯函数、fixture 固定契约）；这里只做抓取。
+// 上游契约在本环境无法线上核实（TLS 被中断），结果带 contractVerified=false。
+
+function assertF10Code(code: unknown): string {
+  const c = normalizeCode(String(code ?? ''))
+  if (!isAShareCode(c)) throw new Error(`F10 仅支持 A 股（含北交所），不支持：${code}`)
+  return c
+}
+
+async function emF10PageAjax(moduleUrl: string, code: unknown, ctx: ProviderContext): Promise<unknown> {
+  const secu = toSecuCode(assertF10Code(code))
+  return httpGetJson<Record<string, unknown>>(
+    moduleUrl,
+    { SECUCODE: secu },
+    opts(ctx, 'https://emweb.securities.eastmoney.com/'),
+  )
+}
+
+async function emF10Survey(args: Record<string, unknown>, ctx: ProviderContext) {
+  const data = normalizeCompanySurvey(await emF10PageAjax(F10_ENDPOINTS.companySurvey, args.code, ctx))
+  return { data, sampleKeys: Object.keys(data) }
+}
+
+async function emF10Business(args: Record<string, unknown>, ctx: ProviderContext) {
+  const data = normalizeBusinessComposition(await emF10PageAjax(F10_ENDPOINTS.businessAnalysis, args.code, ctx))
+  return { data, sampleKeys: Object.keys(data) }
+}
+
+async function emF10Concepts(args: Record<string, unknown>, ctx: ProviderContext) {
+  const data = normalizeCoreConcepts(await emF10PageAjax(F10_ENDPOINTS.coreConception, args.code, ctx))
+  return { data, sampleKeys: Object.keys(data) }
+}
+
+async function emF10Holders(args: Record<string, unknown>, ctx: ProviderContext) {
+  const data = normalizeShareholderCount(await emF10PageAjax(F10_ENDPOINTS.shareholderResearch, args.code, ctx))
+  return { data, sampleKeys: Object.keys(data) }
+}
+
+async function emF10Financials(args: Record<string, unknown>, ctx: ProviderContext) {
+  const secu = toSecuCode(assertF10Code(args.code))
+  const ps = Math.min(Math.max(Number(args.pageSize ?? 14), 1), 50)
+  const json = await httpGetJson<{ result?: { data?: Array<Record<string, unknown>> } }>(
+    F10_ENDPOINTS.mainFinancials,
+    {
+      type: 'RPT_F10_FINANCE_MAINFINADATA',
+      sty: 'APP_F10_MAINFINADATA',
+      filter: `(SECUCODE="${secu}")`,
+      p: '1', ps: String(ps), sr: '-1', st: 'REPORT_DATE',
+      source: 'HSF10', client: 'PC',
+    },
+    opts(ctx, 'https://emweb.securities.eastmoney.com/'),
+  )
+  const data = normalizeMainFinancials({ result: json.result })
+  return { data, sampleKeys: Object.keys(data) }
+}
+
+async function emF10Valuation(args: Record<string, unknown>, ctx: ProviderContext) {
+  const secu = toSecuCode(assertF10Code(args.code))
+  const json = await httpGetJson<{ result?: { data?: Array<Record<string, unknown>> } }>(
+    F10_ENDPOINTS.valuation,
+    {
+      reportName: 'RPT_VALUEANALYSIS_DET',
+      columns: 'ALL',
+      filter: `(SECUCODE="${secu}")`,
+      pageNumber: '1', pageSize: String(Math.min(Math.max(Number(args.pageSize ?? 500), 10), 2000)),
+      sortColumns: 'TRADE_DATE', sortTypes: '-1',
+      source: 'WEB', client: 'WEB',
+    },
+    opts(ctx, 'https://data.eastmoney.com/'),
+  )
+  const data = normalizeValuation({ result: json.result }, {
+    windowDays: Number(args.windowDays ?? 1825),
+    minSamples: Number(args.minSamples ?? 60),
+  })
+  return { data, sampleKeys: Object.keys(data) }
+}
+
+async function emF10Peers(args: Record<string, unknown>, ctx: ProviderContext) {
+  // 上游同行接口未核实：URL 来自 F10 页面结构推断，解析全部防御式。
+  const data = normalizePeers(await emF10PageAjax(F10_ENDPOINTS.peerComparison, args.code, ctx))
+  return { data, sampleKeys: Object.keys(data) }
 }
 
 /**
@@ -717,7 +812,10 @@ async function emFundQuote(args: Record<string, unknown>, ctx: ProviderContext) 
 
 async function emFundKline(args: Record<string, unknown>, ctx: ProviderContext) {
   const fd = await emFundData(String(args.code ?? ''), ctx)
-  const bars: KlineBar[] = fd.navTrend.map((p) => ({ date: p.date, open: p.nav, high: p.nav, low: p.nav, close: p.nav, volume: 0 }))
+  // 净单位置无成交量：volume=0 仅作占位，必须标记 volumeMissing，不能当成零成交。
+  const bars: KlineBar[] = fd.navTrend
+    .filter((p) => Number.isFinite(p.nav) && p.nav > 0)
+    .map((p) => ({ date: p.date, open: p.nav, high: p.nav, low: p.nav, close: p.nav, volume: 0, volumeMissing: true }))
   return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
 }
 
@@ -893,6 +991,55 @@ export const PROVIDERS: ProviderMeta[] = [
     endpointRef: 'stock_financial_analysis_indicator_em (stock_finance_sina.py)',
     sampleArgs: { code: '600519' },
     call: emMainFinadata,
+  },
+  {
+    id: 'em_f10_survey',
+    capability: 'company_survey',
+    endpointRef: 'emweb PC_HSF10/CompanySurvey/PageAjax (F10 公司概况)',
+    sampleArgs: { code: '600519' },
+    call: emF10Survey,
+  },
+  {
+    id: 'em_f10_business',
+    capability: 'business_composition',
+    endpointRef: 'emweb PC_HSF10/BusinessAnalysis/PageAjax (F10 主营构成)',
+    sampleArgs: { code: '600519' },
+    call: emF10Business,
+  },
+  {
+    id: 'em_f10_financials',
+    capability: 'main_financials',
+    endpointRef: 'datacenter RPT_F10_FINANCE_MAINFINADATA (F10 主要财务指标)',
+    sampleArgs: { code: '600519' },
+    call: emF10Financials,
+  },
+  {
+    id: 'em_f10_concepts',
+    capability: 'core_concepts',
+    endpointRef: 'emweb PC_HSF10/CoreConception/PageAjax (F10 核心题材)',
+    sampleArgs: { code: '600519' },
+    call: emF10Concepts,
+  },
+  {
+    id: 'em_f10_holders',
+    capability: 'shareholder_count',
+    endpointRef: 'emweb PC_HSF10/ShareholderResearch/PageAjax (F10 股东户数)',
+    sampleArgs: { code: '600519' },
+    call: emF10Holders,
+  },
+  {
+    id: 'em_f10_valuation',
+    capability: 'valuation_analysis',
+    endpointRef: 'datacenter-web RPT_VALUEANALYSIS_DET (F10 估值分析/分位)',
+    sampleArgs: { code: '600519' },
+    call: emF10Valuation,
+  },
+  {
+    id: 'em_f10_peers',
+    capability: 'peer_comparison',
+    endpointRef: 'emweb PC_HSF10/IndustryAnalysis/PageAjax (同行比较；契约未核实)',
+    sampleArgs: { code: '600519' },
+    call: emF10Peers,
   },
   {
     id: 'em_industry_board',
