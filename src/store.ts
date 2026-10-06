@@ -89,12 +89,31 @@ export class PortfolioStore {
   }
   previewHolding(holding: PortfolioHolding) {
     const [row] = holdingsOf([holding])
-    return this.previewHoldings([...this.data.holdings.filter(h => !(h.type === row!.type && h.code === row!.code)), row!])
+    const before = this.get().holdings
+    const exists = before.some(h => h.type === row!.type && h.code === row!.code)
+    return this.proposeHoldings(
+      exists ? `更新持仓 ${row!.code}` : `新增持仓 ${row!.code}`,
+      before,
+      [...before.filter(h => !(h.type === row!.type && h.code === row!.code)), row!],
+    )
   }
   previewHoldings(holdings: PortfolioHolding[]) {
-    if (!this.loaded) throw new Error('持仓尚未加载，拒绝导入')
-    const rows = holdingsOf(holdings), before = this.get().holdings
-    return this.confirmations.propose('整表替换持仓（空表将清空）', before, rows, () => this.get().holdings, () => this.change(next => {
+    return this.proposeHoldings('整表替换持仓（空表将清空）', this.get().holdings, holdingsOf(holdings))
+  }
+  /** 删除持仓也必须先预览确认——确认前不得落盘。 */
+  previewRemoveHolding(code: string, type?: AssetType) {
+    const before = this.get().holdings
+    const rows = before.filter(h => (type && h.type !== type) || h.code !== canonCode(code, h.type))
+    if (rows.length === before.length) throw new Error('未找到持仓，无须删除')
+    return this.proposeHoldings(
+      `删除持仓 ${code}${type ? `（${type === 'fund' ? '基金' : '股票'}）` : ''}`,
+      before,
+      rows,
+    )
+  }
+  private proposeHoldings(label: string, before: PortfolioHolding[], rows: PortfolioHolding[]) {
+    if (!this.loaded) throw new Error('持仓尚未加载，拒绝预览')
+    return this.confirmations.propose(label, before, rows, () => this.get().holdings, () => this.change(next => {
       // Recheck inside the store's queue, not only the confirmation queue.
       if (JSON.stringify(next.holdings) !== JSON.stringify(before)) throw new Error('持仓已变化，请重新预览')
       next.holdings = rows

@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { AnalysisStore } from './analysis-store.js'
+import { StrategyLibrary } from './strategy/library.js'
 import '@deepseek-ai/dsh-settings'
 import '@deepseek-ai/dsh-system-prompt'
 import '@deepseek-ai/dsh-tools'
@@ -93,6 +94,8 @@ export function apply(ctx: Context, config: Config) {
   void store.load().catch((err) => logger.fail('portfolio load failed', err))
   const analyses = new AnalysisStore(path.join(dataDir, 'analysis-cache.json'), logger)
   void analyses.load().catch((err) => logger.fail('analysis cache load failed', err))
+  const strategyLibrary = new StrategyLibrary(path.join(dataDir, 'strategy-library.json'))
+  void strategyLibrary.load().catch((err) => logger.fail('strategy library load failed', err))
 
   // Bidirectional channel: store mutations (from tools, routes, or the agent) are
   // pushed to connected panel clients over SSE instead of waiting for the 60s poll.
@@ -152,7 +155,7 @@ export function apply(ctx: Context, config: Config) {
   ctx.provide('financeData', finance)
   const personal = new PersonalStore(path.join(dataDir, 'personal.json'))
   registerPersonalTools(ctx, personal, finance, vault)
-  registerTools(ctx, finance, store, analyses, bus)
+  registerTools(ctx, finance, store, analyses, bus, personal, strategyLibrary)
   registerWestockTools(ctx, finance)
   registerHistoryTools(ctx, finance, history, bus)
   if (config.research?.enabled !== false) registerResearchTools(ctx, finance, vault, bus)
@@ -182,7 +185,7 @@ export function apply(ctx: Context, config: Config) {
       '- Market data uses direct HTTP endpoints (Eastmoney / Tencent), not akshare. If a market tool fails, call probe_finance_sources first.',
       '- Holdings CRUD works without quotes; P&L enrichment needs a healthy quote provider.',
       '- 历史K线/财报/分红可用 sync_history 落地到本地库，再用 get_history 读取（含事件标记）。',
-      '- 对话中想引导用户看面板时调用 panel_navigate（tab 必填，可带 code 聚焦；tab=kline 用 kind 指定市场，open_analysis 可同时打开 AI 解读）。',
+      '- 对话中想引导用户看面板时调用 panel_navigate（tab 必填，可带 code 聚焦；tab=quotes 聚焦K线工作区（tab=kline 为兼容别名），kind 指定市场，open_analysis 可同时打开 AI 解读）。',
       '- 调仓推演用 simulate_rebalance：trades（买卖列表）或 targets（目标权重%）二选一，返回前后权重/HHI/分币种敞口对比；纯模拟，不改持仓。',
       '- Use type:"fund" for funds (基金, 6-digit code) and type:"stock" for stocks (A股/港股/美股).',
       '- When the panel sends an active position-analysis request, gather the requested data with finance tools and finish by calling save_position_analysis with the complete Markdown report.',

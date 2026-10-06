@@ -1,6 +1,7 @@
 import { accessError } from './api-security.js'
 import { confirmations } from './confirmations.js'
 import type { PersonalStore } from './personal.js'
+import { weekTimeZone } from './personal.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AnalysisStore } from './analysis-store.js'
 import type { FinanceDataService } from './data/service.js'
@@ -14,10 +15,20 @@ import type { HistoryStore } from './history/store.js'
 import { syncHistory, type SymbolKind } from './history/sync.js'
 import { buildLiveSnapshot, type SnapshotItem } from './live.js'
 import type { Logger } from './log.js'
-import { westockCapabilityCatalog } from './data/westock-capabilities.js'
+import { westockCapabilityCatalog, westockCapabilityMeta } from './data/westock-capabilities.js'
+
+/** 数据源目录附上能力中文名/分组（面板把 50+ 扩展能力归组显示，不再一行一个裸英文 id）。 */
+function withCapMeta<T extends { capability: string }>(rows: T[]): Array<T & { label?: string; group?: string }> {
+  const meta = westockCapabilityMeta()
+  return rows.map((r) => {
+    const m = meta.get(r.capability)
+    return m ? { ...r, label: m.label, group: m.group } : { ...r }
+  })
+}
 import { collectResearch } from './research/tools.js'
 import { ResearchConfirmationRequired, type ResearchKind, type ResearchStatus, type ResearchVault } from './research/store.js'
 import type { AssetType } from './types.js'
+import { ValidationError, validateAssetType, validateCode, validateDate, validateMarketKind } from './validation.js'
 
 /** Keep SSE connections alive through proxies/idle timeouts. */
 const SSE_HEARTBEAT_MS = 20_000
@@ -106,12 +117,25 @@ export function advisorMemory(vault: ResearchVault | undefined, code: string): s
   ].join('\n')
 }
 
-function analysisPrompt(
+interface AnalysisPromptResult {
+  prompt: string
+  refs: { dossierSnapshotId: string; thesisRevision?: number; previousReportId?: string }
+}
+
+/**
+ * 深度解读提示词（T5）：先档案快照、再对照原判断/上次报告/上次决定，按
+ * 「原判断—新证据—验证/反证/待观察—与上次变化—待确认修订建议」组织。
+ * 提示词要求检索是行为指令；保存时另做引用契约校验（不证明语义真实）。
+ */
+async function analysisPrompt(
   code: string,
   type: AssetType,
   holding: { name?: string; quantity: number; avgCost: number } | undefined,
   vault?: ResearchVault,
-): string {
+  personal?: PersonalStore,
+  analyses?: AnalysisStore,
+  finance?: FinanceDataService,
+): Promise<AnalysisPromptResult> {
   const position = holding
     ? `这是当前持仓，数量 ${holding.quantity}，平均成本 ${holding.avgCost}${holding.name ? `，名称 ${holding.name}` : ''}。`
     : '这是当前自选标的，不要编造持仓数量或成本。'
@@ -122,19 +146,80 @@ function analysisPrompt(
       '补充 get_macro_china、get_market_news 和 web_search，说明宏观与消息环境；数据失败时明确标注。',
     ]
     : [
-      '先调用 get_realtime_quote、get_stock_info 和 get_stock_kline 获取行情、档案和历史 K 线。',
-      '再调用 calculate_technical_indicators（至少 MA5、MA20、MA60、MACD、RSI、KDJ）与 get_financial_indicators。',
-      '补充 get_stock_news、get_macro_china、get_market_overview 和 get_sector_board，说明消息、宏观和行业环境。',
+      '先调用 stock_dossier 获取该标的深度档案（基本面/资金/股东/风险/公告/产业链），必要时按缺口补查单个能力，不要从零逐个命令拼数据。',
+      '再调用 get_realtime_quote、get_stock_kline 与 calculate_technical_indicators（至少 MA5、MA20、MA60、MACD、RSI）补行情与技术面。',
+      '补充 get_stock_news、get_macro_china、get_market_overview，说明消息、宏观和行业环境；数据失败时明确标注。',
     ]
-  return [
-    `用户刚刚在 DSH Finance 面板主动点击了${type === 'fund' ? '基金' : '股票'} ${code}，请求生成一次完整中文解读。`,
-    position,
-    ...dataPlan,
-    advisorMemory(vault, code),
-    '请基于工具返回的真实数据写出完整 Markdown 报告，不要编造缺失字段，也不要把研究参考写成确定性买卖建议。',
-    '报告至少包含：一句话结论、标的概况、近期表现、趋势/技术或净值分析、基本面或基金画像、消息与宏观、主要风险、后续观察清单、数据时间与数据源。',
-    `完成报告后必须调用 save_position_analysis，参数 code="${code}"、type="${type}"，将完整报告放入 report；不要只把报告留在普通回复中。`,
-  ].join('\n')
+
+  // 档案快照：内容寻址 id，报告必须回引，证明结论基于哪一版档案。
+  const refs: AnalysisPromptResult['refs'] = { dossierSnapshotId: '' }
+  const dossierBlock: string[] = []
+  if (finance) {
+    try {
+      const d = await buildStockDossier(finance, code, type)
+      refs.dossierSnapshotId = d.snapshotId
+      await analyses?.noteSnapshot(d.snapshotId, code, type)
+      const essentials = d.sections
+        .filter((s) => ['company_survey', 'main_financials', 'valuation_analysis', 'shareholder_count'].includes(s.key))
+        .map((s) => `  - ${s.label}：${s.status}${s.dataAsOf ? `（数据时点 ${s.dataAsOf}）` : ''}${s.error ? `｜${s.error}` : ''}`)
+      dossierBlock.push(
+        '',
+        `【档案快照 · snapshotId=${d.snapshotId}】已并发取回 ${d.ready}/${d.total} 个维度（${dossierSummary(d).split('\n')[0]}）。`,
+        ...essentials,
+        '档案是数据不是结论；维度为空/失败要如实写进「缺失」，不要用推测填数。',
+      )
+    } catch (err) {
+      dossierBlock.push('', `【档案快照】获取失败：${err instanceof Error ? err.message : String(err)}；如需可再调用 stock_dossier，并把缺失写进报告。`)
+    }
+  }
+
+  // 原判断（版本化）+ 上次报告 + 上次人工决定，供「与上次变化」对照。
+  const context: string[] = []
+  if (personal) {
+    const state = personal.get()
+    const thesis = state.theses.find((t) => t.code === code && (t.type ?? 'stock') === type)
+    if (thesis) {
+      refs.thesisRevision = thesis.revision
+      context.push(
+        '',
+        `【原判断 · v${thesis.revision}${thesis.changeReason ? `（v${thesis.revision} 修正理由：${thesis.changeReason}）` : ''}】`,
+        `理由：${thesis.rationale}`,
+        `验证指标：${thesis.indicator}`,
+        `证伪条件：${thesis.falsifier}`,
+        ...(thesis.indicators?.length ? [`结构化指标：${thesis.indicators.map((i) => `${i.label}（${i.metricKey} ${i.comparator} ${i.threshold}${i.unit ?? ''}）`).join('；')}`] : []),
+        '逐条对照上面的验证指标与证伪条件：被验证 / 被证伪 / 仍待观察，缺失的指标写「缺失」。',
+      )
+    }
+    const decided = state.cards
+      .filter((c) => c.thesis.code === code && (c.thesis.type ?? 'stock') === type && c.decision)
+      .sort((a, b) => b.week.localeCompare(a.week))[0]
+    if (decided?.decision) {
+      context.push('', `【上次人工决定 · ${decided.week}】${decided.decision.action}｜${decided.decision.reason}。这是用户自己的判断，不得覆盖或替用户做新决定。`)
+    }
+  }
+  if (analyses) {
+    const prev = analyses.get(code, type)
+    if (prev) {
+      refs.previousReportId = prev.reportId
+      const excerpt = prev.report.slice(0, 500).replace(/\s+/g, ' ')
+      context.push('', `【上次报告 · v${prev.version}（${prev.generatedAt.slice(0, 10)}）】${excerpt}……`, '新增一节「与上次变化」：哪些结论被新证据加强/推翻/仍待观察。')
+    }
+  }
+
+  return {
+    refs,
+    prompt: [
+      `用户刚刚在 DSH Finance 面板主动点击了${type === 'fund' ? '基金' : '股票'} ${code}，请求生成一次完整中文解读。`,
+      position,
+      ...dataPlan,
+      ...dossierBlock,
+      ...context,
+      advisorMemory(vault, code),
+      '请基于工具返回的真实数据写出完整 Markdown 报告，不要编造缺失字段，区分「事实 / 推断 / 未知」，也不要把研究参考写成确定性买卖建议。',
+      '报告按以下结构组织：一句话结论 → 原判断 → 新证据 → 验证/反证/待观察（逐条对指标）→ 与上次变化 → 主要风险 → 后续观察清单 → 数据时间与来源 → 待确认修订建议（只建议，不修改观点）。',
+      `完成报告后必须调用 save_position_analysis，参数 code="${code}"、type="${type}"，将完整报告放入 report${refs.dossierSnapshotId ? `，并回引 dossier_snapshot_id="${refs.dossierSnapshotId}"` : ''}${refs.thesisRevision !== undefined ? `、thesis_revision=${refs.thesisRevision}` : ''}${refs.previousReportId ? `、previous_report_id="${refs.previousReportId}"` : ''}；不要只把报告留在普通回复中。`,
+    ].join('\n'),
+  }
 }
 
 /**
@@ -174,7 +259,7 @@ export function registerRoutes(
         if (personal && (sub === '/personal' || sub.startsWith('/personal/'))) {
           await personal.load()
           if (vault) await vault.load()
-          if (req.method === 'GET' && sub === '/personal') return sendJson(res, 200, { ok: true, ...personal.get(), metrics: personal.metrics(), pending: confirmations.list(), holdings: store.get().holdings, research: vault?.list({ limit: 8 }) ?? [], reminders: reminders?.list() ?? [] })
+          if (req.method === 'GET' && sub === '/personal') return sendJson(res, 200, { ok: true, ...personal.get(), metrics: personal.metrics(), pending: confirmations.list(), holdings: store.get().holdings, research: vault?.list({ limit: 8 }) ?? [], reminders: reminders?.list() ?? [], weekTimeZone })
           if (req.method === 'POST') {
             const body = await readBody(req)
             if (sub === '/personal/profile') await personal.profile(body)
@@ -185,7 +270,14 @@ export function registerRoutes(
             } else if (sub === '/personal/confirm') await confirmations.confirm(String(body.id))
             else if (sub === '/personal/cancel') confirmations.cancel(String(body.id))
             else if (sub === '/personal/prepare') return sendJson(res, 200, { ok: true, cards: await personal.prepare(finance, vault) })
+            else if (sub === '/personal/card/makeup') return sendJson(res, 200, { ok: true, ...await personal.requestMakeupCard(String(body.thesisId ?? ''), String(body.reason ?? '')) })
             else if (sub === '/personal/decision') await personal.decide(String(body.id), String(body.action), typeof body.reason === 'string' ? body.reason : '')
+            else if (sub === '/personal/job') {
+              const action = String(body.action ?? '')
+              if (action === 'retry') await personal.retryJob(String(body.key))
+              else if (action === 'cancel') await personal.cancelJob(String(body.key))
+              else return sendJson(res, 400, { ok: false, error: '无效任务操作（retry/cancel）' })
+            }
             else return sendJson(res, 404, { ok: false, error: 'not found' })
             return sendJson(res, 200, { ok: true })
           }
@@ -198,11 +290,27 @@ export function registerRoutes(
             Connection: 'keep-alive',
             'X-Accel-Buffering': 'no',
           })
+          res.write('retry: 2000\n\n')
           res.write(': connected\n\n')
-          const unsubscribe = bus.subscribe((event) => {
+          // Reconnect catch-up: the browser sends `Last-Event-ID` automatically
+          // after receiving `id:` fields; `?since=` supports explicit cursors.
+          const lastEventId = req.headers['last-event-id']
+          const since = url.searchParams.get('since') ?? (typeof lastEventId === 'string' ? lastEventId : undefined)
+          const write = <T extends { epoch: string; seq: number }>(envelope: T) => {
             try {
-              res.write(`data: ${JSON.stringify(event)}\n\n`)
+              res.write(`id: ${envelope.epoch}:${envelope.seq}\n`)
+              res.write(`data: ${JSON.stringify(envelope)}\n\n`)
             } catch { /* client already gone; close handler cleans up */ }
+          }
+          const subscription = bus.subscribe((envelope) => write(envelope), {
+            since,
+            onGap: () => write({
+              v: 1,
+              epoch: bus.epoch,
+              seq: 0,
+              emittedAt: new Date().toISOString(),
+              event: { kind: '__resync', reason: 'gap' },
+            }),
           })
           const beat = setInterval(() => {
             try {
@@ -211,7 +319,7 @@ export function registerRoutes(
           }, SSE_HEARTBEAT_MS)
           req.on('close', () => {
             clearInterval(beat)
-            unsubscribe()
+            subscription.close()
           })
           return
         }
@@ -420,7 +528,7 @@ export function registerRoutes(
           return sendJson(res, 200, result)
         }
         if (req.method === 'GET' && sub === '/providers') {
-          return sendJson(res, 200, { catalog: finance.getProviderCatalog() })
+          return sendJson(res, 200, { catalog: withCapMeta(finance.getProviderCatalog()) })
         }
         if (skills && req.method === 'GET' && sub === '/skills') {
           return sendJson(res, 200, skills.catalog())
@@ -437,26 +545,31 @@ export function registerRoutes(
           return sendJson(res, 200, { symbols: await history.list() })
         }
         if (history && req.method === 'GET' && sub === '/history') {
-          const code = url.searchParams.get('code') ?? ''
+          const code = validateCode(url.searchParams.get('code') ?? '')
           const h = await history.read(code)
           if (!h) return sendJson(res, 200, { ok: false, code, error: 'no local history' })
           return sendJson(res, 200, { ok: true, ...h })
         }
+        if (history && req.method === 'GET' && sub === '/history/manifest') {
+          const code = validateCode(url.searchParams.get('code') ?? '')
+          const m = await history.manifest(code)
+          if (!m) return sendJson(res, 404, { ok: false, code, error: 'no local history' })
+          return sendJson(res, 200, { ok: true, manifest: m })
+        }
         if (history && req.method === 'POST' && sub === '/history/sync') {
           const body = await readBody(req)
-          const code = String(body.code ?? '').trim()
-          if (!code) return sendJson(res, 400, { ok: false, error: 'missing code' })
-          const kind = (HISTORY_KINDS.includes(body.kind as SymbolKind) ? body.kind : 'a') as SymbolKind
+          const code = validateCode(body.code)
+          const kind = validateMarketKind(body.kind ?? 'a') as SymbolKind
           const result = await syncHistory(finance, history, code, kind)
           bus.publish({ kind: 'history', code, bars: result.bars, addedBars: result.addedBars })
           return sendJson(res, 200, result)
         }
         if (history && req.method === 'POST' && sub === '/history/event') {
           const body = await readBody(req)
-          const code = String(body.code ?? '').trim()
-          const date = String(body.date ?? '').trim()
-          if (!code || !date) return sendJson(res, 400, { ok: false, error: 'missing code/date' })
-          const added = await history.mergeEvents(code, 'a', [{ date, type: String(body.type ?? '自定义'), label: String(body.label ?? ''), value: typeof body.value === 'number' ? body.value : undefined }])
+          const code = validateCode(body.code)
+          const date = validateDate(body.date, 'date')
+          const kind = validateMarketKind(body.kind ?? 'a') as SymbolKind
+          const added = await history.mergeEvents(code, kind, [{ date, type: String(body.type ?? '自定义'), label: String(body.label ?? ''), value: typeof body.value === 'number' ? body.value : undefined }])
           return sendJson(res, 200, { ok: true, added })
         }
         if (req.method === 'POST' && sub === '/providers') {
@@ -464,7 +577,7 @@ export function registerRoutes(
           const policy = (body.policy ?? {}) as Record<string, string[]>
           const catalog = await finance.setProviderPolicy(policy)
           bus.publish({ kind: 'providers' })
-          return sendJson(res, 200, { ok: true, catalog })
+          return sendJson(res, 200, { ok: true, catalog: withCapMeta(catalog) })
         }
         if (req.method === 'POST' && sub === '/mcp/token') {
           if (!mcp) return sendJson(res, 400, { ok: false, error: 'mcp disabled' })
@@ -549,30 +662,28 @@ export function registerRoutes(
         }
         // 个股深度档案：一次并发取回该标的在 WeStock 上的全部维度（研究/资金/股东/风险/资讯/产业链）。
         if (req.method === 'GET' && sub === '/dossier') {
-          const code = String(url.searchParams.get('code') ?? '').trim()
-          const type: AssetType = url.searchParams.get('type') === 'fund' ? 'fund' : 'stock'
-          if (!code) return sendJson(res, 400, { ok: false, error: 'code is required' })
+          const code = validateCode(url.searchParams.get('code') ?? '')
+          const type = validateAssetType(url.searchParams.get('type') ?? 'stock')
           const d = await buildStockDossier(finance, code, type)
           return sendJson(res, 200, { ok: true, summary: dossierSummary(d), ...d })
         }
         if (req.method === 'GET' && sub === '/analysis') {
-          const code = String(url.searchParams.get('code') ?? '').trim()
-          const type = url.searchParams.get('type') === 'fund' ? 'fund' : 'stock'
-          if (!code) return sendJson(res, 400, { ok: false, error: 'code is required' })
+          const code = validateCode(url.searchParams.get('code') ?? '')
+          const type = validateAssetType(url.searchParams.get('type') ?? 'stock')
           const analysis = analyses.get(code, type)
           return sendJson(res, 200, { ok: true, found: Boolean(analysis), analysis })
         }
         if (req.method === 'POST' && sub === '/analysis') {
           const body = await readBody(req)
-          const code = String(body.code ?? '').trim()
-          const type: AssetType = body.type === 'fund' ? 'fund' : 'stock'
+          const code = validateCode(body.code)
+          const type = validateAssetType(body.type ?? 'stock')
           const force = body.force === true
-          if (!code) return sendJson(res, 400, { ok: false, error: 'code is required' })
           const key = `${type}:${code}`
           const cached = analyses.get(code, type)
           if (cached && !force) return sendJson(res, 200, { ok: true, status: 'cached', analysis: cached })
           const holding = store.get().holdings.find((h) => h.code === code && h.type === type)
-          return sendJson(res, 200, { ok: true, status: 'prompt', prompt: analysisPrompt(code, type, holding, vault) })
+          const generated = await analysisPrompt(code, type, holding, vault, personal, analyses, finance)
+          return sendJson(res, 200, { ok: true, status: 'prompt', prompt: generated.prompt, refs: generated.refs })
         }
 
         // ---- 观点触发式提醒 ----
@@ -607,7 +718,7 @@ export function registerRoutes(
           if (action === 'upsertHolding' && code) {
             return sendJson(res, 200, { ok: true, ...store.previewHolding({ code, name: p.name ? String(p.name) : undefined, quantity: Number(p.quantity), avgCost: Number(p.avgCost), type }) })
           } else if (action === 'removeHolding' && code) {
-            await store.removeHolding(code, p.type ? type : undefined)
+            return sendJson(res, 200, { ok: true, ...store.previewRemoveHolding(code, p.type ? type : undefined) })
           } else if (action === 'addWatch' && code) {
             await store.addWatch({ code, name: p.name ? String(p.name) : undefined, type })
           } else if (action === 'removeWatch' && code) {
@@ -622,6 +733,9 @@ export function registerRoutes(
       } catch (err) {
         // Previously silent: a failing route left no trace anywhere.
         logger?.fail(`route ${req.method} ${sub} failed`, err)
+        if (err instanceof ValidationError) {
+          return sendJson(res, err.httpStatus, { ok: false, error: err.message, issues: err.issues })
+        }
         return sendJson(res, err instanceof RequestError ? err.status : 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
       }
     },

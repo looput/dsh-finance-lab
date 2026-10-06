@@ -18,3 +18,6 @@ package-lock.json
 data/personal.json
 data/reminders.json
 data/research/
+data/strategy-library.json
+data/experiments/
+data/ui-shots/
