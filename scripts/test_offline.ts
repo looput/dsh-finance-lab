@@ -54,7 +54,7 @@ import {
   jobKey, shouldEnqueue, allocateShadow, applyEntryPrice, shadowTotals, overlapWithHoldings, matchAliases,
   type FollowPosition, type FollowSnapshot, type FollowTrade,
 } from '../src/follow.ts'
-import { FollowStore } from '../src/follow-store.ts'
+import { FollowStore, DEFAULT_FOLLOW_TARGETS } from '../src/follow-store.ts'
 import {
   parse13FInformationTable, parseEdgarSubmissions, latestFilingGroup, normalizeIssuerName,
   parseCompanyTickers, mapPositionsToTickers, parseAmountRange, parseCongressBargo, parseEdgarCompanyAtom,
@@ -1924,6 +1924,40 @@ esac
       pb2.publish({ kind: 'follow', action: 'job', targetId: 'x', at: new Date().toISOString() })
       check('追踪：follow 回执入总线', fEnv?.event?.kind === 'follow' && fEnv?.event?.action === 'job', JSON.stringify(fEnv?.event))
       fSub.close()
+    }
+
+    // 批次22：默认追踪对象（首次 seed、幂等、删除不复活、旧档案只标记）
+    // ------------------------------------------------------------
+    {
+      eq('默认对象：纯默认状态仍为空', defaultFollowState().targets.length, 0)
+      check('默认对象：三个样本覆盖三类', DEFAULT_FOLLOW_TARGETS.length === 3 && new Set(DEFAULT_FOLLOW_TARGETS.map((t) => t.kind)).size === 3, DEFAULT_FOLLOW_TARGETS.map((t) => t.kind).join(','))
+      const sseed = new FollowStore(path.join(root, 'follow-seed', 'follow.json'))
+      const r1 = await sseed.seedDefaults()
+      eq('默认对象：首次 seed 3 个', r1.seeded, 3)
+      eq('默认对象：名单与顺序', sseed.get().targets.map((t) => t.name).join(','), 'Berkshire Hathaway,Nancy Pelosi,冯柳')
+      check('默认对象：seededAt 已标记', !!sseed.get().seededAt, sseed.get().seededAt ?? '')
+      eq('默认对象：伯克希尔 cik 归一', sseed.get().targets.find((t) => t.name === 'Berkshire Hathaway')?.cik, '0001067983')
+      eq('默认对象：冯柳带受控别名', sseed.get().targets.find((t) => t.name === '冯柳')?.aliases?.join(','), '邻山1号')
+      check('默认对象：全部可解析入库', sseed.get().targets.every((t) => t.enabled && /^flw-/.test(t.id)), '')
+      const r2 = await sseed.seedDefaults()
+      eq('默认对象：二次 seed 幂等', r2.seeded, 0)
+      const berk = sseed.get().targets.find((t) => t.name === 'Berkshire Hathaway')!
+      await sseed.removeTarget(berk.id)
+      const r3 = await sseed.seedDefaults()
+      eq('默认对象：删除后不复活', `${r3.seeded}|${sseed.get().targets.length}`, '0|2')
+      // 旧档案（已有对象但没有 seededAt）：只补标记，不注入
+      const sold = new FollowStore(path.join(root, 'follow-seed-old', 'follow.json'))
+      await sold.addTarget({ kind: 'congress-ticker', ticker: 'NVDA', name: 'NVDA 国会交易' })
+      const r4 = await sold.seedDefaults()
+      eq('默认对象：旧档案只标记不注入', `${r4.seeded}|${sold.get().targets.length}`, '0|1')
+      check('默认对象：旧档案 seededAt 已补', !!sold.get().seededAt, sold.get().seededAt ?? '')
+      // 损坏档案不静默播种
+      const seedBad = path.join(root, 'follow-seed-bad', 'follow.json')
+      await mkdir(path.dirname(seedBad), { recursive: true })
+      await writeFile(seedBad, '{"targets":{}}')
+      let seedErr = ''
+      try { await new FollowStore(seedBad).seedDefaults() } catch (e) { seedErr = e instanceof Error ? e.message : String(e) }
+      check('默认对象：损坏档案拒绝播种', seedErr.includes('损坏'), seedErr)
     }
 
     console.log(`\n[offline] ${passed} passed, ${failed} failed`)

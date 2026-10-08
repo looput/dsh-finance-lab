@@ -346,6 +346,7 @@ npm run westock -- quote sh600519                 # 等价写法
 
 对话里的「盯住巴菲特 / 跟着议员买 / 看看冯柳买了什么」由 Agent 用 `follow_*` 系列工具推进；面板新增 **追踪** 页（`tab=follow`，只读展示 + 任务卡投递回对话），数据全存本机 `data/follow.json`（原子写、损坏拒绝覆盖）。
 
+- **默认对象**：首次启动自动预置三个样本——Berkshire Hathaway（13F）、Nancy Pelosi（国会申报）、冯柳（十大流通股东），与提示词示例一致；`seededAt` 一次性标记，**删除后不复活**，已有档案只补标记不注入。
 - **数据源**：
   - 机构持仓 → SEC EDGAR 官方（免费，带合规 UA）：`submissions/CIK*.json` 找 13F-HR/13D/13G → information table XML 解析（容忍 `ns1:` 前缀与 putCall 期权行）→ `company_tickers.json` 发行人名→代码唯一映射（歧义留空）；13D/13G 从同一 submissions 里发现（举牌信号）。名字→CIK 走 EDGAR company search（atom），多候选时让 Agent 带 CIK 重试——**没有固定名人表**。
   - 国会申报 → Bargo 免费档（keyless 30 req/日、100 行/日、滚动 3 个月窗口）为主，失败自动试 Disclosed Capitol 备用源（需 `DISCLOSED_CAPITOL_API_KEY`，未配置则明确报不可用）；金额按申报区间展示，不做精确化。

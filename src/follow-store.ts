@@ -9,6 +9,7 @@ import {
   FOLLOW_KINDS, defaultFollowState,
   type FollowBrief, type FollowJob, type FollowKind, type FollowShadow, type FollowSnapshot, type FollowState, type FollowTarget, type ShadowPosition,
 } from './follow.js'
+import { resolveAliases } from './data/manager-aliases.js'
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -19,6 +20,16 @@ export type FollowChange = { action: 'target' | 'snapshot' | 'job' | 'brief' | '
 const MAX_SNAPSHOTS = 240
 const MAX_JOBS = 120
 const MAX_BRIEFS = 120
+
+/**
+ * 首次启动预置的默认追踪对象：与提示词示例一致的三个样本（机构13F / 国会申报 / A股名私募）。
+ * 这是引导种子而不是用户目录——follow_add 仍由 Agent 按名字动态解析，用户可随时 follow_remove。
+ */
+export const DEFAULT_FOLLOW_TARGETS: Array<{ kind: FollowKind; name: string; cik?: string; slug?: string; ticker?: string; aliases?: string[]; note?: string }> = [
+  { kind: 'investor-13f', name: 'Berkshire Hathaway', cik: '0001067983', note: '巴菲特：13F 长期组合的默认基准（季度披露，约45天延迟）' },
+  { kind: 'congress', name: 'Nancy Pelosi', slug: 'nancy-pelosi', note: '美国国会 Stock Act 申报样本（30–45天延迟，金额为区间）' },
+  { kind: 'cn-holder', name: '冯柳', aliases: resolveAliases('冯柳'), note: '高毅邻山1号：A股名私募十大流通股东样本（季报口径）' },
+]
 
 /** 结构校验：拒绝把垃圾形状写进档案（明确报错，不静默接受）。 */
 export function normalizeTarget(input: { kind?: unknown; name?: unknown; cik?: unknown; slug?: unknown; ticker?: unknown; aliases?: unknown; note?: unknown }): Pick<FollowTarget, 'kind' | 'name'> & Partial<Pick<FollowTarget, 'cik' | 'slug' | 'ticker' | 'aliases' | 'note'>> {
@@ -144,6 +155,25 @@ export class FollowStore {
       if (patch.lastCheckedAt) t.lastCheckedAt = patch.lastCheckedAt
       if (patch.lastKeys) t.lastKeys = { ...(t.lastKeys ?? {}), ...patch.lastKeys }
     }, false)
+  }
+
+  /**
+   * 首次启动灌入 DEFAULT_FOLLOW_TARGETS（幂等：seededAt 标记后永不再注入——用户删掉的默认对象不会复活；
+   * 档案里已有对象时只补标记不注入）。不发总线回执（启动期静默，面板 GET /follow 自会读到）。
+   */
+  async seedDefaults(): Promise<{ seeded: number }> {
+    const seeded = await this.change('target', undefined, (s) => {
+      if (s.seededAt) return 0
+      s.seededAt = nowIso()
+      if (s.targets.length) return 0
+      const rows: FollowTarget[] = DEFAULT_FOLLOW_TARGETS.map((t) => {
+        const base = normalizeTarget(t)
+        return { id: `flw-${randomUUID().slice(0, 8)}`, ...base, enabled: true, createdAt: nowIso() }
+      })
+      s.targets = rows
+      return rows.length
+    }, false)
+    return { seeded }
   }
 
   /** 快照入库：同 target+filingKey 幂等替换，倒序、封顶。 */

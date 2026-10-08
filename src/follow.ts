@@ -132,6 +132,8 @@ export interface FollowShadow {
 export interface FollowState {
   createdAt: string
   updatedAt?: string
+  /** 默认追踪对象已灌入（一次性标记：删除后不会复活）。 */
+  seededAt?: string
   targets: FollowTarget[]
   snapshots: FollowSnapshot[]
   jobs: FollowJob[]

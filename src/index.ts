@@ -178,6 +178,8 @@ export function apply(ctx: Context, config: Config) {
   const follow = new FollowStore(path.join(dataDir, 'follow.json'), (change) => {
     bus.publish({ kind: 'follow', action: change.action, targetId: change.targetId, at: new Date().toISOString() })
   })
+  // 首次启动预置默认追踪对象（seededAt 一次性标记；删除后不复活）。
+  void follow.seedDefaults().catch((err) => logger.warn('follow: default targets seed failed', { error: String(err) }))
   registerFollowTools(ctx, { finance, portfolio: store, follow, bus, vault, growth }, { tick: true })
   registerTools(ctx, finance, store, analyses, bus, personal, strategyLibrary)
   registerWestockTools(ctx, finance)
@@ -298,6 +300,7 @@ export function apply(ctx: Context, config: Config) {
     order: 125,
     text: [
       '## 追踪（机构13F / 政客申报 / A股名私募，Agent 驱动，全本地档案）',
+      '- 默认档案已预置三个样本对象：Berkshire Hathaway（CIK 0001067983，13F）、Nancy Pelosi（国会申报）、冯柳（A股十大流通股东）。首次 follow_list 即可见；用户不要哪个就 follow_remove（删了不复活）。',
       '- 触发：用户说「跟踪/盯」某人或机构、问「他最近买了什么 / 巴菲特/段永平/木头姐持仓」、问「跟着国会议员买哪些股」时：先 follow_list 装载记忆（新鲜度徽标+待解读任务），再 follow_fetch 拉最新披露。',
       '- follow_add：名字先自己解析（EDGAR/成员接口有响应式候选），失败带候选让用户选，再带 cik/slug 重试；不记固定名人表。加之前向用户说明该源的延迟与覆盖边界（工具返回自带 caveat，直接转述）。',
       '- 解读节奏（一次只做 1 件事）：follow_fetch（新披露会自动入队 follow_fetch 式任务卡）→ follow_diff 引用具体数字与披露日期 → 有重叠或用户想复刻时 follow_vs_holdings → 最后 follow_note 落简报（3-6 条要点，引用数字/日期/边界，同步资料库）。',
