@@ -1,5 +1,6 @@
 import { valuation, quoteCurrency } from '../valuation.js'
 import type { AssetType, Holding, KlineBar, PortfolioHolding, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
+import type { NormalizedHolding } from '../fund-analysis.js'
 import { stripMarketSuffix } from './http.js'
 import type { ProviderRegistry } from './registry.js'
 import {
@@ -207,8 +208,17 @@ export class FinanceDataService {
     return this.registry.call<KlineBar[]>('fund_kline', { code, days: 120 }, signal)
   }
 
-  async getFundRank(fundType = 'all', size = 20, signal?: AbortSignal) {
-    return this.registry.call('fund_rank', { fundType, size }, signal)
+  /**
+   * 开放式基金排行。sortBy: m1/m3/m6/y1/y2/y3/ytd（默认 m6=近6月；货币基金固定近1年收益口径），
+   * page 从 1 起，size ≤ 50。排序键映射见 providers.fundRankRequest。
+   */
+  async getFundRank(fundType = 'all', size = 20, sortBy?: string, page?: number, signal?: AbortSignal) {
+    return this.registry.call('fund_rank', { fundType, size, sortBy, page }, signal)
+  }
+
+  /** 基金重仓持仓（穿透分析）：东财 f10 JJCC，防御式解析，失败显式报错。 */
+  async getFundHoldings(code: string, topN = 10, signal?: AbortSignal) {
+    return this.registry.call<NormalizedHolding[]>('fund_holdings', { code, topN }, signal)
   }
 
   async getMacro(series: string, signal?: AbortSignal) {

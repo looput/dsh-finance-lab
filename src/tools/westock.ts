@@ -122,6 +122,10 @@ export function registerWestockTools(ctx: Context, finance: FinanceDataService) 
     { name: 'get_institution_rating', capability: 'institution_rating', label: '机构评级（港股/美股）', args: { code: '代码参数名' } },
     { name: 'get_buyback', capability: 'buyback', label: '公司回购（A股/港股；回购不常发生，建议给 start/end 区间）', args: { code: '代码参数名', start: '区间起始（可选）', end: '区间结束（可选）' } },
     { name: 'get_north_holding', capability: 'north_holding', label: '北向资金持仓（个股或板块）', args: { code: '代码或板块代码' } },
+    // P1 ETF 一等工具：折溢价/规模/重仓是场内 ETF 决策关键数据，之前只能走 westock_call 兜底。
+    { name: 'get_etf_overview', capability: 'etf_overview', label: 'ETF 概览（规模/折溢价/估值；场内 ETF 决策先看折溢价）', args: { code: 'ETF 代码，如 510300' } },
+    { name: 'get_etf_nav', capability: 'etf_nav', label: 'ETF 净值历史（可给 start/end 区间）', args: { code: 'ETF 代码', start: '起始日 YYYY-MM-DD（可选）', end: '结束日（可选）' } },
+    { name: 'get_etf_holdings', capability: 'etf_holdings', label: 'ETF 重仓持仓（穿透分析；场外基金用 get_fund_holdings/fund_dossier）', args: { code: 'ETF 代码' } },
   ]
 
   for (const spec of simple) {

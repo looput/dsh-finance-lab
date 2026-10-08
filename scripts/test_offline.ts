@@ -23,8 +23,22 @@ import { ResearchVault, ResearchValidationError, renderResearchDoc } from '../sr
 import { routeCode, FinanceDataService } from '../src/data/service.ts'
 import { ProviderRegistry } from '../src/data/registry.ts'
 import { CAPABILITIES, DEFAULT_PROVIDER_ORDER } from '../src/types.ts'
-import { ReminderStore } from '../src/reminders.js'
+import { ReminderStore, scanReminders } from '../src/reminders.js'
 import { buildStockDossier, dossierSummary } from '../src/data/dossier.js'
+import { buildFundDossier } from '../src/data/fund-dossier.js'
+import { parseFundNavLsjz, parseFundHoldings, fundRankSc, fundRankRequest } from '../src/data/providers.js'
+import { emSecMarket } from '../src/data/http.js'
+import { computeLookthrough, marginalLookthrough, buildLookthrough } from '../src/lookthrough.js'
+import { GROWTH_CURRICULUM, METRIC_CONCEPT_MAP, findLesson, lessonByQuery } from '../src/growth-curriculum.js'
+import { computeGrowth, computeStreak, diagnoseGrowth, evaluateFamilyPlan, gradeQuiz, type GrowthState } from '../src/growth.js'
+import { GrowthStore } from '../src/growth-store.js'
+import { PanelBus, isStaleCommand } from '../src/panel-bus.js'
+import { setPanelFocus, getPanelFocus } from '../src/panel-focus.js'
+import { registerTools } from '../src/tools/register.js'
+import {
+  compareFunds, compareWithBenchmark, computeFundOverlap, computeFundRiskMetrics,
+  isOnExchangeFundCode, latestProfileNumber, normalizeHoldingCode, normalizeNavSeries, profileRows,
+} from '../src/fund-analysis.js'
 import {
   MA_WINDOWS, aggregateBars, clampViewport, indexAtX, isPeriodClosed, lastWeekdayOfMonth,
   monthEnd, movingAverage, palette, panViewport, priceRange, sanitizeBars, visibleRange,
@@ -34,12 +48,24 @@ import {
   ValidationError, expectNoUnknownFields, validateAssetType, validateBudget, validateCode,
   validateDate, validateDateRange, validateFinite, validateNonNegative, validatePagination,
 } from '../src/validation.js'
-import { advisorMemory } from '../src/server-routes.js'
+import { advisorMemory, registerRoutes, API_PREFIX } from '../src/server-routes.js'
+import {
+  defaultFollowState, daysSince, staleLevel, diff13F, diffCongress, latestSnapshot, previousSnapshot,
+  jobKey, shouldEnqueue, allocateShadow, applyEntryPrice, shadowTotals, overlapWithHoldings, matchAliases,
+  type FollowPosition, type FollowSnapshot, type FollowTrade,
+} from '../src/follow.ts'
+import { FollowStore } from '../src/follow-store.ts'
+import {
+  parse13FInformationTable, parseEdgarSubmissions, latestFilingGroup, normalizeIssuerName,
+  parseCompanyTickers, mapPositionsToTickers, parseAmountRange, parseCongressBargo, parseEdgarCompanyAtom,
+} from '../src/data/follow-sources.ts'
+import { resolveAliases } from '../src/data/manager-aliases.ts'
+import { registerFollowTools, followHash, summarizeDiff } from '../src/tools/follow-tools.ts'
 import { PersonalStore, weekKey, setWeekTimeZone } from '../src/personal.js'
 import type { PersonalState, Thesis, ReviewCard as PersonalReviewCard, WeeklyJob } from '../src/personal.js'
 import { HistoryStore, detectGaps } from '../src/history/store.js'
 import { fetchKlinePaged } from '../src/history/sync.js'
-import { metricProvenance } from '../src/personal-eval.js'
+import { metricProvenance, KNOWN_METRICS, evaluateThesis, factsFromFundProfile, factsFromFundRisk } from '../src/personal-eval.js'
 import { westockCapabilityMeta } from '../src/data/westock-capabilities.js'
 import { defaultOpenFamily, groupBySource } from '../src/client/sources-group.js'
 import type { KlineBar } from '../src/types.js'
@@ -86,11 +112,50 @@ function eq<T>(name: string, actual: T, expected: T): void {
 async function main() {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-finance-offline-'))
   const realFetch = globalThis.fetch
+  // ---- 批次21 fixtures：EDGAR（submissions/13F XML/company_tickers/atom）+ Bargo（members/trades，轮换响应测增量） ----
+  const FIX_SUBMISSIONS = {
+    filings: { recent: {
+      form: ['13F-HR', '13D', '13F-HR'],
+      accessionNumber: ['0001193125-26-054580', '0001193125-25-777777', '0001193125-25-666666'],
+      filingDate: ['2026-02-17', '2026-01-10', '2025-11-14'],
+      reportDate: ['2025-12-31', '', '2025-09-30'],
+    } },
+  }
+  const FIX_13F_XML = [
+    '<?xml version="1.0"?><informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable">',
+    '<infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><cusip>037833100</cusip><titleOfClass>COM</titleOfClass><value>600000000</value><shrsOrPrnamt><sshPrnamt>30000000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnamt></infoTable>',
+    '<infoTable><nameOfIssuer>COCA COLA CO</nameOfIssuer><cusip>191216100</cusip><titleOfClass>COM</titleOfClass><value>20000000</value><shrsOrPrnamt><sshPrnamt>32000000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnamt></infoTable>',
+    '</informationTable>',
+  ].join('')
+  const FIX_TICKERS = {
+    '0': { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' },
+    '1': { cik_str: 1309001, ticker: 'KO', title: 'Coca Cola Co' },
+  }
+  const FIX_ATOM = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><title>BERKSHIRE HATHAWAY INC (CIK 0001067983)</title><content>CIK=0001067983</content></entry></feed>'
+  const BARGO_T1 = { id: 'bt1', ticker: 'NVDA', politician_name: 'Nancy Pelosi', transaction_type: 'purchase', amount_range: '$1,001 - $15,000', transaction_date: '2026-09-10', disclosure_date: '2026-09-20', asset_description: 'NVDA call' }
+  const BARGO_T2 = { id: 'bt2', ticker: 'TSLA', politician_name: 'Nancy Pelosi', transaction_type: 'sale', amount_range: '$50,001 - $100,000', transaction_date: '2026-09-11', disclosure_date: '2026-09-21' }
+  const followFx = { bargoHits: 0 }
   // A truly offline suite: no external requests. Exercise the real HTTP parser
   // and provider fallback with a deterministic JSONP response.
   globalThis.fetch = async (input) => {
     const url = new URL(String(input))
     if (url.hostname === 'search-api-web.eastmoney.com') return new Response('x(' + JSON.stringify({ result: { cmsArticleWebOld: [{ title: '离线新闻', content: '摘要', url: 'https://example.com/news', date: '2026-09-27 09:00:00', mediaName: '测试来源' }] } }) + ')', { status: 200 })
+    if (url.hostname === 'data.sec.gov' && url.pathname === '/submissions/CIK0001067983.json') return Response.json(FIX_SUBMISSIONS)
+    if (url.hostname === 'www.sec.gov' && url.pathname === '/files/company_tickers.json') return Response.json(FIX_TICKERS)
+    if (url.hostname === 'www.sec.gov' && url.pathname.startsWith('/cgi-bin/browse-edgar')) return new Response(FIX_ATOM, { status: 200 })
+    const arch = /^\/Archives\/edgar\/data\/1067983\/([^/]+)\/(.+)$/.exec(url.pathname)
+    if (url.hostname === 'www.sec.gov' && arch) {
+      if (arch[2] === 'index.json') return Response.json({ directory: { item: [{ name: 'primary_doc.xml' }, { name: 'form13fInfoTable.xml' }] } })
+      if (/\.xml$/i.test(arch[2] ?? '')) return new Response(FIX_13F_XML, { status: 200 })
+    }
+    if (url.hostname === 'www.bargo.ai' && url.pathname.endsWith('/members')) {
+      return Response.json({ members: [{ slug: 'nancy-pelosi', name: 'Nancy Pelosi' }, { slug: 'other-member', name: 'Other Member' }] })
+    }
+    if (url.hostname === 'www.bargo.ai' && url.pathname.endsWith('/trades')) {
+      followFx.bargoHits++
+      // 第1次返回1笔（基线），第2次起多1笔（增量），第3次不再变化（幂等）
+      return Response.json({ trades: followFx.bargoHits === 1 ? [BARGO_T1] : [BARGO_T1, BARGO_T2] })
+    }
     throw new Error(`offline: blocked network ${url.hostname}`)
   }
   try {
@@ -969,6 +1034,897 @@ esac
     eq('分组：家族按首次出现排序且计数正确', `${b16F.map(f => `${f.source}:${f.total}`).join(',')}`, 'WeStock:4,DuckDuckGo:1')
     eq('分组：家族内按 group 聚合、缺省归其他', b16F[0]!.groups.map(g => `${g.group}${g.caps.length}`).join(','), '行情1,技术2,其他1')
     eq('分组：大家族默认折叠、小家族展开', `${defaultOpenFamily(52)}|${defaultOpenFamily(3)}`, 'false|true')
+
+
+    // ===== 批次17：基金分析内核（纯函数，离线；对应 P0-1/P0-3/P1-7/P1-8） =====
+    const dayStr = (i: number) => new Date(Date.UTC(2024, 0, 1) + i * 86400000).toISOString().slice(0, 10)
+    const geoNav = Array.from({ length: 241 }, (_, i) => ({ date: dayStr(i), nav: Math.pow(1.005, i) }))
+
+    // (1) 风险指标：净值 0.5%/日复利 → 精确的全区间收益/年化；波动=0；回撤=0。
+    const riskGeo = computeFundRiskMetrics(geoNav)
+    const wantRet = Math.round((Math.pow(1.005, 240) - 1) * 100 * 100) / 100
+    const wantAnn = Math.round((Math.pow(1.005, 365) - 1) * 100 * 100) / 100
+    eq('基金指标：复利增长全样本收益', riskGeo.full.returnPct, wantRet)
+    eq('基金指标：年化收益=按365天折算', riskGeo.full.annualizedReturnPct, wantAnn)
+    eq('基金指标：恒定日收益→年化波动0', riskGeo.full.annualizedVolPct, 0)
+    eq('基金指标：单调上涨→最大回撤0', riskGeo.full.maxDrawdownPct, 0)
+    eq('基金指标：波动为0时夏普为空而非NaN', riskGeo.full.sharpe === null, true)
+    eq('基金指标：跨度240天不足1年→y1缺失', riskGeo.y1, null)
+    eq('基金指标：今年来锚定成立年起点', riskGeo.stages.ytd, riskGeo.full.returnPct)
+    eq('基金指标：asOf=最新净值日', riskGeo.asOf, dayStr(240))
+    const riskDD = computeFundRiskMetrics([
+      { date: '2024-01-01', nav: 100 },
+      { date: '2024-01-02', nav: 80 },
+      { date: '2024-01-03', nav: 100 },
+    ])
+    eq('基金指标：100→80→100 最大回撤=20（绝对值）', riskDD.full.maxDrawdownPct, 20)
+    eq('基金指标：样本<90天不年化', riskDD.full.annualizedReturnPct, null)
+    eq('基金指标：单点序列不抛错、指标为空', computeFundRiskMetrics([{ date: '2024-01-01', nav: 1 }]).full.returnPct, null)
+    const norm = normalizeNavSeries([
+      { date: '2024-01-03', nav: 3 },
+      { date: '2024-01-01', nav: 1 },
+      { date: '2024-01-01', nav: 1.5 },
+      { date: '2024-01-02', nav: Number.NaN },
+      { date: 'bad', nav: 2 },
+    ] as never)
+    eq('净值清洗：排序+去重+丢非法', `${norm.length}|${norm[0]!.date}|${norm[0]!.nav}`, '2|2024-01-01|1.5')
+
+    // (2) 基准对比：基金日收益=2×基准 → Beta=2、相关=1；样本不足 → null。
+    const benchSeries: Array<{ date: string; close: number }> = [{ date: dayStr(0), close: 100 }]
+    const fundLevered: Array<{ date: string; nav: number }> = [{ date: dayStr(0), nav: 1 }]
+    const benchInv: Array<{ date: string; close: number }> = [{ date: dayStr(0), close: 100 }]
+    const fundInv: Array<{ date: string; nav: number }> = [{ date: dayStr(0), nav: 1 }]
+    let b = 100; let bl = 1; let bi = 1
+    for (let i = 1; i <= 80; i++) {
+      const r = i % 7 === 0 ? -0.012 : 0.002 + 0.0015 * (i % 5)
+      b *= 1 + r; bl *= 1 + 2 * r; bi *= 1 - r
+      benchSeries.push({ date: dayStr(i), close: b })
+      fundLevered.push({ date: dayStr(i), nav: bl })
+      benchInv.push({ date: dayStr(i), close: b * 1.001 })
+      fundInv.push({ date: dayStr(i), nav: bi })
+    }
+    const cmp = compareWithBenchmark(fundLevered, benchSeries, 'sh000300')
+    eq('基准对比：样本≥40才产出', cmp !== null, true)
+    eq('基准对比：Beta=2（收益精确2倍）', cmp!.beta, 2)
+    eq('基准对比：相关系数=1', cmp!.correlation, 1)
+    eq('基准对比：跟踪误差为正', (cmp!.trackingErrorPct ?? 0) > 0, true)
+    eq('基准对比：超额=基金-基准', typeof cmp!.excessPct, 'number')
+    const cmpInv = compareWithBenchmark(fundInv, benchSeries, 'sh000300')
+    eq('基准对比：反向序列相关=-1', cmpInv!.correlation, -1)
+    eq('基准对比：共同收益<40→null', compareWithBenchmark(geoNav.slice(0, 10), benchSeries.slice(0, 10), 'x'), null)
+
+    // (3) 多基金对比：相关矩阵 + 平均两两相关；重叠不足 → null 不产出。
+    const seriesByCode = { '110022': fundLevered, '161725': fundLevered.map((p) => ({ ...p })) }
+    const cmpF = compareFunds(seriesByCode)
+    eq('多基金对比：两只基金入池', cmpF.funds.length, 2)
+    eq('多基金对比：同序列相关=1', cmpF.correlation[0]!.correlation, 1)
+    eq('多基金对比：平均相关=1', cmpF.avgPairwiseCorrelation, 1)
+    const cmpShort = compareFunds({ '110022': geoNav.slice(0, 20), '161725': geoNav.slice(0, 20) })
+    eq('多基金对比：重叠不足→相关缺失', cmpShort.correlation[0]!.correlation, null)
+    eq('多基金对比：无有效相关→平均为null', cmpShort.avgPairwiseCorrelation, null)
+
+    // (4) lsjz 解析（契约未线上核实的回落源）：命名字段严格解析，命不中抛错。
+    const lsjzOk = parseFundNavLsjz({
+      Data: {
+        lsjzList: [
+          { FSRQ: '2025-09-30', DWJZ: '1.2345', LJJZ: '2.3456', JZZDF: '+1.23', SGZT: '开放申购', SHZT: '开放赎回' },
+          { FSRQ: '2025-09-29', DWJZ: '1.2180' },
+        ],
+      },
+      ErrCode: 0,
+    })
+    eq('lsjz：新在前+净值/累计/日涨幅', `${lsjzOk.series.length}|${lsjzOk.series[0]!.date}|${lsjzOk.series[0]!.nav}|${lsjzOk.series[0]!.accumNav}|${lsjzOk.series[0]!.growthPct}`, '2|2025-09-30|1.2345|2.3456|1.23')
+    eq('lsjz：申赎状态带出', `${lsjzOk.subscribeStatus}|${lsjzOk.redeemStatus}`, '开放申购|开放赎回')
+    let lsjzMissing = ''
+    try { parseFundNavLsjz({ Data: {} }) } catch (e) { lsjzMissing = e instanceof Error ? e.message : String(e) }
+    check('lsjz：缺 lsjzList 明确抛错', lsjzMissing.includes('缺少 Data.lsjzList'), lsjzMissing)
+    let lsjzGarbage = ''
+    try { parseFundNavLsjz({ Data: { lsjzList: [{ FOO: '1', BAR: '2' }, { FSRQ: '2025-09-30', DWJZ: '20000' }] } }) } catch (e) { lsjzGarbage = e instanceof Error ? e.message : String(e) }
+    check('lsjz：识别不出有效净值行抛错（含越界净值）', lsjzGarbage.includes('解析不到有效净值行'), lsjzGarbage)
+
+    // (5) JJCC 持仓解析：年份键取最新；识别不出结构就抛错（拒绝猜测）。
+    const jjccRows = Array.from({ length: 10 }, (_, i) => ({ 股票代码: `6005${String(10 + i).padStart(2, '0')}`, 股票名称: `股票${i}`, 占净值比例: `${(10 - i) * 0.5}` }))
+    const holdings = parseFundHoldings({ Data: { '2024': jjccRows.slice(0, 5), '2025': jjccRows } })
+    eq('JJCC：取最新年份键', holdings.length, 10)
+    eq('JJCC：代码/名称/占比解析', `${holdings[0]!.code}|${holdings[0]!.name}|${holdings[0]!.weightPct}`, '600510|股票0|5')
+    let jjccBad = ''
+    try { parseFundHoldings({ Data: { foo: [{ a: 1 }, { b: 2 }] } }) } catch (e) { jjccBad = e instanceof Error ? e.message : String(e) }
+    check('JJCC：无代码列拒绝猜测', jjccBad.includes('无法从响应识别持仓结构') || jjccBad.includes('没有可识别的持仓行'), jjccBad)
+    eq('持仓代码归一化：带前缀/后缀', `${normalizeHoldingCode('SH510300')}|${normalizeHoldingCode('510300.SH')}|${normalizeHoldingCode('sh510300')}|${normalizeHoldingCode('AAPL')}`, '510300|510300|510300|AAPL')
+
+    // (6) 持仓重叠：与组合交集 + 权重加总。
+    const overlap = computeFundOverlap('110022', [
+      { code: '600519', name: '贵州茅台', weightPct: 9.5 },
+      { code: '000858', name: '五粮液', weightPct: 8 },
+    ], [
+      { code: '600519', weightPct: 30 },
+      { code: '601318', weightPct: 10 },
+    ])
+    eq('持仓重叠：交集命中', overlap.overlaps.length, 1)
+    eq('持仓重叠：权重=交集占基金净值合计', overlap.overlapWeightPct, 9.5)
+    eq('持仓重叠：无权重行→null', computeFundOverlap('x', [{ code: '600519' }], [{ code: '600519' }]).overlapWeightPct, null)
+    eq('场内基金判定', `${isOnExchangeFundCode('510300')}|${isOnExchangeFundCode('159915')}|${isOnExchangeFundCode('110022')}`, 'true|true|false')
+
+    // (7) 排行排序参数：周期→东财 sc 映射 + 分页钳制。
+    eq('排行：y1→1nzf', fundRankSc('all', 'y1'), '1nzf')
+    eq('排行：货币基金固定近1年', fundRankSc('hb', 'm6'), '1nsyl')
+    eq('排行：未知排序回落近6月', fundRankSc('all', 'bogus'), fundRankSc('all'))
+    const rankReq = fundRankRequest('all', 999, 'ytd', 0)
+    eq('排行：size/page 钳制 + ytd 排序', `${rankReq.pn}|${rankReq.pi}|${rankReq.sc}|${rankReq.st}`, '50|1|jnzf|desc')
+
+    // (8) secid 市场位：sh 前缀优先于首字符启发式（sh000300 指数必须 1.000300）。
+    eq('secid 市场位：sh000300→沪', emSecMarket('sh000300'), 1)
+    eq('secid 市场位：无前缀按首字符', `${emSecMarket('600519')}|${emSecMarket('000001')}|${emSecMarket('399001')}`, '1|0|0')
+    eq('secid 市场位：sz 前缀', emSecMarket('sz000001'), 0)
+
+    // (9) 画像取数与越界防御 + 风险事实。
+    const profFacts = factsFromFundProfile({
+      raw: {
+        profile: { fluctuationScale: [100.5, 130.2], rateInSimilarPersent: '23.4' },
+        navDate: '2025-09-30',
+      },
+    } as never)
+    eq('画像事实：规模取末值', profFacts.fund_size?.value, 130.2)
+    eq('画像事实：同类排名百分比', profFacts.similar_rank_pct?.value, 23.4)
+    eq('画像事实：asOf=净值日期', profFacts.fund_size?.asOf, '2025-09-30')
+    const profBad = factsFromFundProfile({
+      raw: { profile: { fluctuationScale: 999999, rateInSimilarPersent: 150 } },
+    } as never)
+    eq('画像事实：越界规模/排名按缺失省略', 'fund_size' in profBad || 'similar_rank_pct' in profBad, false)
+    const riskFacts = factsFromFundRisk(riskGeo)
+    eq('风险事实：今年来有值', typeof riskFacts.nav_ytd?.value, 'number')
+    eq('风险事实：历史不足1年→近1年三件套缺失', 'max_drawdown_1y' in riskFacts || 'volatility_annual' in riskFacts || 'sharpe' in riskFacts, false)
+
+    // (10) 结构化验证：新基金指标键可评估；tracking_error 故意不进 KNOWN（只能工具算）。
+    const knownFundKeys = ['nav_ytd', 'max_drawdown_1y', 'volatility_annual', 'sharpe', 'fund_size', 'similar_rank_pct']
+    eq('结构化：6个基金指标键进 KNOWN_METRICS', knownFundKeys.every((k) => (KNOWN_METRICS as readonly string[]).includes(k)), true)
+    eq('结构化：基金指标都有溯源', knownFundKeys.every((k) => metricProvenance(k) !== '暂无自动取数映射，须 Agent/人工查证'), true)
+    eq('结构化：tracking_error 不在 KNOWN（仅工具产出）', (KNOWN_METRICS as readonly string[]).includes('tracking_error'), false)
+    const fundChecks = evaluateThesis(
+      [{ id: 'i1', metricKey: 'max_drawdown_1y', label: '近1年回撤≤20%', comparator: '<=', threshold: 20 }],
+      [{ id: 'f1', metricKey: 'sharpe', label: '夏普<0 证伪', comparator: '<', threshold: 0 }],
+      { max_drawdown_1y: { value: 15, source: 'test' }, sharpe: { value: -0.3, source: 'test' } },
+    )
+    eq('结构化：基金指标满足', fundChecks[0]!.status, 'satisfied')
+    eq('结构化：基金证伪触发', fundChecks[1]!.status, 'triggered')
+    eq('结构化：未知键 unverifiable', evaluateThesis(
+      [{ id: 'x', metricKey: 'tracking_error', label: 'x', comparator: '<=', threshold: 1 }], [], {},
+    )[0]!.status, 'unverifiable')
+
+    // (11) 画像行渲染：{x,y} 时间戳点 → 日期/值（不要把毫秒当数值展示）。
+    const msTs = Date.UTC(2023, 10, 14)
+    const prows = profileRows([{ x: msTs, y: 1.23 }], '值')
+    eq('画像行：{x,y}→日期/值两列', `${prows[0]!['日期']}|${prows[0]!['值']}`, `${new Date(msTs).toISOString().slice(0, 10)}|1.23`)
+    eq('画像取末值：对象数组按 y', latestProfileNumber([{ x: 1, y: 10 }, { x: 2, y: 42 }]), 42)
+
+    // (12) 基金档案：假行情（离线）→ 12 维结构、关键维就绪、快照稳定；全挂也不抛错。
+    const dossierBars = geoNav.map((p) => ({ date: p.date, open: p.nav, high: p.nav, low: p.nav, close: p.nav, volume: 0, volumeMissing: true }))
+    const fakeFundFinance = {
+      getFundQuote: async () => ({
+        ok: true, provider: 'em_pingzhongdata',
+        data: {
+          code: '110022', name: '易方达消费行业股票', price: geoNav.at(-1)!.nav,
+          changePercent: 0.5, asOf: geoNav.at(-1)!.date,
+          raw: {
+            navDate: geoNav.at(-1)!.date, accumNav: 3.21, subscribeStatus: '开放申购', redeemStatus: '开放赎回',
+            profile: { currentFundManager: '萧楠', fluctuationScale: 150.5, rateInSimilarPersent: '12' },
+          },
+        },
+      }),
+      getFundKline: async () => ({ ok: true, provider: 'em_fund_kline', data: dossierBars }),
+      getFundHoldings: async () => ({ ok: true, provider: 'em_fund_holdings', data: jjccRows.map((r) => ({ code: r.股票代码, name: r.股票名称, weightPct: Number(r.占净值比例) })) }),
+      getKline: async () => ({ ok: true, provider: 'em_kline', data: benchSeries.map((p) => ({ date: p.date, open: p.close, high: p.close, low: p.close, close: p.close, volume: 0 })) }),
+      westock: async () => ({ ok: false, error: 'offline' }),
+    } as never
+    const fd = await buildFundDossier(fakeFundFinance, '110022')
+    eq('基金档案：12 个维度', fd.total, 12)
+    eq('基金档案：类型=fund', fd.type, 'fund')
+    eq('基金档案：基本信息就绪', fd.sections.find((s) => s.key === 'overview')?.status, 'ready')
+    eq('基金档案：风险指标就绪且带时点', `${fd.sections.find((s) => s.key === 'risk_metrics')?.status}|${fd.sections.find((s) => s.key === 'risk_metrics')?.dataAsOf}`, `ready|${geoNav.at(-1)!.date}`)
+    eq('基金档案：基准对比就绪（宽基近似标注）', fd.sections.find((s) => s.key === 'benchmark')?.status, 'ready')
+    eq('基金档案：重仓持仓就绪', fd.sections.find((s) => s.key === 'holdings')?.rows, 10)
+    eq('基金档案：经理/规模画像就绪', `${fd.sections.find((s) => s.key === 'manager')?.status}|${fd.sections.find((s) => s.key === 'scale')?.status}`, 'ready|ready')
+    eq('基金档案：摘要含维度计数', /\d+\/12 个维度有数据/.test(dossierSummary(fd, '基金深度档案')), true)
+    const fdAgain = await buildFundDossier(fakeFundFinance, '110022')
+    eq('基金档案：快照 id 稳定', fdAgain.snapshotId, fd.snapshotId)
+    const brokenFundFinance = {
+      getFundQuote: async () => { throw new Error('net down') },
+      getFundKline: async () => { throw new Error('net down') },
+      getFundHoldings: async () => { throw new Error('net down') },
+      getKline: async () => { throw new Error('net down') },
+      westock: async () => { throw new Error('net down') },
+    } as never
+    const fdBroken = await buildFundDossier(brokenFundFinance, '110022')
+    eq('基金档案：全失败仍返回结构', fdBroken.sections.length, 12)
+    eq('基金档案：全失败维度标错误不抛', fdBroken.sections.every((s) => typeof s.ok === 'boolean' && typeof s.ms === 'number'), true)
+
+    // (13) 分类型提醒阈值：股票 ±5 / 基金 ±2（净值日频、波动小）。
+    const remindFinance = {
+      getAutoQuote: async (code: string) => ({
+        ok: true,
+        data: code === '510300'
+          ? { code, price: 4.1, changePercent: -3, name: '华泰柏瑞沪深300ETF' }
+          : { code, price: 1700, changePercent: -3, name: '贵州茅台' },
+      }),
+    } as never
+    const remindStore = {
+      get: () => ({
+        holdings: [{ code: '600519', type: 'stock', name: '贵州茅台', qty: 1, cost: 1 }],
+        watchlist: [{ code: '510300', type: 'fund', name: '华泰柏瑞沪深300ETF' }],
+        budget: undefined as unknown,
+        settings: {},
+      }),
+    } as never
+    const rstore = new ReminderStore(path.join(root, 'reminders-fund.json'))
+    const scan1 = await scanReminders(remindFinance, remindStore, undefined, rstore, {})
+    eq('提醒：只触发基金（股票-3%<±5，基金-3%≥±2）', scan1.added.length, 1)
+    eq('提醒：触发的是基金异动', `${scan1.added[0]?.type}|${scan1.added[0]?.kind}`, 'fund|move')
+    check('提醒：详情标注（基金）与±2阈值', (scan1.added[0]?.detail ?? '').includes('（基金）') && (scan1.added[0]?.detail ?? '').includes('±2%'), scan1.added[0]?.detail ?? '')
+    eq('提醒：-3% 未到2倍阈值→info 级', scan1.added[0]?.level, 'info')
+    const scan2 = await scanReminders(remindFinance, remindStore, undefined, rstore, {})
+    eq('提醒：冷却窗口内不重复', scan2.added.length, 0)
+    const scan3 = await scanReminders(remindFinance, remindStore, undefined, new ReminderStore(path.join(root, 'reminders-fund2.json')), { fundMovePct: 5 })
+    eq('提醒：可覆盖基金阈值（传5→-3不触发）', scan3.added.length, 0)
+
+
+    // ===== 批次18：组合穿透 + 买入前边际检查（P2，纯函数/假行情，离线） =====
+    const directP = [{ code: '600519', name: '贵州茅台', weightPct: 10 }]
+    const fundsP = [
+      {
+        code: '110022', name: '易方达消费', weightPct: 40,
+        holdings: [
+          { code: '600519', name: '贵州茅台', weightPct: 10 },
+          { code: '000858', name: '五粮液', weightPct: 5 },
+          { code: '601318', name: '中国平安', weightPct: 20 },
+          { code: '000651', name: '格力电器', weightPct: 2 },
+        ] as Array<{ code: string; name?: string; weightPct?: number }>,
+      },
+      {
+        code: '161725', name: '招商白酒', weightPct: 30,
+        holdings: [
+          { code: '600519', name: '贵州茅台', weightPct: 8 },
+          { code: '300750', name: '宁德时代', weightPct: 15 },
+          { code: '000651', name: '格力电器', weightPct: 3 },
+        ] as Array<{ code: string; name?: string; weightPct?: number }>,
+      },
+      { code: '005827', name: '易方达蓝筹', weightPct: 20, holdings: [] as Array<{ code: string }>, error: '重仓获取失败：boom' },
+    ] as Parameters<typeof computeLookthrough>[1]
+    const lt = computeLookthrough(directP, fundsP, { topN: 10 })
+    const mt = lt.stocks.find((s) => s.code === '600519')!
+    eq('穿透：茅台=直投10+基金穿透6.4', `${mt.weightPct}|${mt.directPct}|${mt.indirectPct}`, '16.4|10|6.4')
+    eq('穿透：茅台 via 两基金', mt.via.length, 2)
+    eq('穿透：茅台标记重复暴露', mt.repeated, true)
+    const gl = lt.stocks.find((s) => s.code === '000651')!
+    eq('穿透：双基金共有但无直投也算重复', `${gl.weightPct}|${gl.repeated}|${gl.directPct}`, '1.7|true|0')
+    eq('穿透：单基金独有不重复', lt.stocks.find((s) => s.code === '300750')?.repeated, false)
+    eq('穿透：股票总暴露=直接+间接', lt.totals.stockPct, 32.6)
+    eq('穿透：直投/基金/已覆盖权重', `${lt.totals.directPct}|${lt.totals.fundPct}|${lt.totals.fundCoveredPct}`, '10|90|70')
+    eq('穿透：重复暴露数=2', lt.totals.repeatedCount, 2)
+    eq('穿透：第一大=茅台16.4', lt.totals.top1Pct, 16.4)
+    check('穿透：HHI 落在合理区间', lt.totals.hhi > 0.3 && lt.totals.hhi < 0.4, `hhi=${lt.totals.hhi}`)
+    check('穿透：有效个股数≈3', lt.totals.effectiveStocks > 2 && lt.totals.effectiveStocks < 4, `eff=${lt.totals.effectiveStocks}`)
+    check('穿透：首行按暴露排序', lt.stocks[0]!.code === '600519' && (lt.stocks[1]?.weightPct ?? 0) >= (lt.stocks[2]?.weightPct ?? 99), '')
+    check('穿透：未穿透基金进告警', lt.warnings.some((w) => w.includes('1 只基金重仓未取到')), lt.warnings.join(' | '))
+    check('穿透：单股≥15%进告警', lt.warnings.some((w) => w.includes('16.4%') && w.includes('15%')), lt.warnings.join(' | '))
+    check('穿透：伪分散（有效个股<10）进告警', lt.warnings.some((w) => w.includes('伪分散')), lt.warnings.join(' | '))
+    check('穿透：上界近似口径写进 notes', lt.notes.some((n) => n.includes('上界近似')), '')
+    eq('穿透：失败基金行带 error', lt.funds.find((f) => f.code === '005827')?.error, '重仓获取失败：boom')
+    eq('穿透：成功基金行带重仓覆盖', lt.funds.find((f) => f.code === '110022')?.topWeightPct, 37)
+
+    // (2) 边际检查：加仓已持有的个股 → 集中度上升 + 明确「同一个赌注」。
+    const margStock = marginalLookthrough(lt, { code: '300750', type: 'stock', name: '宁德时代', weightPct: 5 })
+    eq('边际-股：前后快照齐备', `${typeof margStock.before.hhi}|${typeof margStock.after?.hhi}`, 'number|number')
+    eq('边际-股：重叠明细=现有4.5→9.5', `${margStock.overlaps[0]?.code}|${margStock.overlaps[0]?.beforePct}|${margStock.overlaps[0]?.addedPct}|${margStock.overlaps[0]?.afterPct}`, '300750|4.5|5|9.5')
+    check('边际-股：提示已有暴露', margStock.warnings.some((w) => w.includes('已有穿透暴露 4.5%')), margStock.warnings.join(' | '))
+    eq('边际-股：目标权重往返', margStock.target.proposedWeightPct, 5)
+    const margNew = marginalLookthrough(lt, { code: '600036', type: 'stock', name: '招商银行', weightPct: 8 })
+    eq('边际-股：新标的无重叠', margNew.overlaps.length, 0)
+    check('边际-股：新标的算新增分散', margNew.notes.some((n) => n.includes('新增分散来源')), margNew.notes.join(' | '))
+
+    // (3) 边际检查：新基金重叠度 → fundOverlapPct 与加仓后第一大个股。
+    const margFund = marginalLookthrough(lt, {
+      code: '510300', type: 'fund', name: '沪深300ETF', weightPct: 10,
+      holdings: [
+        { code: '600519', weightPct: 20 },
+        { code: '601318', weightPct: 10 },
+        { code: '600036', weightPct: 5 },
+      ],
+    })
+    eq('边际-基：重叠占其净值30%', margFund.fundOverlapPct, 30)
+    eq('边际-基：重叠股数=2（茅台/平安）', margFund.overlaps.length, 2)
+    eq('边际-基：茅台 16.4→18.4', `${margFund.overlaps.find((o) => o.code === '600519')?.beforePct}|${margFund.overlaps.find((o) => o.code === '600519')?.afterPct}`, '16.4|18.4')
+    check('边际-基：加仓后第一大≥15%告警', (margFund.warnings ?? []).some((w) => w.includes('18.4%') && w.includes('15%')), margFund.warnings.join(' | '))
+    check('边际-基：重叠明细进告警', margFund.warnings.some((w) => w.includes('16.4%→18.4%')), margFund.warnings.join(' | '))
+    const margFundBad = marginalLookthrough(lt, { code: '510300', type: 'fund', weightPct: 10, error: '契约未线上核实，解析失败' })
+    eq('边际-基：持仓未知→无 after', margFundBad.after, undefined)
+    check('边际-基：持仓未知必须告警', margFundBad.warnings.some((w) => w.includes('持仓未知')), margFundBad.warnings.join(' | '))
+
+    // (4) 装配器：假行情（风险权重路径 / 成本回退 / 多币种拒绝 / 空组合拒绝）。
+    const fakeLookFinance = {
+      analyzePortfolio: async () => ({
+        ok: true as const, quoteAvailable: true,
+        summary: { holdingCount: 3, totalValue: 1000, totalProfit: 0, profitPercent: 0, valuation: {} },
+        risk: {
+          weights: [
+            { code: '600519', name: '贵州茅台', type: 'stock', weight: 10 },
+            { code: '110022', name: '易方达消费', type: 'fund', weight: 40 },
+            { code: '161725', name: '招商白酒', type: 'fund', weight: 30 },
+          ],
+        },
+        holdings: [],
+      }),
+      getFundHoldings: async (code: string) => code === '110022'
+        ? { ok: true as const, provider: 'em_fund_holdings', data: [{ code: '600519', name: '贵州茅台', weightPct: 10 }, { code: '000858', name: '五粮液', weightPct: 5 }] }
+        : { ok: false as const, provider: 'em_fund_holdings', error: 'boom' },
+      westock: async () => ({ ok: false as const, error: 'offline' }),
+    } as never
+    const ltb = await buildLookthrough(fakeLookFinance, { topN: 10 })
+    eq('装配：权重来源=行情市值', ltb.weightsSource, 'market')
+    eq('装配：直投10、基金70、已覆盖40', `${ltb.totals.directPct}|${ltb.totals.fundPct}|${ltb.totals.fundCoveredPct}`, '10|70|40')
+    eq('装配：茅台=直投10+穿透4=14%', ltb.stocks.find((s) => s.code === '600519')?.weightPct, 14)
+    eq('装配：失败基金回落告警', ltb.warnings.some((w) => w.includes('1 只基金')), true)
+
+    const fakeCostFinance = {
+      analyzePortfolio: async () => ({
+        ok: true as const, quoteAvailable: false,
+        summary: { holdingCount: 1, totalValue: null, totalProfit: null, profitPercent: null, valuation: {} },
+        risk: null,
+        holdings: [{ code: '600519', name: '贵州茅台', type: 'stock', quantity: 100, avgCost: 10 }],
+      }),
+      getFundHoldings: async () => ({ ok: false as const, error: 'n/a' }),
+      westock: async () => ({ ok: false as const, error: 'n/a' }),
+    } as never
+    const ltc = await buildLookthrough(fakeCostFinance, {})
+    eq('装配：缺行情单币种→成本回退', ltc.weightsSource, 'cost')
+    eq('装配：成本权重直投=100%', `${ltc.totals.directPct}|${ltc.totals.stockPct}`, '100|100')
+
+    const fakeMultiCurrency = {
+      analyzePortfolio: async () => ({
+        ok: true as const, quoteAvailable: false,
+        summary: { holdingCount: 2, totalValue: null, totalProfit: null, profitPercent: null, valuation: {} },
+        risk: null,
+        holdings: [
+          { code: '600519', type: 'stock', quantity: 100, avgCost: 10 },
+          { code: 'AAPL', type: 'stock', quantity: 10, avgCost: 100 },
+        ],
+      }),
+      getFundHoldings: async () => ({ ok: false as const, error: 'n/a' }),
+      westock: async () => ({ ok: false as const, error: 'n/a' }),
+    } as never
+    let multiErr = ''
+    try { await buildLookthrough(fakeMultiCurrency, {}) } catch (e) { multiErr = e instanceof Error ? e.message : String(e) }
+    check('装配：多币种缺行情拒绝计算', multiErr.includes('多币种'), multiErr)
+
+    const fakeEmpty = {
+      analyzePortfolio: async () => ({ ok: true as const, quoteAvailable: false, summary: {}, risk: null, holdings: [] }),
+      getFundHoldings: async () => ({ ok: false as const, error: 'n/a' }),
+      westock: async () => ({ ok: false as const, error: 'n/a' }),
+    } as never
+    let emptyErr = ''
+    try { await buildLookthrough(fakeEmpty, {}) } catch (e) { emptyErr = e instanceof Error ? e.message : String(e) }
+    check('装配：空组合明确报错', emptyErr.includes('组合为空'), emptyErr)
+
+    // ------------------------------------------------------------
+    // 批次19：成长（教材完整性 / 判分 / 规划健康度 / 四柱与等级 / 诊断 / 档案存储）
+    // ------------------------------------------------------------
+    {
+      const LS = GROWTH_CURRICULUM.lessons
+      check('成长：教材 ≥20 课', LS.length >= 20, `total=${LS.length}`)
+      eq('成长：教材 id 唯一', new Set(LS.map((x) => x.id)).size, LS.length)
+      check('成长：入门必修 track ≥6 课', LS.filter((x) => x.track === 'l0').length >= 6, String(LS.filter((x) => x.track === 'l0').length))
+      check('成长：每题答案都在选项内', LS.every((x) => x.quiz.every((q) => q.answer >= 0 && q.answer < q.options.length)))
+      check('成长：每课 ≥3 要点且有测验', LS.every((x) => x.keyPoints.length >= 3 && x.quiz.length >= 1))
+      check('成长：指标映射都指向存在的课', Object.values(METRIC_CONCEPT_MAP).every((id) => LS.some((x) => x.id === id)), JSON.stringify(Object.values(METRIC_CONCEPT_MAP)))
+      const any = LS[0]!
+      check('成长：findLesson 命中', findLesson(any.id)?.id === any.id, any.id)
+      check('成长：lessonByQuery 标题命中', lessonByQuery(any.title).some((x) => x.id === any.id), any.title)
+
+      // 判分：满分/零分/越界/题数不符
+      const quizLesson = findLesson('etf-premium')!
+      check('成长：etf-premium 教材存在', !!quizLesson)
+      const perfect = gradeQuiz(quizLesson, quizLesson.quiz.map((q) => q.answer))
+      eq('成长：判分满分 passed', `${perfect.score}|${perfect.passed}`, '100|true')
+      const wrong = gradeQuiz(quizLesson, quizLesson.quiz.map((q) => (q.answer + 1) % q.options.length))
+      eq('成长：判分零分 not passed', `${wrong.score}|${wrong.passed}`, '0|false')
+      let quizErr = ''
+      try { gradeQuiz(quizLesson, quizLesson.quiz.map((q) => q.answer).concat([0])) } catch (e) { quizErr = e instanceof Error ? e.message : String(e) }
+      check('成长：题数不符拒绝', quizErr.includes('不符'), quizErr)
+      let boundErr = ''
+      try { gradeQuiz(quizLesson, quizLesson.quiz.map(() => 99)) } catch (e) { boundErr = e instanceof Error ? e.message : String(e) }
+      check('成长：答案越界拒绝', boundErr.includes('越界'), boundErr)
+
+      // 规划健康度：缺数据 → score null + unknown 修复项
+      const emptyH = evaluateFamilyPlan({}, undefined)
+      eq('成长：全缺数据 score=null', emptyH.score, null)
+      check('成长：缺数据给出补数提示', emptyH.fixes.some((f) => f.key === 'emergency-unknown') && emptyH.fixes.some((f) => f.key === 'protection-unknown'), emptyH.fixes.map((f) => f.key).join(','))
+      // 混合严重度 → high 在前（排序稳定）
+      const mixed = evaluateFamilyPlan({
+        cashflow: { monthlyIncome: 10000, monthlyExpense: 9500 },
+        balance: { liquidAssets: 1000, liabilities: [{ name: '贷', monthlyPayment: 5000 }] },
+        protection: [{ type: '医疗', covered: true }],
+        goals: [],
+      }, { responsibility: 'family' })
+      const sevRank: Record<string, number> = { high: 0, medium: 1, low: 2 }
+      check('成长：修复项 high→medium→low 排序', mixed.fixes.every((f, i, arr) => i === 0 || sevRank[arr[i - 1]!.severity] <= sevRank[f.severity]), mixed.fixes.map((f) => `${f.key}:${f.severity}`).join(','))
+      eq('成长：高危在首位', mixed.fixes[0]?.severity, 'high')
+      check('成长：负债收入比>40% 触发降杠杆', mixed.fixes.some((f) => f.key === 'debt-high'), mixed.fixes.map((f) => f.key).join(','))
+      // 保障按责任认定
+      const covered3 = [{ type: '医疗', covered: true }, { type: '重疾', covered: true }, { type: '意外', covered: true }]
+      const famH = evaluateFamilyPlan({ protection: covered3 }, { responsibility: 'family' })
+      check('成长：家庭责任要求寿险', famH.protectionGaps.includes('寿险'), famH.protectionGaps.join(','))
+      const singleH = evaluateFamilyPlan({ protection: covered3 }, { responsibility: 'single' })
+      eq('成长：单身不强制寿险', singleH.protectionGaps.length, 0)
+      // 目标可行性
+      const goalH = evaluateFamilyPlan({ goals: [{ id: 'g1', name: '旅行', targetAmount: 120000, currentAmount: 0, deadline: '2027-06', monthlySaving: 1000 }] })
+      eq('成长：月存不够目标判不可行', goalH.goalStatus[0]?.feasible, false)
+      check('成长：不可行目标有修复项', goalH.fixes.some((f) => f.key === 'goal-infeasible'), goalH.fixes.map((f) => f.key).join(','))
+      const doneH = evaluateFamilyPlan({ goals: [{ id: 'g1', name: '已达成', targetAmount: 10000, currentAmount: 10000, deadline: '2027-06', monthlySaving: 1 }] })
+      eq('成长：达标目标可行', doneH.goalStatus[0]?.feasible, true)
+      const goodH = evaluateFamilyPlan({
+        cashflow: { monthlyIncome: 20000, monthlyExpense: 8000 },
+        balance: { liquidAssets: 60000, liabilities: [] },
+        protection: covered3,
+        goals: [{ id: 'g1', name: '应急外目标', targetAmount: 10000, currentAmount: 5000, deadline: '2027-12', monthlySaving: 5000 }],
+      }, {})
+      eq('成长：全达标 score=100', goodH.score, 100)
+
+      // 四柱与等级：构造让每柱都等于 v → total=v，卡等级边界
+      const edgeFacts = (v: number) => ({
+        masteredLessons: v, totalLessons: 100, quizAvg: v, planHealthScore: v,
+        falsifierCoverage: v / 100, weeklyReviewRate: v / 100, journalCount30d: 0.04 * v,
+        savingsRatePct: 0.3 * v, goalFundingRate: v / 100,
+      })
+      for (const [v, lv] of [[39, 'L1'], [40, 'L2'], [59, 'L2'], [60, 'L3'], [74, 'L3'], [75, 'L4'], [87, 'L4'], [88, 'L5']] as Array<[number, string]>) {
+        const s = computeGrowth(edgeFacts(v))
+        eq(`成长：${v} 分等级`, `${s.total}|${s.level.id}`, `${v}|${lv}`)
+      }
+      const nullG = computeGrowth({ masteredLessons: 0, totalLessons: 0, quizAvg: null, planHealthScore: null, falsifierCoverage: null, weeklyReviewRate: null, journalCount30d: null, savingsRatePct: null, goalFundingRate: null })
+      eq('成长：全缺 → total null → L1', `${nullG.total}|${nullG.level.id}`, 'null|L1')
+      const partG = computeGrowth({ masteredLessons: 5, totalLessons: 10, quizAvg: null, planHealthScore: null, falsifierCoverage: null, weeklyReviewRate: null, journalCount30d: null, savingsRatePct: null, goalFundingRate: null })
+      eq('成长：仅认知柱 → 权重重归一 total=50', `${partG.total}|${partG.pillars.plan}`, '50|null')
+
+      // 连续周（显式 today=2026-10-07 周三，周一=2026-10-05）
+      const t = new Date('2026-10-07T12:00:00Z')
+      eq('成长：空活动 streak=0', computeStreak([], t), 0)
+      eq('成长：本周活动 streak=1', computeStreak(['2026-10-06'], t), 1)
+      eq('成长：本周+上周 streak=2', computeStreak(['2026-10-06', '2026-09-30'], t), 2)
+      eq('成长：仅上周 streak=1（不断更）', computeStreak(['2026-09-30'], t), 1)
+      eq('成长：断更归零', computeStreak(['2026-09-20'], t), 0)
+
+      // 诊断引擎
+      const mkState = (): GrowthState => ({ createdAt: new Date().toISOString(), plan: {}, lessons: [], attempts: [], reviews: [], activityDates: [] })
+      // ETF 持仓 → etf-premium（证据带代码）
+      const d1 = diagnoseGrowth({ state: mkState(), facts: { holdings: [{ code: '510300', type: 'fund', name: '沪深300ETF' }] } })
+      const etfF = d1.find((f) => f.ref === 'etf-premium')
+      check('成长：场内ETF持仓库出折溢价课', !!etfF, d1.map((f) => f.ref).join(','))
+      check('成长：ETF证据引用用户代码', !!etfF && etfF.evidence.includes('510300'), etfF?.evidence)
+      // 已 mastered → 跳过
+      const masteredState = mkState()
+      masteredState.lessons.push({ lessonId: 'etf-premium', status: 'mastered', mastery: 100 })
+      const d2 = diagnoseGrowth({ state: masteredState, facts: { holdings: [{ code: '510300', type: 'fund' }] } })
+      eq('成长：已掌握的课不再库出', d2.some((f) => f.ref === 'etf-premium'), false)
+      // 在用指标 → 课程
+      const d3 = diagnoseGrowth({ state: mkState(), facts: { thesisMetrics: ['sharpe'] } })
+      eq('成长：sharpe指标→risk-metrics', d3.find((f) => f.priority <= 5 && f.kind === 'lesson')?.ref, 'risk-metrics')
+      // 规划修复优先于一切（priority=1 首位）
+      const planState = mkState()
+      planState.plan = { cashflow: { monthlyIncome: 10000, monthlyExpense: 6000 }, balance: { liquidAssets: 6000 } }
+      const d4 = diagnoseGrowth({ state: planState, facts: { holdings: [{ code: '510300', type: 'fund' }] } })
+      check('成长：规划修复列首位', d4[0]?.kind === 'plan' && d4[0]?.priority === 1, `${d4[0]?.kind}:${d4[0]?.priority}:${d4[0]?.ref}`)
+      check('成长：应急金缺口有专项 finding', d4.some((f) => f.ref === 'emergency-gap'), d4.map((f) => f.ref).join(','))
+      // 去重：多个指标映射同一课 → 1 条
+      const d5 = diagnoseGrowth({ state: mkState(), facts: { thesisMetrics: ['sharpe', 'volatility_annual', 'max_drawdown_1y'] } })
+      eq('成长：同课多指标去重', d5.filter((f) => f.ref === 'risk-metrics').length, 1)
+      const d5b = diagnoseGrowth({ state: mkState(), facts: { holdings: [{ code: '000001', type: 'fund', name: '某基金' }], thesisMetrics: ['similar_rank_pct'] } })
+      eq('成长：持仓与指标同课去重', d5b.filter((f) => f.ref === 'fund-basics').length, 1)
+      // 对话主题命中教材标签/标题
+      const target = LS.find((x) => x.track !== 'l0') ?? LS[0]!
+      const d6 = diagnoseGrowth({ state: mkState(), facts: { recentTopics: [target.title] } })
+      check('成长：对话主题顺势补课', d6.some((f) => f.ref === target.id), `target=${target.id} refs=${d6.map((f) => f.ref).join(',')}`)
+      // 封顶 8 条且按优先级
+      const busyState = mkState()
+      busyState.plan = { cashflow: { monthlyIncome: 5000, monthlyExpense: 4900 }, balance: { liquidAssets: 100 }, goals: [] }
+      const d7 = diagnoseGrowth({
+        state: busyState,
+        facts: {
+          holdings: [{ code: '510300', type: 'fund' }, { code: '110011', type: 'fund' }, { code: '161725', type: 'fund' }],
+          thesisMetrics: ['pe_ttm_percentile', 'roe', 'tracking_error', 'revenue_yoy', 'eps'],
+          thesesTotal: 4, thesesWithFalsifier: 1, weeklyReviewRate: 0.2, journalCount30d: 0,
+          recentTopics: LS.slice(0, 6).map((x) => x.title),
+        },
+      })
+      check('成长：诊断封顶 8 条', d7.length <= 8, String(d7.length))
+      check('成长：诊断按优先级升序', d7.every((f, i, arr) => i === 0 || arr[i - 1]!.priority <= f.priority), d7.map((f) => f.priority).join(','))
+
+      // GrowthStore：原子落盘 + 重读 + 损坏拒绝
+      const gfile = path.join(root, 'growth-store', 'growth.json')
+      const gs = new GrowthStore(gfile)
+      await gs.load()
+      await gs.updateProfile({ responsibility: 'family', ageBand: '30s' })
+      await gs.updateProfile({ horizonYears: 10 })
+      eq('成长：profile 浅合并', `${gs.get().profile?.responsibility}|${gs.get().profile?.horizonYears}`, 'family|10')
+      const { plan: planAfter } = await gs.updatePlanSection('cashflow', { monthlyIncome: 12000, monthlyExpense: 7000 })
+      eq('成长：cashflow 写入', planAfter.cashflow?.monthlyIncome, 12000)
+      await gs.updatePlanSection('goals', [{ id: 'g1', name: '应急', targetAmount: 100000, currentAmount: 0, deadline: '2027-12', monthlySaving: 3000 }])
+      eq('成长：goals 整段替换', gs.get().plan.goals?.length, 1)
+      let secErr = ''
+      try { await gs.updatePlanSection('goals', [{ name: '', targetAmount: -5 } as never]) } catch (e) { secErr = e instanceof Error ? e.message : String(e) }
+      check('成长：非法 section 数据拒绝', secErr.includes('必填') || secErr.includes('正数'), secErr)
+      const quizRec = await gs.recordQuiz('etf-premium', 100, true)
+      check('成长：通过测验记 mastered', quizRec.masteredCount >= 1, JSON.stringify(quizRec))
+      const reviewRec = await gs.markReview('2026-10', 'vault-r1', ['补了证伪条件'])
+      eq('成长：月度复盘幂等键', reviewRec.review.period, '2026-10')
+      await gs.markReview('2026-10', 'vault-r1', ['重复标记'])
+      eq('成长：同月复盘覆盖不膨胀', gs.get().reviews.filter((r) => r.period === '2026-10').length, 1)
+      check('成长：活动痕迹进 streak', computeStreak(gs.get().activityDates) >= 1, JSON.stringify(gs.get().activityDates.slice(0, 3)))
+      let badPeriod = ''
+      try { await gs.markReview('202610') } catch (e) { badPeriod = e instanceof Error ? e.message : String(e) }
+      check('成长：非法 period 拒绝', badPeriod.includes('YYYY-MM'), badPeriod)
+      // 新实例重读（跨会话记忆）
+      const gs2 = new GrowthStore(gfile)
+      await gs2.load()
+      const st2 = gs2.get()
+      eq('成长：跨实例重读 profile', st2.profile?.responsibility, 'family')
+      eq('成长：跨实例重读目标', st2.plan.goals?.[0]?.id, 'g1')
+      check('成长：跨实例重读 mastered', st2.lessons.some((l) => l.lessonId === 'etf-premium' && l.status === 'mastered'))
+      eq('成长：跨实例重读复盘', st2.reviews[0]?.vaultId, 'vault-r1')
+      // 损坏文件 → 拒绝加载（绝不覆盖）
+      await mkdir(path.dirname(gfile), { recursive: true })
+      await writeFile(gfile, JSON.stringify({ hello: 'broken' }), 'utf8')
+      const gs3 = new GrowthStore(gfile)
+      let corruptErr = ''
+      try { await gs3.load() } catch (e) { corruptErr = e instanceof Error ? e.message : String(e) }
+      check('成长：结构损坏拒绝加载', corruptErr.includes('损坏'), corruptErr)
+      await writeFile(gfile, '{ not json', 'utf8')
+      const gs4 = new GrowthStore(gfile)
+      let syntaxErr = ''
+      try { await gs4.load() } catch (e) { syntaxErr = e instanceof Error ? e.message : String(e) }
+      check('成长：JSON 语法损坏拒绝加载', syntaxErr.length > 0, syntaxErr)
+      const stillBroken = await readFile(gfile, 'utf8')
+      eq('成长：损坏文件未被覆盖', stillBroken, '{ not json')
+    }
+
+    // ------------------------------------------------------------
+    // 批次20：面板 ↔ Agent 双向联动（焦点上报 / 导航命令增强 / 成长回执 / 工具透传）
+    // ------------------------------------------------------------
+    {
+      // 1) 面板焦点：面板 → Agent 的上下文（panel_state 读取源）
+      const f1 = setPanelFocus({ tab: 'quotes', code: '510300', type: 'fund' })
+      eq('联动：焦点写入', `${f1.tab}|${f1.code}|${f1.type}`, 'quotes|510300|fund')
+      check('联动：焦点带时间戳', Number.isFinite(Date.parse(f1.at)), f1.at)
+      const f2 = setPanelFocus({ tab: 'home' })
+      eq('联动：焦点覆盖为首页', f2.tab, 'home')
+      check('联动：首页无聚焦代码', f2.code === undefined, String(f2.code))
+      let focusErr = ''
+      try { setPanelFocus({ tab: '' }) } catch (e) { focusErr = e instanceof Error ? e.message : String(e) }
+      check('联动：非法焦点拒绝', focusErr.includes('tab'), focusErr)
+      eq('联动：非法焦点不污染状态', getPanelFocus()?.tab, 'home')
+
+      // 2) 导航命令增强：note（面板一句话）+ anchor（页内锚点）经总线不丢形
+      const pb = new PanelBus({ commandTtlMs: 60_000 })
+      let env: { event?: unknown } | undefined
+      const sub = pb.subscribe((e) => { env = e })
+      pb.publish({
+        kind: 'panel',
+        command: { action: 'navigate', tab: 'holdings', anchor: 'lookthrough', note: '看看穿透体检', commandId: 'c-anchor-1' },
+      })
+      const cmd = (env as { event?: { command?: Record<string, unknown> } } | undefined)?.event?.command
+      check('联动：命令携带 note/anchor', !!cmd && cmd.note === '看看穿透体检' && cmd.anchor === 'lookthrough', JSON.stringify(cmd))
+      check('联动：新命令未过期', !isStaleCommand(cmd as never), JSON.stringify(cmd))
+      sub.close()
+
+      // 3) 成长回执：写盘成功 → onChange(action)（面板即时刷新的信号源）
+      const acts: string[] = []
+      const gs = new GrowthStore(path.join(root, 'growth-bus', 'growth.json'), (c) => acts.push(c.action))
+      await gs.load()
+      await gs.updateProfile({ responsibility: 'single' })
+      await gs.updatePlanSection('cashflow', { monthlyIncome: 9000, monthlyExpense: 6000 })
+      await gs.recordQuiz('etf-premium', 100, true)
+      await gs.markReview('2026-10')
+      eq('联动：成长回执动作序列', acts.join(','), 'profile,plan,quiz,review')
+
+      // 4) 工具透传：panel_navigate 的 note/anchor 发布到总线；panel_state 读焦点
+      const toolDefs: Array<{ name: string; execute?: (args: Record<string, unknown>) => Promise<unknown> }> = []
+      const fakeCtx = { tools: { register: (d: { name: string }) => { toolDefs.push(d as never) } } } as never
+      const published: Array<Record<string, unknown>> = []
+      const fakeBus = { publish: (e: Record<string, unknown>) => { published.push(e); return e }, subscribe: () => ({ close() {}, gap: false, epoch: 'test' }) } as never
+      registerTools(fakeCtx, {} as never, {} as never, {} as never, fakeBus)
+      check('联动：panel_navigate 已注册', toolDefs.some((t) => t.name === 'panel_navigate'), String(toolDefs.length))
+      const nav = toolDefs.find((t) => t.name === 'panel_navigate')!
+      const navOk = await nav.execute!({ tab: 'holdings', anchor: 'lookthrough', note: '你的基金是不是真分散，看这里' })
+      const navVal = navOk as { ok: boolean; note?: string; anchor?: string }
+      eq('联动：导航返回 note/anchor', `${navVal.ok}|${navVal.anchor}|${navVal.note}`, 'true|lookthrough|你的基金是不是真分散，看这里')
+      const evt = published.find((p) => p.kind === 'panel') as { command?: { anchor?: string; note?: string; tab?: string } } | undefined
+      check('联动：导航命令入总线', !!evt?.command && evt.command.anchor === 'lookthrough' && evt.command.note?.includes('真分散') && evt.command.tab === 'holdings', JSON.stringify(evt))
+      let navErr = ''
+      try { await nav.execute!({ tab: 'not-a-tab' }) } catch (e) { navErr = e instanceof Error ? e.message : String(e) }
+      check('联动：非法 tab 拒绝', navErr.includes('must be one of') || navErr.includes('valid'), navErr)
+      const st = toolDefs.find((t) => t.name === 'panel_state')
+      check('联动：panel_state 已注册', !!st)
+      setPanelFocus({ tab: 'home' })
+      const stVal = await st!.execute!({}) as { ok: boolean; focus?: { tab?: string } | null }
+      eq('联动：panel_state 读到焦点', stVal.focus?.tab, 'home')
+
+      // 5) 成长工具回执：lesson_complete 判分成功后应触发 growth 总线事件（经 store.onChange）
+      const growthActs: string[] = []
+      const gs2 = new GrowthStore(path.join(root, 'growth-bus2', 'growth.json'), (c) => growthActs.push(c.action))
+      await gs2.load()
+      await gs2.recordQuiz('etf-premium', 100, true)
+      eq('联动：判分产生 quiz 回执', growthActs.join(','), 'quiz')
+    }
+
+    // 批次21：追踪（13F / 国会申报 / A股名私募）——内核 diff、入队幂等、纸面复刻数学、数据源解析、
+    // 档案存储、8 工具端到端（建档→基线→diff→与我对比→复刻→简报 / 国会增量 / 股东扫描）、GET /follow
+    // ------------------------------------------------------------
+    {
+      // 1) 内核（纯）
+      eq('追踪：默认档案为空', defaultFollowState().targets.length + defaultFollowState().jobs.length, 0)
+      eq('追踪：天数计算', daysSince('2026-10-06', new Date('2026-10-07T12:00:00.000Z')), 1)
+      eq('追踪：未拉取', staleLevel('investor-13f', undefined), 'none')
+      eq('追踪：13F 新鲜', staleLevel('investor-13f', '2026-10-01', new Date('2026-10-07')), 'fresh')
+      eq('追踪：13F 正常', staleLevel('investor-13f', '2026-07-01', new Date('2026-10-07')), 'normal')
+      eq('追踪：13F 滞后', staleLevel('investor-13f', '2026-03-01', new Date('2026-10-07')), 'stale')
+      eq('追踪：国会 45 天口径', staleLevel('congress', '2026-09-20', new Date('2026-10-07')), 'fresh')
+      const P = (cusip: string, issuer: string, value: number, extra: Partial<FollowPosition> = {}): FollowPosition => ({ cusip, issuer, value, shares: 0, ...extra })
+      const d13 = diff13F(
+        [P('037833100', 'APPLE INC', 100), P('88160R101', 'TESLA INC', 400), P('191216100', 'COKE', 50)],
+        [P('037833100', 'APPLE INC', 600000000), P('191216100', 'COKE', 20), P('594918104', 'MICROSOFT', 80), P('037833100', 'APPLE CALL', 10, { call: true })],
+      )
+      eq('追踪：13F 新进按|Δ|排序', d13.added.map((r) => r.issuer), ['MICROSOFT', 'APPLE CALL'])
+      eq('追踪：13F 清仓', d13.removed.map((r) => r.issuer), ['TESLA INC'])
+      eq('追踪：13F 加仓/减仓/持平', `${d13.increased.length}|${d13.decreased.length}|${d13.unchanged}`, '1|1|0')
+      check('追踪：putCall 与普通股分键', d13.added.some((r) => r.key === '037833100:call'), d13.added.map((r) => r.key).join(','))
+      const newTrades = diffCongress(
+        [{ id: 't1', side: 'buy', ticker: 'NVDA', source: 'bargo' }],
+        [{ id: 't1', side: 'buy', ticker: 'NVDA', source: 'bargo' }, { id: 't2', side: 'sell', ticker: 'TSLA', source: 'bargo' }],
+      )
+      eq('追踪：国会按 id 求新增', newTrades.map((t) => t.id), ['t2'])
+      const tj = { id: 'tgt1', name: 'Berkshire', kind: 'investor-13f' as const }
+      const j1 = shouldEnqueue([], tj, '13F', '0001193125-26-054580', '13F 已发布')
+      check('追踪：新披露入队', !!j1 && j1.state === 'ready' && j1.id === jobKey('tgt1', '13F', '0001193125-26-054580'), j1?.id)
+      eq('追踪：同主键不重复入队', shouldEnqueue(j1 ? [j1] : [], tj, '13F', '0001193125-26-054580', '再来一条'), undefined)
+      eq('追踪：空主键不入队', shouldEnqueue([], tj, '13F', '', 'x'), undefined)
+      const alloc = allocateShadow(100_000, [
+        { cusip: 'A', issuer: 'BIG', ticker: 'BIG', value: 60 },
+        { cusip: 'B', issuer: 'MID', ticker: 'MID', value: 30 },
+        { cusip: 'C', issuer: 'SML', ticker: 'SML', value: 10 },
+      ])
+      eq('追踪：复刻权重按市值降序', alloc.map((a) => a.weightPct), [60, 30, 10])
+      check('追踪：复刻分配合计≈本金', Math.abs(alloc.reduce((s, a) => s + a.allocUsd, 0) - 100_000) < 1, String(alloc.reduce((s, a) => s + a.allocUsd, 0)))
+      const sp = applyEntryPrice({ cusip: 'A', issuer: 'BIG', allocUsd: 60_000, weightPct: 60 } as never, 120, '2026-02-18')
+      eq('追踪：入场价→股数', sp.shares, 500)
+      eq('追踪：非法入场价不编数', applyEntryPrice({ cusip: 'A', issuer: 'X', allocUsd: 10, weightPct: 1 } as never, Number.NaN, 'x').shares, undefined)
+      const tt = shadowTotals([
+        { cusip: 'A', issuer: 'A', allocUsd: 100, weightPct: 1, shares: 10, entryPrice: 10, entryDate: 'd', lastPrice: 11 } as never,
+        { cusip: 'B', issuer: 'B', allocUsd: 90, weightPct: 9 } as never,
+      ])
+      eq('追踪：收益只算已定价', `${tt.pricedCount}|${tt.missingCount}`, '1|1')
+      check('追踪：已定价收益率为正', (tt.pnlPct ?? 0) > 0, String(tt.pnlPct))
+      eq('追踪：全缺价收益为 null', shadowTotals([{ cusip: 'A', issuer: 'A', allocUsd: 1, weightPct: 1 } as never]).pnlPct, null)
+      const ov = overlapWithHoldings(
+        [P('037833100', 'APPLE INC', 70, { ticker: 'AAPL' }), { cusip: 'X', issuer: 'NO MAP', value: 30, shares: 0 }],
+        undefined,
+        [{ code: 'aapl', name: '苹果' }],
+      )
+      eq('追踪：与我重叠命中', ov.matched.map((m) => m.ticker), ['AAPL'])
+      eq('追踪：未映射如实计数', `${ov.unmapped}|${ov.theirsMapped}`, '1|1')
+      const ovT = overlapWithHoldings(
+        undefined,
+        [{ id: '1', side: 'buy', ticker: 'NVDA', source: 'bargo' }, { id: '2', side: 'sell', ticker: 'TSLA', source: 'bargo' }],
+        [{ code: 'NVDA' }],
+      )
+      eq('追踪：政客按 ticker 交集', ovT.matched.map((m) => m.ticker), ['NVDA'])
+      const snapA: FollowSnapshot = { targetId: 't1', filingKey: 'B', form: '13F-HR', filedAt: '2026-02-17', capturedAt: 'c', data: { positions: [] } }
+      const snapB: FollowSnapshot = { targetId: 't1', filingKey: 'A', form: '13F-HR', filedAt: '2025-11-14', capturedAt: 'c', data: { positions: [] } }
+      eq('追踪：最新快照按披露日', latestSnapshot([snapB, snapA], 't1')?.filingKey, 'B')
+      eq('追踪：上一期快照', previousSnapshot([snapB, snapA], 't1', 'B')?.filingKey, 'A')
+      eq('追踪：缺上期=基线摘要', summarizeDiff(undefined, snapA).mode, 'baseline')
+      eq('追踪：主键哈希与顺序无关', followHash(['b', 'a']) === followHash(['a', 'b']), true)
+      eq('追踪：别名命中', matchAliases({ rows: [{ name: '广东邻山1号投资合伙' }] }, ['邻山1号']).map((h) => h.alias), ['邻山1号'])
+      eq('追踪：别名未命中不硬凑', matchAliases({ rows: [{ name: '毫不相关' }] }, ['邻山1号']).length, 0)
+
+      // 2) 数据源解析（纯）
+      const pos13f = parse13FInformationTable(FIX_13F_XML)
+      eq('追踪：13F XML 解析', pos13f.map((p) => p.issuer), ['APPLE INC', 'COCA COLA CO'])
+      eq('追踪：13F 金额与股数', `${pos13f[0]!.value}|${pos13f[0]!.shares}`, '600000000|30000000')
+      const nsXml = '<ns1:informationTable><ns1:infoTable><ns1:nameOfIssuer>ABC</ns1:nameOfIssuer><ns1:cusip>123456789</ns1:cusip><ns1:value>1000</ns1:value><ns1:shrsOrPrnamt><ns1:sshPrnamt>10</ns1:sshPrnamt></ns1:shrsOrPrnamt></ns1:infoTable></ns1:informationTable>'
+      check('追踪：13F 命名空间前缀容错', parse13FInformationTable(nsXml)[0]?.issuer === 'ABC' && parse13FInformationTable(nsXml)[0]?.value === 1000, JSON.stringify(parse13FInformationTable(nsXml)[0]))
+      const optPos = parse13FInformationTable('<informationTable><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><cusip>037833100</cusip><value>5000</value><putCall>Call</putCall><shrsOrPrnamt><sshPrnamt>100</sshPrnamt></shrsOrPrnamt></infoTable></informationTable>')[0]!
+      check('追踪：期权 putCall 标记', optPos.call === true && !optPos.put, JSON.stringify(optPos))
+      const subs = parseEdgarSubmissions(FIX_SUBMISSIONS)
+      eq('追踪：EDGAR 关注表单', subs.map((f) => f.form), ['13F-HR', '13D', '13F-HR'])
+      eq('追踪：13F 组取最新', latestFilingGroup(subs, '13F')?.accession, '0001193125-26-054580')
+      eq('追踪：13DG 组取最新', latestFilingGroup(subs, '13DG')?.accession, '0001193125-25-777777')
+      eq('追踪：发行人归一化', `${normalizeIssuerName('Berkshire Hathaway Inc.')}|${normalizeIssuerName('Apple Inc.')}`, 'BERKSHIRE HATHAWAY|APPLE')
+      const idx = parseCompanyTickers({
+        '0': { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' },
+        '1': { cik_str: 1, ticker: 'AAA', title: 'Ambiguous Corp' },
+        '2': { cik_str: 2, ticker: 'BBB', title: 'Ambiguous Corp' },
+      })
+      const mappedPos = mapPositionsToTickers(
+        [P('037833100', 'APPLE INC', 10), P('999999999', 'Ambiguous Corp', 30), P('888888888', 'Unknown Thing', 40)],
+        idx,
+      )
+      eq('追踪：发行人→代码唯一映射', mappedPos.map((p) => p.ticker ?? ''), ['AAPL', '', ''])
+      eq('追踪：金额区间', JSON.stringify(parseAmountRange('$1,001 - $15,000')), '{"lo":1001,"hi":15000}')
+      const ctrTrades = parseCongressBargo({ trades: [
+        { id: 'b1', ticker: 'nvda ', transaction_type: 'purchase', amount_range: '$1,001 - $15,000', transaction_date: '2026-09-10', disclosure_date: '2026-09-20', politician_name: 'Nancy Pelosi' },
+        { symbol: 'tsla', transaction_type: 'sale', amount: '$50,001 - $100,000', transaction_date: '2026-09-11', disclosure_date: '2026-09-21' },
+      ] })
+      eq('追踪：国会申报归一化', ctrTrades.map((t) => `${t.side}:${t.ticker}`), ['buy:NVDA', 'sell:TSLA'])
+      eq('追踪：国会金额与成员', `${ctrTrades[0]!.amountLo}|${ctrTrades[0]!.amountHi}|${ctrTrades[0]!.politician}`, '1001|15000|Nancy Pelosi')
+      eq('追踪：国会 id 兜底', ctrTrades[1]!.id, '2026-09-11:TSLA:2026-09-21')
+      eq('追踪：名字→CIK atom', parseEdgarCompanyAtom(FIX_ATOM)[0]?.cik, '0001067983')
+      eq('追踪：受控别名表', resolveAliases('冯柳').join(','), '邻山1号')
+      eq('追踪：别名缺省回退原名', resolveAliases('某私募').join(','), '某私募')
+
+      // 3) 档案存储：原子写 / 幂等 / 级联 / 损坏拒绝
+      const ev1: string[] = []
+      const fstore = new FollowStore(path.join(root, 'follow-a', 'follow.json'), (c) => ev1.push(c.action))
+      const tInv = await fstore.addTarget({ kind: 'investor-13f', name: 'Berkshire Hathaway', cik: '1067983', note: '长期视角' })
+      check('追踪：建档生成 id', /^flw-/.test(tInv.id), tInv.id)
+      eq('追踪：建档回执', ev1.join(','), 'target')
+      let dupErr = ''
+      try { await fstore.addTarget({ kind: 'investor-13f', name: 'Berkshire Hathaway Inc', cik: '0001067983' }) } catch (e) { dupErr = e instanceof Error ? e.message : String(e) }
+      check('追踪：重复建档拒绝（cik 归一）', dupErr.includes('已存在'), dupErr)
+      const oldSnap: FollowSnapshot = { targetId: tInv.id, filingKey: '0001193125-25-666666', form: '13F-HR', filedAt: '2025-11-14', capturedAt: '2026-10-07T00:00:00.000Z', data: { positions: [P('037833100', 'APPLE INC', 100), P('88160R101', 'TESLA INC', 400)] } }
+      const rec1 = await fstore.recordSnapshot(oldSnap)
+      const rec2 = await fstore.recordSnapshot(oldSnap)
+      check('追踪：快照幂等（首录/替换）', rec1.replaced === false && rec2.replaced === true, JSON.stringify([rec1, rec2]))
+      eq('追踪：快照回执', ev1.join(','), 'target,snapshot,snapshot')
+      await fstore.touchTarget(tInv.id, { lastCheckedAt: '2026-10-07T00:00:00.000Z' })
+      eq('追踪：touch 不发回执', ev1.join(','), 'target,snapshot,snapshot')
+      const job1 = shouldEnqueue([], tInv, '13F', '0001193125-26-054580', '13F 已发布')!
+      eq('追踪：入队幂等', JSON.stringify([await fstore.enqueueJob(job1), await fstore.enqueueJob(job1)]), '[{"queued":true},{"queued":false}]')
+      await fstore.setJobState(job1.id, 'done')
+      eq('追踪：任务状态', fstore.get().jobs.find((j) => j.id === job1.id)?.state, 'done')
+      await fstore.addBrief({ targetId: tInv.id, title: 'Q4 减持苹果', points: ['p1', 'p2'], filingKey: '0001193125-25-666666' })
+      await fstore.addBrief({ targetId: tInv.id, title: 'Q4 减持苹果', points: ['p1'], filingKey: 'x' })
+      eq('追踪：7日标题去重', fstore.get().briefs.filter((b) => b.title === 'Q4 减持苹果').length, 1)
+      check('追踪：原子文件落盘', await access(path.join(root, 'follow-a', 'follow.json')).then(() => true).catch(() => false), '')
+      const f2 = new FollowStore(path.join(root, 'follow-b', 'follow.json'))
+      const tC = await f2.addTarget({ kind: 'congress', name: 'Test Member', slug: 'test-member' })
+      await f2.recordSnapshot({ targetId: tC.id, filingKey: 'k', form: 'PTR', filedAt: '2026-10-01', capturedAt: 'x', data: { trades: [] } })
+      await f2.enqueueJob({ id: `${tC.id}:congress:k`, targetId: tC.id, group: 'congress', filingKey: 'k', title: 't' })
+      await f2.addBrief({ targetId: tC.id, title: 'b', points: ['x'] })
+      await f2.removeTarget(tC.id)
+      const st2 = f2.get()
+      check('追踪：移除级联清空', st2.targets.length === 0 && st2.snapshots.length === 0 && st2.jobs.length === 0 && st2.briefs.length === 0, JSON.stringify({ t: st2.targets.length, s: st2.snapshots.length, j: st2.jobs.length, b: st2.briefs.length }))
+      const badFile = path.join(root, 'follow-bad', 'follow.json')
+      await mkdir(path.dirname(badFile), { recursive: true })
+      await writeFile(badFile, '{"targets":{}}')
+      let badErr = ''
+      try { await new FollowStore(badFile).load() } catch (e) { badErr = e instanceof Error ? e.message : String(e) }
+      check('追踪：损坏档案拒绝加载', badErr.includes('损坏'), badErr)
+
+      // 4) 8 工具端到端（fetch mock 提供 EDGAR/Bargo fixture）
+      const toolDefs: Array<{ name: string; execute?: (args: Record<string, unknown>, exec?: unknown) => Promise<unknown> }> = []
+      const fakeCtx = { tools: { register: (d: { name: string }) => { toolDefs.push(d as never) } } } as never
+      const fstore2 = new FollowStore(path.join(root, 'follow-e2e', 'follow.json'))
+      const researchEvents: Array<Record<string, unknown>> = []
+      const fakeBus = { publish: (e: Record<string, unknown>) => { researchEvents.push(e); return e }, subscribe: () => ({ close() {}, gap: false, epoch: 'test' }) } as never
+      const fakeVault = { create: async (input: { title?: string }) => ({ id: 'r-1', title: String(input.title ?? '') }) } as never
+      let growthHits = 0
+      const fakeGrowth = { markActivity: async () => { growthHits++ } } as never
+      const fakePortfolio = { get: () => ({
+        holdings: [
+          { code: 'AAPL', name: '苹果', type: 'stock' },
+          { code: 'NVDA', name: '英伟达', type: 'stock' },
+          { code: '600519', name: '贵州茅台', type: 'stock' },
+        ],
+        watchlist: [],
+      }) } as never
+      const fakeFinance = {
+        westock: async (capability: string) => capability === 'shareholder'
+          ? { ok: true, data: { top10: [{ holder: '广东邻山1号投资合伙企业（有限合伙）', ratio: '4.2%' }, { holder: '中央结算', ratio: '9%' }] } }
+          : { ok: false, error: 'unsupported' },
+        getQuotes: async (codes: Array<{ code: string }>) => ({ ok: true, data: codes.map((c) => ({ code: c.code, price: c.code === 'AAPL' ? 260 : 70 })) }),
+        getKline: async (code: string) => ({ ok: true, data: [{ date: '2026-02-18', open: 100, high: 110, low: 90, close: code === 'AAPL' ? 252 : 71, volume: 1000 }] }),
+      } as never
+      registerFollowTools(fakeCtx, { finance: fakeFinance, portfolio: fakePortfolio, follow: fstore2, bus: fakeBus, vault: fakeVault, growth: fakeGrowth } as never, { tick: false })
+      const WANT = ['follow_list', 'follow_add', 'follow_remove', 'follow_fetch', 'follow_diff', 'follow_vs_holdings', 'follow_replicate', 'follow_note']
+      eq('追踪：8 工具全注册', WANT.filter((n) => toolDefs.some((t) => t.name === n)), WANT)
+      eq('追踪：工具数', toolDefs.length, 8)
+      const T = (name: string) => toolDefs.find((t) => t.name === name)!
+      const exec = { signal: undefined }
+      const list0 = await T('follow_list').execute!({}, exec) as { ok: boolean; counts?: { targets?: number } }
+      check('追踪：follow_list 空档案', list0.ok && list0.counts?.targets === 0, JSON.stringify(list0.counts))
+      const addInv = await T('follow_add').execute!({ kind: 'investor-13f', name: 'Berkshire Hathaway' }, exec) as { ok: boolean; target?: { id: string; cik?: string }; caveats?: string[] }
+      check('追踪：名字→CIK 建档', addInv.ok && addInv.target?.cik === '0001067983', JSON.stringify(addInv.target))
+      check('追踪：建档带边界说明', (addInv.caveats ?? []).some((c) => c.includes('45')), (addInv.caveats ?? []).join(' '))
+      const invId = addInv.target!.id
+      await fstore2.recordSnapshot({ targetId: invId, filingKey: '0001193125-25-666666', form: '13F-HR', filedAt: '2025-11-14', capturedAt: '2026-10-07T00:00:00.000Z', data: { positions: [P('037833100', 'APPLE INC', 100), P('88160R101', 'TESLA INC', 400)] } })
+      const fetch1 = await T('follow_fetch').execute!({ id: invId }, exec) as { ok: boolean; newFiling?: boolean; filing?: { accession?: string }; caveats?: string[] }
+      check('追踪：拉取 13F 新期', fetch1.ok === true && fetch1.newFiling === true && fetch1.filing?.accession === '0001193125-26-054580', JSON.stringify(fetch1.filing))
+      check('追踪：拉取带延迟边界', (fetch1.caveats ?? []).some((c) => c.includes('45')), (fetch1.caveats ?? []).join(' '))
+      const invSnap = latestSnapshot(fstore2.get().snapshots, invId)
+      eq('追踪：快照期与持仓数', `${invSnap?.period}|${invSnap?.data.positions?.length}`, '2025-12-31|2')
+      eq('追踪：发行人→代码入库', invSnap?.data.positions?.map((p) => p.ticker ?? '').sort().join(','), 'AAPL,KO')
+      check('追踪：新披露入队待解读', fstore2.get().jobs.some((j) => j.targetId === invId && j.state === 'ready' && j.group === '13F'), JSON.stringify(fstore2.get().jobs.map((j) => j.id)))
+      const fetch2 = await T('follow_fetch').execute!({ id: invId }, exec) as { newFiling?: boolean }
+      check('追踪：同披露重复拉取幂等', fetch2.newFiling === false && fstore2.get().snapshots.filter((s) => s.targetId === invId).length === 2, JSON.stringify(fetch2))
+      const diffR = await T('follow_diff').execute!({ id: invId }, exec) as { ok: boolean; baseline?: boolean; diff?: { added?: Array<{ issuer: string }>; removed?: Array<{ issuer: string }>; increased?: Array<{ issuer: string; delta: number }> } }
+      check('追踪：两期 diff 非基线', diffR.ok && diffR.baseline === false, String(diffR.baseline))
+      eq('追踪：diff 新进', diffR.diff?.added?.map((r) => r.issuer), ['COCA COLA CO'])
+      eq('追踪：diff 清仓', diffR.diff?.removed?.map((r) => r.issuer), ['TESLA INC'])
+      check('追踪：diff 加仓带数字', (diffR.diff?.increased ?? []).some((r) => r.issuer === 'APPLE INC' && r.delta > 0), JSON.stringify(diffR.diff?.increased))
+      const vsR = await T('follow_vs_holdings').execute!({ id: invId }, exec) as { matched?: Array<{ ticker: string }>; theirsMapped?: number; unmapped?: number }
+      eq('追踪：与我重叠', vsR.matched?.map((m) => m.ticker), ['AAPL'])
+      eq('追踪：映射计数', `${vsR.theirsMapped}|${vsR.unmapped}`, '2|0')
+      const rep = await T('follow_replicate').execute!({ id: invId, capital: 100_000 }, exec) as { ok: boolean; started?: boolean; priced?: number; total?: number; totals?: { pnlPct?: number | null } }
+      check('追踪：纸面复刻启动', rep.ok && rep.started === true, JSON.stringify({ priced: rep.priced, total: rep.total }))
+      eq('追踪：复刻全部定价', `${rep.priced}|${rep.total}`, '2|2')
+      check('追踪：复刻收益已计算', typeof rep.totals?.pnlPct === 'number', String(rep.totals?.pnlPct))
+      const rep2 = await T('follow_replicate').execute!({ id: invId }, exec) as { refreshed?: boolean }
+      check('追踪：复刻刷新幂等', rep2.refreshed === true, String(rep2.refreshed))
+      const noteR = await T('follow_note').execute!({ id: invId, title: '2025Q4：清仓特斯拉、增持苹果', points: ['苹果市值占比提升', '新进可口可乐', '边界：13F 滞后约 45 天'] }, exec) as { ok: boolean; brief?: { title: string; points: string[] }; vaultId?: string; jobsDone?: boolean }
+      check('追踪：简报落库', noteR.ok && noteR.brief?.points?.length === 3, JSON.stringify(noteR.brief))
+      eq('追踪：简报同步资料库', noteR.vaultId, 'r-1')
+      check('追踪：解读完成收口任务', noteR.jobsDone === true && !fstore2.get().jobs.some((j) => j.targetId === invId && j.state === 'ready'), JSON.stringify(fstore2.get().jobs.map((j) => j.state)))
+      check('追踪：资料库回执入总线', researchEvents.some((e) => e.kind === 'research' && e.action === 'save'), JSON.stringify(researchEvents))
+      eq('追踪：拉取与解读计成长活动', growthHits, 3)
+      // 国会：成员解析 → 基线 → 新增入队 → 幂等
+      const addC = await T('follow_add').execute!({ kind: 'congress', name: 'Nancy Pelosi' }, exec) as { ok: boolean; target?: { id: string; slug?: string } }
+      check('追踪：成员名→slug', addC.ok && addC.target?.slug === 'nancy-pelosi', JSON.stringify(addC.target))
+      const cId = addC.target!.id
+      const cf1 = await T('follow_fetch').execute!({ id: cId }, exec) as { newFiling?: boolean }
+      check('追踪：国会基线快照', cf1.newFiling === true, String(cf1.newFiling))
+      eq('追踪：国会基线不入队（无上期）', fstore2.get().jobs.filter((j) => j.targetId === cId).length, 0)
+      const cf2 = await T('follow_fetch').execute!({ id: cId }, exec) as { newFiling?: boolean; newCount?: number }
+      check('追踪：国会新增申报入队', cf2.newFiling === true && cf2.newCount === 1 && fstore2.get().jobs.some((j) => j.targetId === cId && j.state === 'ready'), JSON.stringify(cf2))
+      const cf3 = await T('follow_fetch').execute!({ id: cId }, exec) as { newFiling?: boolean }
+      check('追踪：国会无变化不重复入库', cf3.newFiling === false && fstore2.get().snapshots.filter((s) => s.targetId === cId).length === 2, JSON.stringify(cf3))
+      const vsC = await T('follow_vs_holdings').execute!({ id: cId }, exec) as { matched?: Array<{ ticker: string }>; theirsMapped?: number }
+      eq('追踪：政客与我重叠', `${vsC.matched?.map((m) => m.ticker).join(',')}|${vsC.theirsMapped}`, 'NVDA|2')
+      // 名私募：受控别名 → 十大流通股东扫描 → 对入库 → 幂等
+      const addCn = await T('follow_add').execute!({ kind: 'cn-holder', name: '冯柳' }, exec) as { ok: boolean; target?: { id: string; aliases?: string[] } }
+      eq('追踪：名私募别名建档', addCn.target?.aliases?.join(','), '邻山1号')
+      const cnId = addCn.target!.id
+      const cn1 = await T('follow_fetch').execute!({ id: cnId }, exec) as { newFiling?: boolean; newCount?: number }
+      check('追踪：十大流通股东命中', cn1.newFiling === true && cn1.newCount === 1, JSON.stringify(cn1))
+      const pairs = (latestSnapshot(fstore2.get().snapshots, cnId)?.data.meta?.pairs ?? []) as Array<{ code: string; alias: string }>
+      eq('追踪：股东对入库', pairs.map((p) => `${p.code}:${p.alias}`).join(','), '600519:邻山1号')
+      const cn2 = await T('follow_fetch').execute!({ id: cnId }, exec) as { newFiling?: boolean }
+      check('追踪：股东扫描幂等', cn2.newFiling === false, String(cn2.newFiling))
+      check('追踪：股东对生成任务', fstore2.get().jobs.some((j) => j.targetId === cnId && j.group === 'cnholder' && j.state === 'ready'), '')
+      eq('追踪：拉取与解读计成长活动（合计）', growthHits, 8)
+      const remC = await T('follow_remove').execute!({ id: cId }, exec) as { removed?: boolean }
+      check('追踪：移除工具', remC.removed === true, JSON.stringify(remC))
+      const list1 = await T('follow_list').execute!({}, exec) as { counts?: { targets?: number; readyJobs?: number } }
+      eq('追踪：档案计数', `${list1.counts?.targets}|${list1.counts?.readyJobs}`, '2|1')
+
+      // 5) 面板只读接口 GET /follow + follow 总线事件
+      const regs: Array<{ path?: string; handler?: (req: unknown, res: unknown) => Promise<unknown> }> = []
+      const fakeWeb = { register: (cfg: { path?: string; handler: (req: unknown, res: unknown) => Promise<unknown> }) => { regs.push(cfg); return () => {} } } as never
+      registerRoutes(
+        fakeWeb,
+        {} as never,
+        { load: async () => {} } as never,
+        undefined, undefined, undefined,
+        {} as never,
+        { publish: () => {}, subscribe: () => ({ close() {}, gap: false, epoch: 't' }) } as never,
+        undefined, undefined, undefined, undefined, undefined, undefined,
+        fstore2,
+      )
+      const prefixCfg = regs.find((r) => r.path === API_PREFIX)
+      check('追踪：路由已挂载', !!prefixCfg?.handler, regs.map((r) => r.path).join(','))
+      const req = { url: `${API_PREFIX}/follow`, method: 'GET', headers: { host: 'localhost:3000' }, socket: { remoteAddress: '127.0.0.1' } }
+      let status = 0
+      let body = ''
+      const res = { writeHead: (s: number) => { status = s }, end: (t: string) => { body = t } }
+      await prefixCfg!.handler!(req, res)
+      const parsed = JSON.parse(body || '{}') as { ok?: boolean; counts?: { targets?: number; readyJobs?: number }; targets?: Array<{ name: string; caveats?: string[]; stale?: string }> }
+      eq('追踪：GET /follow 成功', `${status}|${parsed.ok}`, '200|true')
+      eq('追踪：接口计数', `${parsed.counts?.targets}|${parsed.counts?.readyJobs}`, '2|1')
+      const invView = parsed.targets?.find((t) => t.name === 'Berkshire Hathaway')
+      check('追踪：对象带边界与新鲜度', !!invView && (invView.caveats?.length ?? 0) > 0 && invView.stale === 'stale', JSON.stringify({ stale: invView?.stale, caveats: invView?.caveats?.length }))
+      const pb2 = new PanelBus({ commandTtlMs: 60_000 })
+      let fEnv: { event?: Record<string, unknown> } | undefined
+      const fSub = pb2.subscribe((e) => { fEnv = e })
+      pb2.publish({ kind: 'follow', action: 'job', targetId: 'x', at: new Date().toISOString() })
+      check('追踪：follow 回执入总线', fEnv?.event?.kind === 'follow' && fEnv?.event?.action === 'job', JSON.stringify(fEnv?.event))
+      fSub.close()
+    }
 
     console.log(`\n[offline] ${passed} passed, ${failed} failed`)
     if (failed) {

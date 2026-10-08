@@ -1,5 +1,9 @@
 import { PersonalStore } from './personal.js'
 import { registerPersonalTools } from './personal-tools.js'
+import { GrowthStore } from './growth-store.js'
+import { registerGrowthTools } from './tools/growth-tools.js'
+import { FollowStore } from './follow-store.js'
+import { registerFollowTools } from './tools/follow-tools.js'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -100,6 +104,16 @@ export function apply(ctx: Context, config: Config) {
   // Bidirectional channel: store mutations (from tools, routes, or the agent) are
   // pushed to connected panel clients over SSE instead of waiting for the 60s poll.
   const bus = new PanelBus()
+  // Agent 活动指示（Agent → 面板）：每个工具调用的开始/结束推给面板，
+  // 顶部胶囊显示「Agent 正在做什么」；活动提示永不影响工具本身的结果。
+  ctx.on('tools/execute', async (exec, next) => {
+    try { bus.publish({ kind: 'agent', phase: 'start', tool: String(exec.name ?? ''), at: new Date().toISOString() }) } catch { /* 提示不阻塞 */ }
+    try {
+      return await next()
+    } finally {
+      try { bus.publish({ kind: 'agent', phase: 'done', tool: String(exec.name ?? ''), at: new Date().toISOString() }) } catch { /* 提示不阻塞 */ }
+    }
+  })
   store.onChange((file) => bus.publish({
     kind: 'portfolio',
     holdings: file.holdings,
@@ -155,6 +169,16 @@ export function apply(ctx: Context, config: Config) {
   ctx.provide('financeData', finance)
   const personal = new PersonalStore(path.join(dataDir, 'personal.json'))
   registerPersonalTools(ctx, personal, finance, vault)
+  // 成长档案：Agent 记忆（规划/学习/复盘状态），数据全本地；变更经总线回执面板。
+  const growth = new GrowthStore(path.join(dataDir, 'growth.json'), (change) => {
+    bus.publish({ kind: 'growth', action: change.action, at: new Date().toISOString() })
+  })
+  registerGrowthTools(ctx, growth, store, personal, vault)
+  // 追踪档案：机构13F/政客申报/名私募（Agent 驱动，全本地）；新披露经总线回执面板。
+  const follow = new FollowStore(path.join(dataDir, 'follow.json'), (change) => {
+    bus.publish({ kind: 'follow', action: change.action, targetId: change.targetId, at: new Date().toISOString() })
+  })
+  registerFollowTools(ctx, { finance, portfolio: store, follow, bus, vault, growth }, { tick: true })
   registerTools(ctx, finance, store, analyses, bus, personal, strategyLibrary)
   registerWestockTools(ctx, finance)
   registerHistoryTools(ctx, finance, history, bus)
@@ -162,7 +186,7 @@ export function apply(ctx: Context, config: Config) {
   const yingmiCommand = (config.mcpSources ?? []).find((s) => s.kind === 'cli' && s.enabled)?.command || undefined
   const skills = registerSkills(ctx, packageRoot, dataDir, yingmiCommand, logger)
   const mcp = registerMcpSources(ctx, config.mcpSources ?? [], dataDir)
-  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, bus, vault, logger, reminders, scanRemindersNow, personal)
+  registerRoutes(ctx.webServer, finance, store, mcp, history, skills, analyses, bus, vault, logger, reminders, scanRemindersNow, personal, growth, follow)
   registerReminderTools(ctx, reminders, scanRemindersNow, bus)
   // 定时扫描：10 分钟一次（插件卸载时随 effect 清理）。
   ctx.effect(() => {
@@ -185,9 +209,14 @@ export function apply(ctx: Context, config: Config) {
       '- Market data uses direct HTTP endpoints (Eastmoney / Tencent), not akshare. If a market tool fails, call probe_finance_sources first.',
       '- Holdings CRUD works without quotes; P&L enrichment needs a healthy quote provider.',
       '- 历史K线/财报/分红可用 sync_history 落地到本地库，再用 get_history 读取（含事件标记）。',
-      '- 对话中想引导用户看面板时调用 panel_navigate（tab 必填，可带 code 聚焦；tab=quotes 聚焦K线工作区（tab=kline 为兼容别名），kind 指定市场，open_analysis 可同时打开 AI 解读）。',
+      '- 对话中想引导用户看面板时调用 panel_navigate（tab 必填，可带 code 聚焦；tab=quotes 聚焦K线工作区（tab=kline 为兼容别名），kind 指定市场，open_analysis 可同时打开 AI 解读）。note 会作为一句话解释显示在面板顶部，anchor 页内滚动（home 可用 overview/growth/journal/reviews/approvals，holdings 用 lookthrough，follow 用 targets/jobs/briefs/shadow）——导航时带上它们，用户才知道你让他看什么。',
       '- 调仓推演用 simulate_rebalance：trades（买卖列表）或 targets（目标权重%）二选一，返回前后权重/HHI/分币种敞口对比；纯模拟，不改持仓。',
+      '- 面板焦点用 panel_state 读取（用户当前所在标签页与聚焦代码，best-effort）：回答「我该看哪 / 你刚才说的那个」或引用面板内容前先读它，对齐用户实际所看。',
       '- Use type:"fund" for funds (基金, 6-digit code) and type:"stock" for stocks (A股/港股/美股).',
+      '- 基金分析工具链：fund_dossier 一次取基金经理/规模/重仓/风险/基准档案 → calculate_fund_metrics 算收益/回撤/夏普与基准对比 → compare_funds 比相关性、analyze_fund_overlap 看基金与持仓的重叠；排行 get_fund_rank 支持 sortBy（m1/m3/m6/y1/y3/ytd）与 page。',
+      '- 基金净值是 T+1（quote 里 asOf/raw.navDate 为净值日期，勿当实时价）；场内 ETF（51/56/15/16 开头）另有 get_etf_overview 看折溢价与规模、get_etf_holdings 看重仓（WeStock 能力，可能失败需标注缺失）。',
+      '- 伪分散检测与买入纪律：portfolio_lookthrough 一次穿透全组合（HHI/有效个股/重复暴露排行）；买入或加仓前先 check_new_position 看边际影响（这是「分散」还是「加大同一个赌注」），结论要引用它的 before/after 数字。',
+      '- panel_navigate 支持 type=fund：tab=dossier 打开基金档案、tab=quotes 打开基金K线聚焦。',
       '- When the panel sends an active position-analysis request, gather the requested data with finance tools and finish by calling save_position_analysis with the complete Markdown report.',
     ].join('\n'),
   })
@@ -246,6 +275,36 @@ export function apply(ctx: Context, config: Config) {
         ...lines,
       ].join('\n')
     },
+  })
+
+  ctx.systemPrompt.section({
+    name: 'dsh-finance:growth',
+    order: 124,
+    text: [
+      '## 成长（规划·学习·复盘，Agent 驱动，全本地记忆）',
+      '- 触发：用户是新手、问「我该学什么 / 怎么开始」、聊家庭财务（攒钱/负债/保障/目标）、或要求复盘时——先 growth_state 装载记忆，再 growth_diagnose 拿带证据的缺口清单；结论由你结合上下文决策，一次只做 1 件事。',
+      '- 规划先于投资：health.fixes 非空时先完成规划修复项（一次一个具体动作，如「先把 3 个月开支的应急金单独存」），未完成规划前不讲选股/择时课程。',
+      '- 微课纪律：一次只讲 1 节（lesson_get 取材：3 个要点 + 1 道检验题 → lesson_complete 判分，≥80 记 mastered）；优先选与当前对话最相关的课程，讲完回到投资主线，绝不打断主线。',
+      '- 访谈写入 family_plan_update：section=profile|cashflow|balance|goals|protection；一次只问 1 个问题、先说明用途并注明「这些数据只保存在本机」；数字看不准就让用户口述，不猜、不代填。',
+      '- 决策纪律：用户形成/修订观点后，引导落一条决策日记（save_research kind=decision：判断+依据+证伪条件）；周复盘照旧走 weekly 流程。',
+      '- 月度成长复盘（每月一次或用户主动要求）：四柱（学习/计划/纪律/资产）对照上期、引用数字、给出下月唯一改进动作 → save_research kind=review → growth_review_mark 记 streak。资料库缺数据就明说缺什么，缺的部分留空，不编。',
+      '- 激励只谈过程（遵循计划、完成复盘、补齐证伪条件），绝不评价收益、绝不鼓励频繁交易，不承诺任何回报。',
+      '- 成长状态是记忆不是看板：面板只读展示你诊断出的 nextSteps；不要派发打卡任务，不要自动生成投资计划。',
+    ].join('\\n'),
+  })
+
+  ctx.systemPrompt.section({
+    name: 'dsh-finance:follow',
+    order: 125,
+    text: [
+      '## 追踪（机构13F / 政客申报 / A股名私募，Agent 驱动，全本地档案）',
+      '- 触发：用户说「跟踪/盯」某人或机构、问「他最近买了什么 / 巴菲特/段永平/木头姐持仓」、问「跟着国会议员买哪些股」时：先 follow_list 装载记忆（新鲜度徽标+待解读任务），再 follow_fetch 拉最新披露。',
+      '- follow_add：名字先自己解析（EDGAR/成员接口有响应式候选），失败带候选让用户选，再带 cik/slug 重试；不记固定名人表。加之前向用户说明该源的延迟与覆盖边界（工具返回自带 caveat，直接转述）。',
+      '- 解读节奏（一次只做 1 件事）：follow_fetch（新披露会自动入队 follow_fetch 式任务卡）→ follow_diff 引用具体数字与披露日期 → 有重叠或用户想复刻时 follow_vs_holdings → 最后 follow_note 落简报（3-6 条要点，引用数字/日期/边界，同步资料库）。',
+      '- follow_replicate 是纯纸面复刻（不触达真实账户、不建仓、不构成建议）；收益只按已定价部分算并标注缺失。禁：给出任何标的的买卖建议、声称「跟单」、暗示申报交易=内幕。',
+      '- 面板追踪页（tab=follow）只读展示对象/任务卡/简报/复刻状态；任务卡 click 回投对话（kind=follow 回执），解读仍在会话里做。anchor：follow 页用 targets/jobs/briefs/shadow。',
+      '- 新披露由 6 小时一次的后台检查发现（按披露主键去重，不重复入队）；发现后走会话触发的解读，不自动刷屏。',
+    ].join('\n'),
   })
 
   ctx.systemPrompt.section({

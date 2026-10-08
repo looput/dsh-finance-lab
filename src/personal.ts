@@ -5,7 +5,8 @@ import type { FinanceDataService } from './data/service.js'
 import { routeCode } from './data/route-code.js'
 import type { AssetType } from './types.js'
 import type { ResearchVault } from './research/store.js'
-import { evaluateThesis, factsFromF10, factsFromQuote, parseIndicators, type FactValue, type IndicatorCheck, type ThesisIndicator } from './personal-eval.js'
+import { evaluateThesis, factsFromF10, factsFromFundProfile, factsFromFundRisk, factsFromQuote, parseIndicators, type FactValue, type IndicatorCheck, type ThesisIndicator } from './personal-eval.js'
+import { computeFundRiskMetrics } from './fund-analysis.js'
 
 export type { ThesisIndicator, IndicatorCheck } from './personal-eval.js'
 
@@ -348,8 +349,33 @@ export class PersonalStore {
     try {
       const q = await finance.getAutoQuote(thesis.code, undefined, thesis.type ?? 'stock')
       if (q.ok && q.data) Object.assign(facts, factsFromQuote(q.data as unknown as Record<string, unknown>, q.provider || '行情接口'))
+      // 基金：画像里的规模与同类排名百分比也是可核验事实（防御式取数，缺失即缺失）。
+      if (q.ok && q.data && (thesis.type ?? 'stock') === 'fund') {
+        Object.assign(facts, factsFromFundProfile(q.data as unknown as Record<string, unknown>, `基金画像（${q.provider || '东财'}）`))
+      }
       evidence.push({ source: q.provider || '行情接口（来源缺失）', occurredAt: null, retrievedAt: new Date().toISOString(), text: q.ok ? JSON.stringify(q.data ?? {}) : String(q.error), missing: q.ok && typeof q.data?.price === 'number' && Number.isFinite(q.data.price) ? ['行情时间缺失'] : ['行情获取失败'] })
     } catch { evidence.push({ source: '行情接口', occurredAt: null, retrievedAt: now, text: '行情不可用', missing: ['行情获取失败'] }) }
+    // 基金证据：净值序列 → 本地计算近1年回撤/波动/夏普与今年来涨幅（P0 基金深度指标本地化）。
+    if ((thesis.type ?? 'stock') === 'fund') {
+      try {
+        const kl = await finance.getFundKline(thesis.code)
+        if (kl.ok && Array.isArray(kl.data) && kl.data.length) {
+          const risk = computeFundRiskMetrics(kl.data.map((b) => ({ date: b.date, nav: b.close })))
+          Object.assign(facts, factsFromFundRisk(risk, `基金净值序列（${kl.provider || '东财'}·本地计算）`))
+          evidence.push({
+            source: `基金净值序列（${kl.provider || '来源缺失'}·本地计算）`,
+            occurredAt: null,
+            retrievedAt: new Date().toISOString(),
+            text: JSON.stringify({ points: risk.points, asOf: risk.asOf, full: risk.full, y1: risk.y1, stages: risk.stages }),
+            missing: risk.points >= 2 ? (risk.y1 ? [] : ['近1年窗口数据不足，回撤/波动/夏普缺失']) : ['净值序列无效'],
+          })
+        } else {
+          evidence.push({ source: '基金净值序列', occurredAt: null, retrievedAt: new Date().toISOString(), text: kl.ok ? '空序列' : String(kl.error ?? ''), missing: ['净值序列获取失败'] })
+        }
+      } catch {
+        evidence.push({ source: '基金净值序列', occurredAt: null, retrievedAt: new Date().toISOString(), text: '获取失败', missing: ['净值序列获取失败'] })
+      }
+    }
     try {
       const news = await finance.getStockNews(thesis.code, 8)
       if (news.ok && Array.isArray(news.data) && news.data.length) {

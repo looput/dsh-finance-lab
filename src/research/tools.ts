@@ -202,7 +202,7 @@ export function registerResearchTools(
       title: { type: 'string', required: true, description: '资料标题' },
       source: { type: 'string', required: true, description: '来源，如「诚通证券研报」「公司公告」「个人观点」' },
       date: { type: 'string', required: true, description: '资料时间 YYYY-MM-DD（研报发布日/财报期/观点日期）' },
-      kind: { type: 'string', enum: [...RESEARCH_KINDS], description: 'report 研报 / filing 财报 / note 观点 / news 资讯 / other' },
+      kind: { type: 'string', enum: [...RESEARCH_KINDS], description: 'report 研报 / filing 财报 / note 观点 / news 资讯 / decision 决策日记 / learn 学习笔记 / review 复盘 / other' },
       codes: { type: 'array', items: { type: 'string' }, description: '关联标的代码，如 ["600519"]' },
       tags: { type: 'array', items: { type: 'string' }, description: '标签，如 ["白酒","中报"]' },
       summary: { type: 'string', description: '一句话摘要' },

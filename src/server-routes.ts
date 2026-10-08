@@ -8,6 +8,8 @@ import type { FinanceDataService } from './data/service.js'
 import type { PortfolioStore } from './store.js'
 import type { McpManager } from './mcp/manager.js'
 import { buildStockDossier, dossierSummary } from './data/dossier.js'
+import { buildFundDossier } from './data/fund-dossier.js'
+import { buildLookthrough } from './lookthrough.js'
 import type { ReminderOptions, ReminderScanResult, ReminderStore } from './reminders.js'
 import type { PanelBus } from './panel-bus.js'
 import type { SkillManager } from './skills.js'
@@ -27,6 +29,11 @@ function withCapMeta<T extends { capability: string }>(rows: T[]): Array<T & { l
 }
 import { collectResearch } from './research/tools.js'
 import { ResearchConfirmationRequired, type ResearchKind, type ResearchStatus, type ResearchVault } from './research/store.js'
+import type { GrowthStore } from './growth-store.js'
+import { buildGrowthSnapshot } from './tools/growth-tools.js'
+import type { FollowStore } from './follow-store.js'
+import { buildFollowSnapshot } from './tools/follow-tools.js'
+import { setPanelFocus } from './panel-focus.js'
 import type { AssetType } from './types.js'
 import { ValidationError, validateAssetType, validateCode, validateDate, validateMarketKind } from './validation.js'
 
@@ -101,7 +108,9 @@ export function advisorMemory(vault: ResearchVault | undefined, code: string): s
   if (!items.length) return ''
   const lines = items.flatMap((it) => {
     const out: string[] = []
-    const label = `${it.occurredAt}｜${it.kind === 'report' ? '研报' : it.kind === 'filing' ? '财报' : it.kind === 'news' ? '资讯' : '观点'}｜${it.title}`
+    const kindLabel = it.kind === 'report' ? '研报' : it.kind === 'filing' ? '财报' : it.kind === 'news' ? '资讯'
+      : it.kind === 'decision' ? '决策日记' : it.kind === 'learn' ? '学习笔记' : it.kind === 'review' ? '复盘' : '观点'
+    const label = `${it.occurredAt}｜${kindLabel}｜${it.title}`
     if (it.opinion) out.push(`- ${label}：结论「${it.opinion}」`)
     else if (it.summary) out.push(`- ${label}：摘要「${it.summary}」`)
     for (const n of it.notes.slice(-2)) out.push(`  · 批注 ${n.at.slice(0, 10)}：${n.text}`)
@@ -141,9 +150,10 @@ async function analysisPrompt(
     : '这是当前自选标的，不要编造持仓数量或成本。'
   const dataPlan = type === 'fund'
     ? [
-      '先调用 get_fund_quote 获取最新净值、净值日期、基金经理、资产配置、持有人结构、规模变化、同类评价等画像数据。',
-      '再调用 get_fund_kline 获取历史净值走势，并调用 get_fund_rank 获取同类阶段排名。',
-      '补充 get_macro_china、get_market_news 和 web_search，说明宏观与消息环境；数据失败时明确标注。',
+      '先调用 fund_dossier 获取基金档案（基金经理/资产配置/规模申赎/同类排名/重仓持仓/本地风险指标/基准对比）；档案是数据不是结论，缺失维度如实写进「缺失」。',
+      '再调用 get_fund_quote（asOf=净值日期，基金净值 T+1 更新，不要当实时价）；风险指标已含在 fund_dossier 里，需要重算或换基准时用 calculate_fund_metrics。',
+      '多只基金对比用 compare_funds（阶段收益 + 两两相关性）；场内 ETF（51/56/15/16/18 开头）可调 get_etf_overview 看折溢价与规模、get_etf_holdings 看重仓（WeStock 未接入会失败，标注缺失即可，不要编造）。',
+      '补充 get_fund_rank（同类阶段排名）、get_macro_china、get_market_news 和 web_search，说明宏观与消息环境；数据失败时明确标注。',
     ]
     : [
       '先调用 stock_dossier 获取该标的深度档案（基本面/资金/股东/风险/公告/产业链），必要时按缺口补查单个能力，不要从零逐个命令拼数据。',
@@ -156,20 +166,25 @@ async function analysisPrompt(
   const dossierBlock: string[] = []
   if (finance) {
     try {
-      const d = await buildStockDossier(finance, code, type)
+      const d = type === 'fund'
+        ? await buildFundDossier(finance, code)
+        : await buildStockDossier(finance, code, type)
       refs.dossierSnapshotId = d.snapshotId
       await analyses?.noteSnapshot(d.snapshotId, code, type)
+      // 股票取 F10 四维；基金取基金档案关键维（基本信息/经理/风险/基准/重仓/同类分位）。
       const essentials = d.sections
-        .filter((s) => ['company_survey', 'main_financials', 'valuation_analysis', 'shareholder_count'].includes(s.key))
+        .filter((s) => (type === 'fund'
+          ? ['overview', 'manager', 'risk_metrics', 'benchmark', 'holdings', 'rank_percent']
+          : ['company_survey', 'main_financials', 'valuation_analysis', 'shareholder_count']).includes(s.key))
         .map((s) => `  - ${s.label}：${s.status}${s.dataAsOf ? `（数据时点 ${s.dataAsOf}）` : ''}${s.error ? `｜${s.error}` : ''}`)
       dossierBlock.push(
         '',
-        `【档案快照 · snapshotId=${d.snapshotId}】已并发取回 ${d.ready}/${d.total} 个维度（${dossierSummary(d).split('\n')[0]}）。`,
+        `【档案快照 · snapshotId=${d.snapshotId}】已并发取回 ${d.ready}/${d.total} 个维度（${dossierSummary(d, type === 'fund' ? '基金深度档案' : '个股深度档案').split('\n')[0]}）。`,
         ...essentials,
         '档案是数据不是结论；维度为空/失败要如实写进「缺失」，不要用推测填数。',
       )
     } catch (err) {
-      dossierBlock.push('', `【档案快照】获取失败：${err instanceof Error ? err.message : String(err)}；如需可再调用 stock_dossier，并把缺失写进报告。`)
+      dossierBlock.push('', `【档案快照】获取失败：${err instanceof Error ? err.message : String(err)}；如需可再调用${type === 'fund' ? ' fund_dossier' : ' stock_dossier'}，并把缺失写进报告。`)
     }
   }
 
@@ -244,6 +259,8 @@ export function registerRoutes(
   /** 手动触发一次提醒扫描（面板/工具调用）。 */
   scan?: (options?: ReminderOptions) => Promise<ReminderScanResult>,
   personal?: PersonalStore,
+  growth?: GrowthStore,
+  follow?: FollowStore,
 ): () => void {
   return webServer.register({
     kind: 'prefix',
@@ -259,7 +276,18 @@ export function registerRoutes(
         if (personal && (sub === '/personal' || sub.startsWith('/personal/'))) {
           await personal.load()
           if (vault) await vault.load()
-          if (req.method === 'GET' && sub === '/personal') return sendJson(res, 200, { ok: true, ...personal.get(), metrics: personal.metrics(), pending: confirmations.list(), holdings: store.get().holdings, research: vault?.list({ limit: 8 }) ?? [], reminders: reminders?.list() ?? [], weekTimeZone })
+          if (req.method === 'GET' && sub === '/personal') {
+            // 成长区（只读）：诊断出的下一步 + 状态摘要；失败不拖垮主页。
+            let growthPayload: Record<string, unknown> | undefined
+            if (growth && personal) {
+              try {
+                const snap = buildGrowthSnapshot(growth, store, personal, vault)
+                const { diagFacts: _diagFacts, ...rest } = snap
+                growthPayload = JSON.parse(JSON.stringify(rest)) as Record<string, unknown>
+              } catch { growthPayload = undefined }
+            }
+            return sendJson(res, 200, { ok: true, ...personal.get(), metrics: personal.metrics(), pending: confirmations.list(), holdings: store.get().holdings, research: vault?.list({ limit: 8 }) ?? [], reminders: reminders?.list() ?? [], weekTimeZone, ...(growthPayload ? { growth: growthPayload } : {}) })
+          }
           if (req.method === 'POST') {
             const body = await readBody(req)
             if (sub === '/personal/profile') await personal.profile(body)
@@ -282,6 +310,16 @@ export function registerRoutes(
             return sendJson(res, 200, { ok: true })
           }
           return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+        }
+        if (req.method === 'GET' && sub === '/follow') {
+          // 追踪页只读快照：对象/新鲜度/任务/简报/复刻；失败给结构化错误（不拖垮面板）。
+          if (!follow) return sendJson(res, 404, { ok: false, error: '追踪模块未启用' })
+          try {
+            await follow.load()
+            return sendJson(res, 200, { ok: true, ...buildFollowSnapshot(follow) })
+          } catch (err) {
+            return sendJson(res, 200, { ok: false, error: err instanceof Error ? err.message : String(err) })
+          }
         }
         if (req.method === 'GET' && sub === '/events') {
           res.writeHead(200, {
@@ -322,6 +360,15 @@ export function registerRoutes(
             subscription.close()
           })
           return
+        }
+        if (req.method === 'POST' && sub === '/panel-focus') {
+          // 面板 → Agent：上报用户当前所看（best-effort，内存态），panel_state 工具读取。
+          const body = await readBody(req)
+          try {
+            return sendJson(res, 200, { ok: true, focus: setPanelFocus(body) })
+          } catch (err) {
+            return sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) })
+          }
         }
         if (req.method === 'GET' && (sub === '/state' || sub === '/')) {
           const { holdings, watchlist } = store.get()
@@ -546,6 +593,8 @@ export function registerRoutes(
         }
         if (history && req.method === 'GET' && sub === '/history') {
           const code = validateCode(url.searchParams.get('code') ?? '')
+          // 基金与个股共用 6 位 code 空间：kind=fund 不读本地个股K线，避免串数据。
+          if (url.searchParams.get('kind') === 'fund') return sendJson(res, 200, { ok: false, code, error: 'no local history' })
           const h = await history.read(code)
           if (!h) return sendJson(res, 200, { ok: false, code, error: 'no local history' })
           return sendJson(res, 200, { ok: true, ...h })
@@ -626,8 +675,20 @@ export function registerRoutes(
         if (req.method === 'GET' && sub === '/fundrank') {
           const fundType = url.searchParams.get('type') ?? 'all'
           const size = Number(url.searchParams.get('size') ?? 20)
-          const r = await finance.getFundRank(fundType, size)
+          const sort = url.searchParams.get('sort') ?? undefined
+          const page = Number(url.searchParams.get('page') ?? 1)
+          const r = await finance.getFundRank(fundType, size, sort, page)
           return sendJson(res, 200, { ok: r.ok, rows: r.ok && Array.isArray(r.data) ? r.data : [], error: r.ok ? undefined : r.error })
+        }
+        // P2 穿透体检：直投 + 基金前N大重仓 → 真实股票暴露（面板持仓页展示）。
+        if (req.method === 'GET' && sub === '/lookthrough') {
+          const topN = Number(url.searchParams.get('topN') ?? 10)
+          try {
+            const r = await buildLookthrough(finance, { topN })
+            return sendJson(res, 200, { ok: true, ...r })
+          } catch (err) {
+            return sendJson(res, 200, { ok: false, error: err instanceof Error ? err.message : String(err) })
+          }
         }
         if (req.method === 'GET' && sub === '/market') {
           const [gain, lose] = await Promise.all([finance.getSectorBoard('desc'), finance.getSectorBoard('asc')])
@@ -661,11 +722,14 @@ export function registerRoutes(
           return sendJson(res, 200, { ok: r.ok, news: r.ok && Array.isArray(r.data) ? r.data : [], error: r.ok ? undefined : r.error })
         }
         // 个股深度档案：一次并发取回该标的在 WeStock 上的全部维度（研究/资金/股东/风险/资讯/产业链）。
+        // type=fund 走基金专属档案（股票 18 维对基金大多 unsupported/噪音）。
         if (req.method === 'GET' && sub === '/dossier') {
           const code = validateCode(url.searchParams.get('code') ?? '')
           const type = validateAssetType(url.searchParams.get('type') ?? 'stock')
-          const d = await buildStockDossier(finance, code, type)
-          return sendJson(res, 200, { ok: true, summary: dossierSummary(d), ...d })
+          const d = type === 'fund'
+            ? await buildFundDossier(finance, code)
+            : await buildStockDossier(finance, code, type)
+          return sendJson(res, 200, { ok: true, summary: dossierSummary(d, type === 'fund' ? '基金深度档案' : '个股深度档案'), ...d })
         }
         if (req.method === 'GET' && sub === '/analysis') {
           const code = validateCode(url.searchParams.get('code') ?? '')

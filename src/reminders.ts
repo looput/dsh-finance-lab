@@ -34,10 +34,14 @@ export interface Reminder {
 }
 
 export interface ReminderOptions {
-  /** 当日异动阈值（%）。 */
+  /** 当日异动阈值（%），股票/非基金标的用。 */
   movePct?: number
-  /** 观点复核阈值（%），自观点记录日起累计涨跌。 */
+  /** 观点复核阈值（%），股票/非基金标的用，自观点记录日起累计涨跌。 */
   opinionPct?: number
+  /** 基金（type=fund）当日净值涨跌幅阈值（%）。基金净值日频、波动远小于股票，沿用股票阈值几乎不触发。 */
+  fundMovePct?: number
+  /** 基金的观点复核阈值（%）。 */
+  fundOpinionPct?: number
   /** 同一标的同类提醒的去重窗口（ms）。 */
   cooldownMs?: number
 }
@@ -48,7 +52,7 @@ interface ReminderFile {
   items: Reminder[]
 }
 
-const DEFAULTS = { movePct: 5, opinionPct: 8, cooldownMs: 12 * 3600_000 }
+const DEFAULTS = { movePct: 5, opinionPct: 8, fundMovePct: 2, fundOpinionPct: 5, cooldownMs: 12 * 3600_000 }
 
 export class ReminderStore {
   private data: ReminderFile = { version: 1, updatedAt: new Date(0).toISOString(), items: [] }
@@ -187,21 +191,24 @@ export async function scanReminders(
       const q = r.data as { price?: number; changePercent?: number; name?: string }
       const pct = typeof q.changePercent === 'number' ? q.changePercent : undefined
       const name = t.name || q.name
-      if (typeof pct === 'number' && Math.abs(pct) >= opts.movePct) {
+      // 分资产阈值：基金净值日频且波动小，股票阈值（±5/±8）对基金几乎不触发。
+      const moveThreshold = t.type === 'fund' ? opts.fundMovePct : opts.movePct
+      const opinionThreshold = t.type === 'fund' ? opts.fundOpinionPct : opts.opinionPct
+      if (typeof pct === 'number' && Math.abs(pct) >= moveThreshold) {
         candidates.push({
           kind: 'move',
-          level: Math.abs(pct) >= opts.movePct * 2 ? 'warn' : 'info',
+          level: Math.abs(pct) >= moveThreshold * 2 ? 'warn' : 'info',
           code: t.code,
           name,
           type: t.type,
           pct,
           title: `${name || t.code} 今日${pct >= 0 ? '涨' : '跌'} ${Math.abs(pct).toFixed(2)}%`,
-          detail: `触发异动阈值 ±${opts.movePct}%：${name || t.code}（${t.code}）当前${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%。`,
+          detail: `触发异动阈值 ±${moveThreshold}%${t.type === 'fund' ? '（基金）' : ''}：${name || t.code}（${t.code}）当前${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%。`,
         })
       }
       // 观点复核：用当日涨跌做近似累计（K 线要额外请求，成本高；当日大幅波动已足够触发复核）。
       const op = opinionCodes.get(t.code)
-      if (op && typeof pct === 'number' && Math.abs(pct) >= opts.opinionPct) {
+      if (op && typeof pct === 'number' && Math.abs(pct) >= opinionThreshold) {
         candidates.push({
           kind: 'opinion',
           level: 'warn',
@@ -210,7 +217,7 @@ export async function scanReminders(
           type: t.type,
           pct,
           title: `${name || t.code}：观点需要复核`,
-          detail: `你在 ${op.at.slice(0, 10)} 记录的观点「${op.opinion.slice(0, 60)}」，标的今日${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%（超过 ±${opts.opinionPct}%），建议复核结论是否仍成立。`,
+          detail: `你在 ${op.at.slice(0, 10)} 记录的观点「${op.opinion.slice(0, 60)}」，标的今日${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%（超过 ±${opinionThreshold}%${t.type === 'fund' ? '（基金）' : ''}），建议复核结论是否仍成立。`,
         })
       }
     } catch { /* 单个标的不通不影响整体 */ }

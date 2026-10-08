@@ -86,6 +86,16 @@ export function marketCode(symbol: string): 0 | 1 {
   return symbol.startsWith('6') ? 1 : 0
 }
 
+/**
+ * 东财 secid 的市场位：显式 sh/sz 前缀优先于首字符启发式。
+ * `sh000300`（沪深300指数）首字符是 0，按启发式会错拼成深市 0.000300，指数必须 1.000300。
+ */
+export function emSecMarket(symbol: string): 0 | 1 {
+  const m = /^(sh|sz)/i.exec(String(symbol).trim())
+  if (m) return m[1]!.toLowerCase() === 'sh' ? 1 : 0
+  return marketCode(normalizeCode(symbol))
+}
+
 export function normalizeCode(code: string): string {
   return String(code).trim().replace(/\.(SH|SZ|BJ)$/i, '').padStart(6, '0').slice(-6)
 }

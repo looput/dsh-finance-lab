@@ -14,11 +14,11 @@ import type { Logger } from '../log.js'
  *   「标的 → 观点」的图上，而不是一堆散落文件。
  * - **落工作区**：正文以 Markdown 落盘（`<vault>/<年>/<id>-<slug>.md`），
  *   宿主的文件技能可以直接读写/检索这些文件；`index.json` 只是可重建的索引。
- * - **可扩展**：kind 为开放枚举（report/filing/note/news/other），
+ * - **可扩展**：kind 为开放枚举（report/filing/note/news/decision/learn/review/other），
  *   tags 自由，status 走 inbox → active → archived 的归档流。
  */
 
-export type ResearchKind = 'report' | 'filing' | 'note' | 'news' | 'other'
+export type ResearchKind = 'report' | 'filing' | 'note' | 'news' | 'decision' | 'learn' | 'review' | 'other'
 export type ResearchStatus = 'inbox' | 'active' | 'archived'
 /**
  * 资料是从哪条链路进库的：
@@ -34,7 +34,7 @@ export const ORIGIN_LABEL: Record<ResearchOrigin, string> = {
   file: '文件',
 }
 
-export const RESEARCH_KINDS: ResearchKind[] = ['report', 'filing', 'note', 'news', 'other']
+export const RESEARCH_KINDS: ResearchKind[] = ['report', 'filing', 'note', 'news', 'decision', 'learn', 'review', 'other']
 export const RESEARCH_STATUSES: ResearchStatus[] = ['inbox', 'active', 'archived']
 
 export const KIND_LABEL: Record<ResearchKind, string> = {
@@ -42,6 +42,9 @@ export const KIND_LABEL: Record<ResearchKind, string> = {
   filing: '财报',
   note: '观点',
   news: '资讯',
+  decision: '决策日记',
+  learn: '学习笔记',
+  review: '复盘',
   other: '其他',
 }
 

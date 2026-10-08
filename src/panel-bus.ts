@@ -21,6 +21,10 @@ export interface PanelCommand {
   kind?: HistoryKind
   /** Also open the AI position-analysis view for the code. */
   openAnalysis?: boolean
+  /** 页内锚点（切到 tab 后滚动/聚焦到某区块）：home=overview|growth|journal|reviews|approvals，holdings=lookthrough。 */
+  anchor?: string
+  /** 面板顶部展示的一句话（Agent 解释这次导航的意图，≤120 字）。 */
+  note?: string
   /** Dedupe id + TTL stamped by the bus. Replayed/stale commands are ignored. */
   commandId?: string
   issuedAt?: string
@@ -53,6 +57,11 @@ export type BusEvent =
   | { kind: 'skills' }
   | { kind: 'mcp' }
   | { kind: 'reminder'; count: number; at: string }
+  /** 成长档案变更（Agent 在对话里判分/写规划/记复盘 → 面板即时回执刷新）。 */
+  | { kind: 'growth'; action: 'profile' | 'plan' | 'quiz' | 'review'; at: string }
+  | { kind: 'follow'; action: 'target' | 'snapshot' | 'job' | 'brief' | 'shadow'; targetId?: string; at: string }
+  /** Agent 活动指示：工具开始/结束（面板显示「Agent 正在做什么」）。 */
+  | { kind: 'agent'; phase: 'start' | 'done'; tool: string; at: string }
   | { kind: 'panel'; command: PanelCommand }
 
 /** Navigation commands stay actionable for this long (replays after that are ignored). */

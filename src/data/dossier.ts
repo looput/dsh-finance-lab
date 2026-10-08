@@ -229,12 +229,12 @@ export function dossierSnapshotId(d: { code: string; type: AssetType; sections: 
 }
 
 /** 面板/工具用：把档案压成一段可读摘要（喂给模型或展示概览）。 */
-export function dossierSummary(d: StockDossier): string {
+export function dossierSummary(d: StockDossier, noun = '个股深度档案'): string {
   const ok = d.sections.filter((s) => s.ok && s.rows > 0)
   const lines = ok.map((s) => `- ${s.label}：${s.rows} 条（${s.provider ?? '—'}，${s.ms}ms）`)
   const failed = d.sections.filter((s) => !s.ok)
   return [
-    `${d.code} 个股深度档案：${d.ready}/${d.total} 个维度有数据，用时 ${d.elapsedMs}ms`,
+    `${d.code} ${noun}：${d.ready}/${d.total} 个维度有数据，用时 ${d.elapsedMs}ms`,
     ...lines,
     ...(failed.length ? ['- 暂不可用：' + failed.map((s) => `${s.label}（${s.error ?? '无数据'}）`).join('、')] : []),
   ].join('\n')

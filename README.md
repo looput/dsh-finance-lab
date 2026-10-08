@@ -16,6 +16,17 @@ DSH Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 
 **安全变更：** API默认仅本机访问。远程部署需认证代理、受保护的后端端口及 `DSH_FINANCE_TRUSTED_ORIGIN` 配置；不能将Origin检查当作登录鉴权。详见[实现范围、指标定义与验收边界](docs/personal-home-mvp.md)。以下旧功能说明中的直接写入和跨币种模拟，以此处新约束为准。
 
+## 成长（规划·学习·复盘）
+
+Agent 驱动的成长闭环：不设课程目录、不设打卡关卡——学什么、什么时候学、先修什么，全部由诊断引擎从你自己的数据里得出，再由 Agent 在对话里执行。
+
+- **规划先于投资**：家庭财务健康度（应急金/储蓄率/负债收入比/保障/目标可行性）输出排序后的修复项，未完成规划不讲选股课；`family_plan_update` 由 Agent 对话式访谈逐项写入（一次一题、先说明用途），敏感数据仅保存在本机 `data/growth.json`。
+- **证据 → 诊断 → 对话**：`growth_diagnose` 基于本地持仓、观点指标、复盘覆盖率与决策日记，输出带证据的缺口清单（≤8 条、按优先级）；面板首页「成长」区只读展示四柱评分、连续周与 Agent 诊断出的下一步卡片，点击即回到对话执行。
+- **微课一次一节**：内置 6 大轨道 23 节要点式教材（`lesson_get` 取材，3 要点 + 1 检验题），`lesson_complete` 判分 ≥80 记 mastered；讲完回到投资主线，绝不打断。
+- **过程型激励**：只统计遵循计划、复盘覆盖、证伪条件等过程指标——不评价收益、不鼓励交易、不承诺回报。四柱评分（认知/规划/纪律/资产）与等级仅作 Agent 记忆，驱动每月成长复盘（产出正文落资料库 kind=review 后 `growth_review_mark` 记连续周）。
+
+回归覆盖见 `npm run test:offline` 批次19（教材完整性、判分边界、健康度阈值、等级边界、诊断规则与档案存储）。
+
 ## 你可以用它做什么
 
 - **跨市场看行情**：A 股、港股、美股和公募基金的报价、K 线、列表与代码解析。
@@ -23,7 +34,9 @@ DSH Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 - **从数据到判断**：本地计算 MA、MACD、RSI、KDJ；查询财务指标、市场指数和行业板块。
 - **跟踪市场叙事**：读取中国 CPI/PPI/PMI/GDP/M2、市场电报、个股新闻，并通过 DuckDuckGo 免费搜索网页。
 - **读券商研报**：经 WeStock CLI（腾讯自选股，免鉴权）拉取个股研报列表与正文（机构、评级、时间）。
-- **沉淀投研过程**：研报、财报、资讯与个人观点统一进「投研资料库」，必带来源与时间、可关联标的与观点，支持持续收集、追加批注与归档。
+- **沉淀投研过程**：研报、财报、资讯与个人观点统一进「投研资料库」，必带来源与时间、可关联标的与观点，支持持续收集、追加批注与归档；决策日记、学习笔记与月度复盘也可按 `decision`/`learn`/`review` 类型入库。
+- **让 Agent 规划你的成长**：新手教学、家庭财务体检、每月成长复盘都由 Agent 从证据诊断后在对话里推进——`growth_state`/`growth_diagnose`/`lesson_get`/`lesson_complete`/`family_plan_*`/`growth_review_mark` 七个工具支撑。
+- **让 Agent 替你盯披露**：跟踪机构 13F（SEC EDGAR 官方）、美国国会申报（Bargo 免费档 + Disclosed Capitol 备用）、A 股名私募十大流通股东——`follow_*` 八个工具完成建档、拉取、两期 diff、与我对比、纸面复刻与简报；新披露由 6 小时一次的后台检查按披露主键去重入队，解读仍在会话里做。
 - **资料与本地文件双向联动**：正文是工作区里的 Markdown（`<vault>/<年>/<id>-<slug>.md`），目录被实时监听——在编辑器/文件工具里新建或改动文件会自动回灌索引，面板里改正文也会写回同一个文件。
 - **对话 ↔ 面板打通**：对话里收集/产出的资料自动落库并实时出现在「资料」页（顶部回执 + 标「对话」来源）；资料详情的「问 Agent」「让 Agent 整理」会把上下文拼成提问直接发进当前会话，Agent 再用 `add_research_note` / `update_research` 回写资料库，形成「对话收集 → 资料沉淀 → 面板维护 → 继续追问」闭环。
 - **管理自己的组合**：维护持仓和自选股，计算市值、盈亏、资产类型/市场分布，以及 top1、top3 和 HHI 集中度。
@@ -40,13 +53,13 @@ DSH Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 | 面板宽度 | 默认 480px，左边缘可拖动（360–820），自动记忆 |
 | 行情 | 指数、自选股走势、迷你 K 线和实时刷新 |
 | 市场 | 领涨/领跌行业板块，快速定位当日风险 |
-| 持仓 | 持仓盈亏、组合市值、股票/基金配置和集中度 |
-| 基金 | 开放式基金排行、净值和加入自选 |
+| 持仓 | 持仓盈亏、组合市值、股票/基金配置和集中度；穿透体检（基金重仓展开成真实个股暴露，HHI/有效个股/重复暴露排行，伪分散一目了然） |
+| 基金 | 开放式基金排行（近1月/3月/6月/1年/3年/今年来周期排序）、净值与净值日期（T+1 标注）和加入自选 |
 | K线 | 本地历史库日 K 线，财报/分红/自定义事件标记 |
 | 宏观 | CPI、PPI、PMI、GDP、货币供应量及趋势 |
 | 快讯 | 全球财经电报，以及按持仓/自选筛选的个股新闻 |
 | 资料 | 投研资料库：按时间/标的分组浏览，按类型/状态/标的/关键词检索；详情为「元数据 + 正文」双栏，可编辑正文并写回本地文件、追加带时间戳的观点、归档；顶部显示本地目录与监听状态，可一键同步 |
-| 深度 | 个股深度档案：一致预期/评分/ESG/机构评级/资金流向/融资融券/龙虎榜/股东/分红回购/风险事件/公告/产业链，一次并发取回 |
+| 深度 | 个股深度档案：一致预期/评分/ESG/机构评级/资金流向/融资融券/龙虎榜/股东/分红回购/风险事件/公告/产业链，一次并发取回；基金深度档案（面板可切换个股/基金）：基金经理/资产配置/规模申赎/同类排名/重仓持仓/本地风险指标/基准对比 |
 | 发现 | 市场情绪与注意力：涨跌分布、热搜股票/热门板块、机构龙虎榜（WeStock） |
 | 数据源 | 按 capability 选择 provider，选择顺序即调用优先级 |
 | 技能 | 本地 playbook 与盈米金融场景 skill 的启停管理 |
@@ -61,8 +74,10 @@ DSH Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 
 面板与模型之间是双向实时的：
 
-- **面板 → 对话**：点击持仓/自选触发解读时，面板把任务注入当前 Harness 会话。
-- **对话 → 面板**：工具对持仓、自选、解读缓存、数据源策略、技能开关的修改，经服务端事件总线（`GET api/events`，SSE）即时推送到面板，无需等待轮询；模型还可以调用 `panel_navigate` 把面板切到指定标签页、聚焦某只股票的 K 线，或直接打开 AI 解读。
+- **面板 → 对话**：点击持仓/自选触发解读时，面板把任务注入当前 Harness 会话；首页各卡片的「交给对话执行 / 在对话中复盘」把带证据的指令直接发进对话（投递失败会明示并回退剪贴板）。
+- **面板 → Agent 上下文**：面板把用户当前所看（标签页 + 聚焦代码）实时上报（`POST api/panel-focus`，内存态），模型用 `panel_state` 读取——回答「我该看哪」或引导导航前先对齐用户实际视图。
+- **对话 → 面板**：工具对持仓、自选、解读缓存、数据源策略、技能开关、成长档案的修改，经服务端事件总线（`GET api/events`，SSE）即时推送到面板，无需等待轮询；`panel_navigate` 支持 `note`（面板顶部一句话解释这次导航）与 `anchor`（页内锚点：首页 growth/journal/reviews/approvals、持仓 lookthrough 滚动到位）。
+- **Agent 活动可见**：每次工具调用的开始/结束经总线推送，面板头部显示「Agent · 正在做什么」胶囊；Agent 改了成长档案/落了资料，对应分区即时刷新并给出回执（不在首页时由顶部回执承接，一键跳转）。
 - 60 秒轮询保留为兜底；SSE 断线时 EventSource 自动重连。
 
 ### What-if 再平衡模拟
@@ -81,7 +96,9 @@ DSH Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 | A 股 | `get_market_overview` · `get_financial_indicators` · `get_sector_board` | 指数、财务指标、行业板块 |
 | 港股 | `get_hk_quote` · `get_hk_kline` · `get_hk_list` | 港股报价、K 线和列表样本 |
 | 美股 | `get_us_quote` · `get_us_kline` | Yahoo 优先、东财兜底的报价与 K 线 |
-| 基金 | `get_fund_quote` · `get_fund_kline` · `get_fund_rank` | 净值、历史走势和分类排行 |
+| 基金 | `get_fund_quote` · `get_fund_kline` · `get_fund_rank` · `get_fund_holdings` | 净值（含净值日期/T+1 说明）、历史走势、周期排序与分页的分类排行、重仓持仓 |
+| 基金研究 | `fund_dossier` · `calculate_fund_metrics` · `compare_funds` · `analyze_fund_overlap` | 基金深度档案（经理/规模申赎/同类排名/重仓/风险/基准对比）、收益与风险指标（年化/波动/回撤/夏普/卡玛 + 超额/Beta/相关/跟踪误差）、多基金相关性、持仓重叠穿透 |
+| ETF | `get_etf_overview` · `get_etf_nav` · `get_etf_holdings` | 场内 ETF 折溢价与规模、净值历史、重仓持仓（WeStock 能力） |
 | 通用 | `search_symbol` · `get_stock_info` | 跨市场代码解析、个股档案与市值 |
 | 研究 | `calculate_technical_indicators` · `get_macro_china` | MA/MACD/RSI/KDJ 与中国宏观序列 |
 | 新闻 | `get_market_news` · `get_stock_news` · `web_search` | 市场快讯、个股新闻、免费网页搜索 |
@@ -93,8 +110,11 @@ DSH Finance 是一个面向 DeepSeek Harness 的金融插件：它把 A 股、�
 | 市场/选股 | `get_market_breadth` · `get_hot_rank` · `screen_stocks` · `get_minute_data` | 涨跌分布、热搜榜、智能选股（排行/条件/策略/标签/事件）、分时 |
 | 通用 | `westock_capabilities` · `westock_call` | 列出 55 个 WeStock 能力；按 capability 或直接给 CLI argv 调用（只读白名单） |
 | 组合 | `get_portfolio` · `analyze_portfolio` · `upsert_holding` · `import_holdings` · `remove_holding` · `save_position_analysis` | 持仓 CRUD、批量导入、盈亏、风险分析和解读缓存 |
+| 穿透 | `portfolio_lookthrough` · `check_new_position` | 全组合穿透体检（HHI/有效个股/重复暴露排行，伪分散检测）；买入前边际检查（前后对比 + 重叠明细，回答「是分散还是同一个赌注」） |
 | 模拟 | `simulate_rebalance` | What-if 再平衡推演（交易列表或目标权重），前后权重/HHI/分币种对比 |
-| 面板 | `panel_navigate` | 对话中把金融面板切到指定标签页、聚焦代码或打开 AI 解读 |
+| 成长 | `growth_state` · `growth_diagnose` · `lesson_get` · `lesson_complete` · `family_plan_get` · `family_plan_update` · `growth_review_mark` | 证据驱动的成长闭环：状态装载、带证据的缺口清单、微课取材与判分、家庭财务规划读写（全本地）、月度复盘标记 |
+| 面板 | `panel_navigate` · `panel_state` | 对话中把金融面板切到指定标签页、聚焦代码或打开 AI 解读（note 一句话解释 + anchor 页内锚点滚动，含追踪页 targets/jobs/briefs/shadow）；读取用户当前所看的焦点视图 |
+| 追踪 | `follow_list` · `follow_add` · `follow_remove` · `follow_fetch` · `follow_diff` · `follow_vs_holdings` · `follow_replicate` · `follow_note` | 本地追踪档案：名字解析建档（EDGAR CIK / 国会成员 slug / 受控别名）、拉取最新披露并生成两期 diff、与我的持仓对比（未映射如实计数）、纸面复刻（纯模拟）、简报落库与资料库同步 |
 | 自选 | `add_watchlist` · `remove_watchlist` · `get_portfolio_file` | 自选股/基金和本地文件管理 |
 | 运维 | `probe_finance_sources` | 串行探测端点并生成 provider 降级顺序 |
 
@@ -321,3 +341,17 @@ npm run westock -- quote sh600519                 # 等价写法
 - 超时用 `WESTOCK_TIMEOUT_MS` 控制（默认 20000）。
 - Agent 侧不需要 shell：用工具 `westock_call`（传 `argv` 或 `capability+args`）即可，同样是只读白名单。
 
+
+## 追踪（机构 13F / 国会申报 / A 股名私募）
+
+对话里的「盯住巴菲特 / 跟着议员买 / 看看冯柳买了什么」由 Agent 用 `follow_*` 系列工具推进；面板新增 **追踪** 页（`tab=follow`，只读展示 + 任务卡投递回对话），数据全存本机 `data/follow.json`（原子写、损坏拒绝覆盖）。
+
+- **数据源**：
+  - 机构持仓 → SEC EDGAR 官方（免费，带合规 UA）：`submissions/CIK*.json` 找 13F-HR/13D/13G → information table XML 解析（容忍 `ns1:` 前缀与 putCall 期权行）→ `company_tickers.json` 发行人名→代码唯一映射（歧义留空）；13D/13G 从同一 submissions 里发现（举牌信号）。名字→CIK 走 EDGAR company search（atom），多候选时让 Agent 带 CIK 重试——**没有固定名人表**。
+  - 国会申报 → Bargo 免费档（keyless 30 req/日、100 行/日、滚动 3 个月窗口）为主，失败自动试 Disclosed Capitol 备用源（需 `DISCLOSED_CAPITOL_API_KEY`，未配置则明确报不可用）；金额按申报区间展示，不做精确化。
+  - A 股名私募 → `get_shareholder` 十大流通股东扫描 + **受控别名表**（冯柳→邻山1号 等公共子串；人物与产品户名非一一对应，命中需人工确认）。
+- **新鲜度徽标**（按最近披露日计算）：`fresh` / `normal` / `stale` / `none`；阈值 = 披露周期 + 合理延迟（国会 45 天、13F 与名私募 130 天）。所有工具返回都强制携带延迟与覆盖边界（13F ≈45 天、Stock Act 30–45 天、季报股东 1.5–4 个月），解读必须引用具体数字与披露日期。
+- **新披露发现**：6 小时一次的后台 tick 只查提交列表（克制请求），按「对象+组+披露主键」幂等入队（`jobs`，只读状态卡，click 投递回会话触发解读，不自动刷屏、不自动聊天）；`follow_fetch` 拉到新期才记快照，重复拉取幂等。
+- **纸面复刻**：按最新 13F 市值等比分配本金（≤50 仓），入场价取披露日附近日K（取不到留空不编数），现价一次批量报价；收益只对已定价部分计算并标注缺价行；`stop` 归档。不触达真实账户，不构成投资建议。
+- **联动**：档案变更经总线 `kind=follow`（target/snapshot/job/brief/shadow）→ 面板追踪页即时刷新 + 顶部回执；`panel_navigate(tab=follow, anchor=targets|jobs|briefs|shadow)` 页内定位；成功拉取/解读给成长区记一次活动痕迹（`markActivity`，无回执）。
+- **验证**：`scripts/test_offline.ts` 批次21（604 项断言，含 8 工具端到端 + `GET /follow` 路由）。
