@@ -708,8 +708,20 @@ function ensureBusSource(): void {
 // （输入面板）。做法是找到当前会话的作用域，取其输入面板 setDraft + submit，
 // 等价于用户在输入框里粘贴后回车；拿不到服务时退回复制到剪贴板。
 type SessionInputFace = { setDraft: (text: string) => void; submit: () => void; state?: { getSnapshot: () => { draft: string; phase: string; attachmentIds: readonly string[] } } }
+/** 宿主会话列表行（dsh-api-session-controller 投影：标题/时间/状态全在 byId 里）。 */
+type SessionRow = {
+  id: string
+  displayTitle?: string
+  title?: string
+  running?: boolean
+  blank?: boolean
+  /** epoch ms（宿主 relativeTime 同口径）。 */
+  updatedAt?: number
+  origin?: string
+  cwd?: string
+}
 type SessionsFace = {
-  list: { getSnapshot: () => { ids?: string[] } }
+  list: { getSnapshot: () => { ids?: string[]; byId?: Record<string, SessionRow>; phase?: string } }
   scope: (id: string) => unknown | undefined
 }
 type ConversationFace = {
@@ -726,22 +738,192 @@ let selectedPanelSession = ''
 function currentSessionId(sessions: SessionsFace): string | undefined {
   return selectedPanelSession && sessions.scope(selectedPanelSession) ? selectedPanelSession : undefined
 }
+
+// ---- 任务会话元数据（绑定持久化 + 投递记录，只存本机 localStorage，不出机器） ----
+const SESSION_TARGET_KEY = 'dsh-finance.session-target'
+const SESSION_DELIVERY_KEY = 'dsh-finance.session-delivery'
+type DeliveryMeta = Record<string, { lastAt: number; count: number }>
+function readLocalJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch { return fallback }
+}
+function writeLocalJson(key: string, value: unknown): void {
+  try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* 隐私模式等：静默降级 */ }
+}
+/** 成功投递后记一笔（会话行展示「已投递 N 次 · 上次时间」，帮助区分同名会话）。 */
+function noteSessionDelivery(id: string): void {
+  if (!id) return
+  const meta = readLocalJson<DeliveryMeta>(SESSION_DELIVERY_KEY, {})
+  meta[id] = { lastAt: Date.now(), count: (meta[id]?.count ?? 0) + 1 }
+  writeLocalJson(SESSION_DELIVERY_KEY, meta)
+}
+function sessionRelTime(ms?: number): string {
+  if (!ms || ms <= 0) return ''
+  const d = Date.now() - ms
+  if (d < 60_000) return '刚刚'
+  if (d < 3_600_000) return `${Math.floor(d / 60_000)} 分钟前`
+  if (d < 86_400_000) return `${Math.floor(d / 3_600_000)} 小时前`
+  if (d < 30 * 86_400_000) return `${Math.floor(d / 86_400_000)} 天前`
+  return new Date(ms).toLocaleDateString()
+}
+/** 按本地日历日归类：今天 / 昨天 / 近 7 天 / 更早（无时间戳归「更早」）。 */
+function sessionBucket(ms?: number): 'today' | 'yesterday' | 'week' | 'old' {
+  if (!ms || ms <= 0) return 'old'
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  const t0 = start.getTime()
+  if (ms >= t0) return 'today'
+  if (ms >= t0 - 86_400_000) return 'yesterday'
+  if (ms >= t0 - 7 * 86_400_000) return 'week'
+  return 'old'
+}
+function shortSessionId(id: string): string {
+  return id.length > 12 ? `…${id.slice(-8)}` : id
+}
+function sessionBaseName(p?: string): string {
+  if (!p) return ''
+  const parts = p.split(/[\\/]/).filter(Boolean)
+  return parts[parts.length - 1] ?? ''
+}
+
+/**
+ * 任务会话选择器（重设计）：裸 id 下拉在多会话后完全不可区分 —— 改为
+ * 标题化行（宿主 displayTitle）+ 按时间归类分组 + 搜索 + 运行状态点 +
+ * 本机投递记录徽标；绑定选择跨刷新持久化。子代理单列在末组（辅助会话）。
+ */
 function SessionPicker() {
-  const [selected, setSelected] = useState(selectedPanelSession)
-  const [ids, setIds] = useState<string[]>([])
+  const [selected, setSelected] = useState(() => {
+    try {
+      const saved = localStorage.getItem(SESSION_TARGET_KEY)
+      if (saved) { selectedPanelSession = saved; return saved }
+    } catch { /* */ }
+    return selectedPanelSession
+  })
+  const [rows, setRows] = useState<SessionRow[]>([])
+  const [pending, setPending] = useState(true)
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+  const [meta, setMeta] = useState<DeliveryMeta>(() => readLocalJson<DeliveryMeta>(SESSION_DELIVERY_KEY, {}))
+  const rootRef = useRef<HTMLDivElement | null>(null)
+
+  // 2s 轮询宿主快照；内容没变不 setState（避免无谓重渲染）。
   useEffect(() => {
+    let prevKey = ''
+    let prevMetaKey = ''
     const refresh = () => {
-      const ids = panelCtx?.sessions?.list.getSnapshot().ids ?? []
-      setIds(ids)
-      if (selectedPanelSession && !ids.includes(selectedPanelSession)) { selectedPanelSession = ''; setSelected('') }
+      const snap = panelCtx?.sessions?.list.getSnapshot()
+      const ids = snap?.ids ?? []
+      const byId = snap?.byId ?? {}
+      const next: SessionRow[] = ids.map((id) => {
+        const r = byId[id]
+        return r
+          ? { id, displayTitle: r.displayTitle, title: r.title, running: r.running, blank: r.blank, updatedAt: r.updatedAt, origin: r.origin, cwd: r.cwd }
+          : { id }
+      })
+      const key = next.map((r) => `${r.id}|${r.displayTitle ?? ''}|${r.updatedAt ?? 0}|${r.running ? 1 : 0}`).join(';')
+      if (key !== prevKey) { prevKey = key; setRows(next); setPending(snap?.phase === 'pending') }
+      // 列表就绪后才校验绑定（pending 空列表不能误清持久化的选择）
+      if (selectedPanelSession && ids.length > 0 && !ids.includes(selectedPanelSession)) {
+        selectedPanelSession = ''
+        setSelected('')
+        try { localStorage.removeItem(SESSION_TARGET_KEY) } catch { /* */ }
+      }
+      const m = readLocalJson<DeliveryMeta>(SESSION_DELIVERY_KEY, {})
+      const mk = JSON.stringify(m)
+      if (mk !== prevMetaKey) { prevMetaKey = mk; setMeta(m) }
     }
-    refresh(); const timer = window.setInterval(refresh, 2000); return () => window.clearInterval(timer)
+    refresh()
+    const timer = window.setInterval(refresh, 2000)
+    return () => window.clearInterval(timer)
   }, [])
-  return h('label', { style: { display: 'flex', alignItems: 'center', gap: 9, padding: '8px 14px', fontSize: 11, color: V('--dsw-alias-label-secondary', '#667085'), background: R.canvas, borderBottom: `1px solid ${R.line}` } },
+
+  // 弹层：点外部 / Esc 关闭。
+  useEffect(() => {
+    if (!open) return
+    const onDown = (ev: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(ev.target as Node)) setOpen(false)
+    }
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
+  }, [open])
+
+  const query = q.trim().toLowerCase()
+  const filtered = rows.filter((r) => {
+    if (!query) return true
+    return [r.displayTitle, r.title, r.id, r.cwd].filter(Boolean).join(' ').toLowerCase().includes(query)
+  })
+  const byTimeDesc = (a: SessionRow, b: SessionRow) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || a.id.localeCompare(b.id)
+  const mains = filtered.filter((r) => r.origin !== 'subagent')
+  const subagents = filtered.filter((r) => r.origin === 'subagent').sort(byTimeDesc)
+  const groups: Array<{ label: string; items: SessionRow[] }> = []
+  for (const [label, bucket] of [['今天', 'today'], ['昨天', 'yesterday'], ['近 7 天', 'week'], ['更早', 'old']] as const) {
+    const items = mains.filter((r) => sessionBucket(r.updatedAt) === bucket).sort(byTimeDesc)
+    if (items.length) groups.push({ label, items })
+  }
+  if (subagents.length) groups.push({ label: '子代理（辅助会话）', items: subagents })
+
+  const selectedRow = rows.find((r) => r.id === selected)
+  const selectedLabel = selected ? (selectedRow?.displayTitle || selectedRow?.title || shortSessionId(selected)) : '选择目标会话'
+  const dot = (on: boolean) => h('span', { style: { width: 7, height: 7, borderRadius: 999, flex: 'none', background: on ? '#16a34a' : 'transparent', border: on ? 'none' : '1px solid #98a2b3' } })
+  const rowStyle: CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '6px 8px',
+    border: 'none', background: 'transparent', borderRadius: 6, cursor: 'pointer', fontSize: 12, color: 'inherit',
+  }
+  const bind = (id: string) => {
+    selectedPanelSession = id
+    setSelected(id)
+    if (id) writeLocalJson(SESSION_TARGET_KEY, id)
+    else { try { localStorage.removeItem(SESSION_TARGET_KEY) } catch { /* */ } }
+    setOpen(false)
+    setQ('')
+  }
+
+  return h('div', { ref: rootRef, style: { display: 'flex', alignItems: 'center', gap: 9, padding: '8px 14px', position: 'relative', fontSize: 11, color: V('--dsw-alias-label-secondary', '#667085'), background: R.canvas, borderBottom: `1px solid ${R.line}` } },
     h('span', { style: { whiteSpace: 'nowrap', fontWeight: 700 } }, '↗ 任务会话'),
-    h('select', { style: { ...S.input, flex: 1, minWidth: 0, maxWidth: 280 }, value: selected, onChange: (e: any) => { selectedPanelSession = e.target.value; setSelected(e.target.value) } },
-      h('option', { value: '' }, '请选择目标会话'), ...ids.map(id => h('option', { key: id, value: id }, id))),
-    h('span', { style: { whiteSpace: 'nowrap' } }, selected ? '投递前请核对' : '未绑定'))
+    h('button', {
+      type: 'button', 'aria-expanded': open, title: selected ? `投递目标：${selectedLabel}` : '选择投递目标会话',
+      onClick: () => { setQ(''); setOpen((o) => !o) },
+      style: { display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0, maxWidth: 320, ...S.input, cursor: 'pointer', textAlign: 'left' },
+    },
+      dot(!!selectedRow?.running),
+      h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+        selectedLabel + (selected && !selectedRow ? '（待同步）' : '')),
+      selectedRow ? h('span', { style: { fontSize: 10, color: '#98a2b3', flex: 'none', whiteSpace: 'nowrap' } }, sessionRelTime(selectedRow.updatedAt)) : null,
+      h('span', { style: { fontSize: 9, flex: 'none', color: '#98a2b3' } }, open ? '▲' : '▼')),
+    h('span', { style: { whiteSpace: 'nowrap' } }, selected ? '投递前请核对' : '未绑定'),
+    open ? h('div', { style: { position: 'absolute', top: '100%', left: 14, right: 14, zIndex: 70, marginTop: 2, background: R.canvas, border: `1px solid ${R.line}`, borderRadius: 10, boxShadow: '0 12px 32px rgba(16,24,40,.14)', overflow: 'hidden', color: V('--dsw-alias-text', '#344054') } },
+      h('input', {
+        value: q, onChange: (e: any) => setQ(e.target.value), placeholder: '按标题 / ID / 目录搜索…', autoFocus: true,
+        style: { ...S.input, margin: 8, width: 'calc(100% - 16px)', boxSizing: 'border-box' },
+      }),
+      h('div', { style: { maxHeight: 300, overflowY: 'auto', padding: '0 6px 6px' } },
+        pending && !rows.length ? h('div', { style: { padding: 10, fontSize: 11, color: '#98a2b3' } }, '会话列表加载中…') : null,
+        !pending && !filtered.length ? h('div', { style: { padding: 10, fontSize: 11, color: '#98a2b3' } }, rows.length ? '没有匹配的会话' : '暂无会话') : null,
+        rows.length ? h('button', { type: 'button', onClick: () => bind(''), style: rowStyle },
+          dot(false),
+          h('span', { style: { flex: 1, textAlign: 'left', color: '#667085' } }, '不绑定（投递时复制到剪贴板）')) : null,
+        groups.map((g) => h('div', { key: g.label },
+          h('div', { style: { fontSize: 10, fontWeight: 700, color: '#98a2b3', padding: '8px 8px 3px', letterSpacing: 0.4 } }, `${g.label} · ${g.items.length}`),
+          g.items.map((r) => h('button', {
+            key: r.id, type: 'button', title: r.id,
+            onClick: () => bind(r.id),
+            style: { ...rowStyle, background: r.id === selected ? BRAND_SOFT : undefined, fontWeight: r.id === selected ? 700 : 400 },
+          },
+            dot(!!r.running),
+            h('span', { style: { flex: 1, minWidth: 0 } },
+              h('span', { style: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 } },
+                r.displayTitle || r.title || shortSessionId(r.id)),
+              h('span', { style: { display: 'block', fontSize: 10, color: '#98a2b3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                [shortSessionId(r.id), r.cwd ? sessionBaseName(r.cwd) : '', r.blank ? '空白' : '', meta[r.id] ? `已投递 ${meta[r.id]!.count} 次` : ''].filter(Boolean).join(' · '))),
+            h('span', { style: { fontSize: 10, color: '#98a2b3', flex: 'none', whiteSpace: 'nowrap' } }, sessionRelTime(r.updatedAt)))))),
+      ),
+      h('div', { style: { fontSize: 10, color: '#98a2b3', padding: '6px 10px', borderTop: `1px solid ${R.line}` } },
+        `共 ${rows.length} 个会话 · 子代理单列在末尾 · 绑定与投递记录只存本机`))
+      : null)
 }
 
 /** 把一段 prompt 送进当前对话；返回实际投递方式，供 UI 提示。 */
@@ -758,6 +940,7 @@ async function deliverToChat(text: string): Promise<'sent' | 'copied' | 'failed'
       input.setDraft(text)
       input.submit()
       chatDeliveryError = ''
+      if (id) noteSessionDelivery(id)
       return 'sent'
     }
     if (!id) chatDeliveryError = '请先在金融面板明确选择目标会话；该会话必须处于打开状态'
