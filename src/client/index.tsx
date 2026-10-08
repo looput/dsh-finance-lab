@@ -742,6 +742,8 @@ function currentSessionId(sessions: SessionsFace): string | undefined {
 // ---- 任务会话元数据（绑定持久化 + 投递记录，只存本机 localStorage，不出机器） ----
 const SESSION_TARGET_KEY = 'dsh-finance.session-target'
 const SESSION_DELIVERY_KEY = 'dsh-finance.session-delivery'
+/** 分组折叠状态（组名 → 是否折叠），仅本机 localStorage。 */
+const SESSION_GROUPS_KEY = 'dsh-finance.session-groups'
 type DeliveryMeta = Record<string, { lastAt: number; count: number }>
 function readLocalJson<T>(key: string, fallback: T): T {
   try {
@@ -806,6 +808,7 @@ function SessionPicker() {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [meta, setMeta] = useState<DeliveryMeta>(() => readLocalJson<DeliveryMeta>(SESSION_DELIVERY_KEY, {}))
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => readLocalJson<Record<string, boolean>>(SESSION_GROUPS_KEY, {}))
   const rootRef = useRef<HTMLDivElement | null>(null)
 
   // 2s 轮询宿主快照；内容没变不 setState（避免无谓重渲染）。
@@ -865,6 +868,18 @@ function SessionPicker() {
     if (items.length) groups.push({ label, items })
   }
   if (subagents.length) groups.push({ label: '子代理（辅助会话）', items: subagents })
+  // 归类收纳：搜索命中时全部展开；用户折叠记录优先；首访默认仅展开最近一组（长列表折成目录头）。
+  const isCollapsed = (g: { label: string; items: SessionRow[] }): boolean => {
+    if (query) return false
+    const saved = collapsed[g.label]
+    if (saved !== undefined) return saved
+    return groups.length > 1 && g !== groups[0]
+  }
+  const toggleGroup = (g: { label: string; items: SessionRow[] }): void => {
+    const next = { ...collapsed, [g.label]: !isCollapsed(g) }
+    setCollapsed(next)
+    writeLocalJson(SESSION_GROUPS_KEY, next)
+  }
 
   const selectedRow = rows.find((r) => r.id === selected)
   const selectedLabel = selected ? (selectedRow?.displayTitle || selectedRow?.title || shortSessionId(selected)) : '选择目标会话'
@@ -907,8 +922,15 @@ function SessionPicker() {
           dot(false),
           h('span', { style: { flex: 1, textAlign: 'left', color: '#667085' } }, '不绑定（投递时复制到剪贴板）')) : null,
         groups.map((g) => h('div', { key: g.label },
-          h('div', { style: { fontSize: 10, fontWeight: 700, color: '#98a2b3', padding: '8px 8px 3px', letterSpacing: 0.4 } }, `${g.label} · ${g.items.length}`),
-          g.items.map((r) => h('button', {
+          h('button', {
+            type: 'button', onClick: () => toggleGroup(g),
+            title: isCollapsed(g) ? `展开「${g.label}」` : `折叠「${g.label}」`,
+            style: { display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '7px 8px 3px', border: 'none', background: R.canvas, cursor: 'pointer', fontSize: 10, fontWeight: 700, color: '#98a2b3', letterSpacing: 0.4, textAlign: 'left', position: 'sticky', top: 0, zIndex: 1 },
+          },
+            h('span', { style: { fontSize: 9, flex: 'none' } }, isCollapsed(g) ? '▸' : '▾'),
+            h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${g.label} · ${g.items.length}${isCollapsed(g) ? '（已折叠，点击展开）' : ''}`),
+            g.items.some((r) => r.running) ? dot(true) : null),
+          isCollapsed(g) ? null : g.items.map((r) => h('button', {
             key: r.id, type: 'button', title: r.id,
             onClick: () => bind(r.id),
             style: { ...rowStyle, background: r.id === selected ? BRAND_SOFT : undefined, fontWeight: r.id === selected ? 700 : 400 },
@@ -922,7 +944,7 @@ function SessionPicker() {
             h('span', { style: { fontSize: 10, color: '#98a2b3', flex: 'none', whiteSpace: 'nowrap' } }, sessionRelTime(r.updatedAt)))))),
       ),
       h('div', { style: { fontSize: 10, color: '#98a2b3', padding: '6px 10px', borderTop: `1px solid ${R.line}` } },
-        `共 ${rows.length} 个会话 · 子代理单列在末尾 · 绑定与投递记录只存本机`))
+        `共 ${rows.length} 个会话 · 分组可折叠 · 子代理单列在末尾 · 绑定与投递记录只存本机`))
       : null)
 }
 
