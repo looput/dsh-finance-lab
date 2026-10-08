@@ -58,6 +58,7 @@ import { FollowStore, DEFAULT_FOLLOW_TARGETS } from '../src/follow-store.ts'
 import {
   parse13FInformationTable, parseEdgarSubmissions, latestFilingGroup, normalizeIssuerName,
   parseCompanyTickers, mapPositionsToTickers, parseAmountRange, parseCongressBargo, parseEdgarCompanyAtom,
+  fetchEdgarFilings, secUserAgent,
 } from '../src/data/follow-sources.ts'
 import { resolveAliases } from '../src/data/manager-aliases.ts'
 import { registerFollowTools, followHash, summarizeDiff } from '../src/tools/follow-tools.ts'
@@ -137,8 +138,13 @@ async function main() {
   const followFx = { bargoHits: 0 }
   // A truly offline suite: no external requests. Exercise the real HTTP parser
   // and provider fallback with a deterministic JSONP response.
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const url = new URL(String(input))
+    // SEC 公平访问：UA 不带联系方式 → 403（复现真实拦截，验证默认 UA 与修复指引）
+    if (url.hostname === 'www.sec.gov' || url.hostname === 'data.sec.gov') {
+      const ua = String((init?.headers as Record<string, string> | undefined)?.['User-Agent'] ?? '')
+      if (!ua.includes('@') && !ua.includes('github.com')) return new Response('Forbidden', { status: 403, statusText: 'Forbidden' })
+    }
     if (url.hostname === 'search-api-web.eastmoney.com') return new Response('x(' + JSON.stringify({ result: { cmsArticleWebOld: [{ title: '离线新闻', content: '摘要', url: 'https://example.com/news', date: '2026-09-27 09:00:00', mediaName: '测试来源' }] } }) + ')', { status: 200 })
     if (url.hostname === 'data.sec.gov' && url.pathname === '/submissions/CIK0001067983.json') return Response.json(FIX_SUBMISSIONS)
     if (url.hostname === 'www.sec.gov' && url.pathname === '/files/company_tickers.json') return Response.json(FIX_TICKERS)
@@ -1958,6 +1964,23 @@ esac
       let seedErr = ''
       try { await new FollowStore(seedBad).seedDefaults() } catch (e) { seedErr = e instanceof Error ? e.message : String(e) }
       check('默认对象：损坏档案拒绝播种', seedErr.includes('损坏'), seedErr)
+    }
+
+    // 批次23：SEC UA 合规（默认联系方式 / 环境变量覆盖 / 403 修复指引）
+    // ------------------------------------------------------------
+    {
+      check('SEC UA：默认含联系方式（仓库地址）', secUserAgent().includes('github.com/looput/dsh-finance-lab'), secUserAgent())
+      process.env.DSH_SEC_EDGAR_UA = 'Acme Research Bot v9 (https://acme.example/ops)'
+      eq('SEC UA：环境变量覆盖', secUserAgent(), 'Acme Research Bot v9 (https://acme.example/ops)')
+      delete process.env.DSH_SEC_EDGAR_UA
+      // 无联系方式的 UA → mock 按 SEC 真实策略 403 → 错误信息必须带可执行指引
+      process.env.DSH_SEC_EDGAR_UA = 'naked-bot/1.0'
+      let uaErr = ''
+      try { await fetchEdgarFilings('0001067983') } catch (e) { uaErr = e instanceof Error ? e.message : String(e) }
+      delete process.env.DSH_SEC_EDGAR_UA
+      check('SEC UA：403 带修复指引', /\b403\b/.test(uaErr) && uaErr.includes('DSH_SEC_EDGAR_UA'), uaErr)
+      const okFilings = await fetchEdgarFilings('0001067983')
+      check('SEC UA：默认 UA 恢复 200', okFilings.length >= 1, `filings=${okFilings.length}`)
     }
 
     console.log(`\n[offline] ${passed} passed, ${failed} failed`)

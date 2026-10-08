@@ -6,8 +6,30 @@
 import { httpGetJson, httpGetText } from './http.js'
 import type { FollowPosition, FollowTrade } from '../follow.js'
 
-const SEC_UA = { 'User-Agent': 'dsh-finance-lab/0.1 (local research plugin; honest data tooling)' }
 const T = { timeoutMs: 15_000 }
+
+/**
+ * SEC 公平访问策略：User-Agent 必须声明身份与联系方式，否则 403「未声明的自动化工具」。
+ * 默认带仓库地址作联系方式；部署者可用 DSH_SEC_EDGAR_UA 覆盖为含邮箱的 UA
+ * （SEC 官方格式：`AppName admin@example.com`）。
+ */
+export function secUserAgent(): string {
+  return process.env.DSH_SEC_EDGAR_UA?.trim() || 'dsh-finance-lab/0.2 (local research plugin; https://github.com/looput/dsh-finance-lab)'
+}
+const secHeaders = (): Record<string, string> => ({ 'User-Agent': secUserAgent() })
+
+/** SEC 请求统一出口：403 → 补一条可执行的修复指引（UA 联系方式 / 环境变量）。 */
+async function secHttp<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/\b403\b/.test(msg)) {
+      throw new Error(`${msg}；SEC 把请求当作未声明联系方式的自动化工具。默认 UA 已带仓库地址，若仍 403：设置 DSH_SEC_EDGAR_UA（官方格式 "AppName admin@example.com"）后重试`)
+    }
+    throw err
+  }
+}
 
 // ---------------------------------------------------------------- 13F 解析（纯）
 
@@ -220,7 +242,7 @@ export function parseEdgarCompanyAtom(xml: string): Array<{ cik: string; name: s
 /** SEC submissions（限速友好：单请求）。 */
 export async function fetchEdgarFilings(cik: string, signal?: AbortSignal): Promise<EdgarFiling[]> {
   const padded = cik.padStart(10, '0')
-  const json = await httpGetJson(`https://data.sec.gov/submissions/CIK${padded}.json`, {}, { ...T, headers: SEC_UA, signal })
+  const json = await secHttp(() => httpGetJson(`https://data.sec.gov/submissions/CIK${padded}.json`, {}, { ...T, headers: secHeaders(), signal }))
   return parseEdgarSubmissions(json)
 }
 
@@ -229,13 +251,13 @@ export async function fetch13FInfoTable(cik: string, filing: EdgarFiling, signal
   const padded = cik.padStart(10, '0')
   const accDash = filing.accession
   const accPlain = accDash.replace(/-/g, '')
-  const index = await httpGetJson<{ directory?: { item?: Array<{ name?: string; type?: string; last_modified?: string }> } }>(
-    `https://www.sec.gov/Archives/edgar/data/${Number(padded)}/${accPlain}/index.json`, {}, { ...T, headers: SEC_UA, signal })
+  const index = await secHttp(() => httpGetJson<{ directory?: { item?: Array<{ name?: string; type?: string; last_modified?: string }> } }>(
+    `https://www.sec.gov/Archives/edgar/data/${Number(padded)}/${accPlain}/index.json`, {}, { ...T, headers: secHeaders(), signal }))
   const items = (index.directory?.item ?? []).filter((x) => x.name && /\.xml$/i.test(x.name))
   if (!items.length) throw new Error(`13F ${accDash} 目录里没有 XML（可能为组合文件，需人工核对）`)
   // information table 的 XML 通常不含 primary_doc；优先非 primary，再退回第一个
   const pickItem = items.find((x) => !/primary/i.test(x.name ?? '')) ?? items[0]!
-  return httpGetText(`https://www.sec.gov/Archives/edgar/data/${Number(padded)}/${accPlain}/${pickItem.name}`, {}, { ...T, headers: SEC_UA, signal })
+  return secHttp(() => httpGetText(`https://www.sec.gov/Archives/edgar/data/${Number(padded)}/${accPlain}/${pickItem.name}`, {}, { ...T, headers: secHeaders(), signal }))
 }
 
 let tickerIndexCache: { at: number; index: TickerIndex } | undefined
@@ -243,7 +265,7 @@ let tickerIndexCache: { at: number; index: TickerIndex } | undefined
 export async function fetchCompanyTickers(signal?: AbortSignal): Promise<TickerIndex> {
   const now = Date.now()
   if (tickerIndexCache && now - tickerIndexCache.at < 24 * 3600_000) return tickerIndexCache.index
-  const json = await httpGetJson('https://www.sec.gov/files/company_tickers.json', {}, { ...T, headers: SEC_UA, signal })
+  const json = await secHttp(() => httpGetJson('https://www.sec.gov/files/company_tickers.json', {}, { ...T, headers: secHeaders(), signal }))
   const index = parseCompanyTickers(json)
   tickerIndexCache = { at: now, index }
   return index
@@ -256,11 +278,11 @@ export function __resetTickerIndexCache(): void {
 
 /** 名字 → CIK 候选（EDGAR company search，13F 类型过滤）。 */
 export async function resolveEdgarCik(name: string, signal?: AbortSignal): Promise<Array<{ cik: string; name: string }>> {
-  const xml = await httpGetText(
+  const xml = await secHttp(() => httpGetText(
     'https://www.sec.gov/cgi-bin/browse-edgar',
     { action: 'getcompany', company: name, type: '13F', dateb: '', owner: 'include', count: 10, output: 'atom' },
-    { ...T, headers: SEC_UA, signal },
-  )
+    { ...T, headers: secHeaders(), signal },
+  ))
   const rows = parseEdgarCompanyAtom(xml)
   if (!rows.length) throw new Error(`EDGAR 未找到「${name}」的 13F 管理人；请直接提供 CIK（如 1067983）`)
   return rows.slice(0, 5)
