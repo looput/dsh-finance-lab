@@ -24,7 +24,8 @@ import type { PersonalStore } from '../personal.js'
 import { StrategyConfirmationRequired, type StrategyLibrary } from '../strategy/library.js'
 import type { AssetType } from '../types.js'
 
-// 'kline' 为兼容别名（K线工作区已并入 quotes「行情」，导航时等价 quotes 并聚焦K线）。
+// 'kline'、'market' 为兼容别名（K线工作区与「市场」页均已并入 quotes「行情」，
+// 导航时等价 quotes；kline 另聚焦K线工作区，market 与 quotes 同页含板块热度）。
 const PANEL_TABS = ['home', 'quotes', 'market', 'holdings', 'funds', 'kline', 'macro', 'news', 'research', 'dossier', 'discover', 'sources', 'skills', 'health', 'follow'] as const
 
 function text(lines: string | string[]) {
@@ -998,7 +999,7 @@ export function registerTools(ctx: Context, finance: FinanceDataService, store: 
         type: 'string',
         required: true,
         enum: [...PANEL_TABS],
-        description: '目标标签页：home 首页 / quotes 行情（含K线工作区） / market 市场 / holdings 持仓 / funds 基金 / kline K线（兼容别名，等价 quotes 并聚焦K线） / macro 宏观 / news 快讯 / research 资料 / dossier 深度 / discover 发现 / follow 追踪 / sources 数据源 / skills 技能 / health 接口',
+        description: '目标标签页：home 首页 / quotes 行情（含K线工作区与领涨/领跌板块） / holdings 持仓 / funds 基金 / kline K线（兼容别名，等价 quotes 并聚焦K线） / market 市场（兼容别名，等价 quotes） / macro 宏观 / news 快讯 / research 资料 / dossier 深度 / discover 发现 / follow 追踪 / sources 数据源 / skills 技能 / health 接口',
       },
       code: { type: 'string', description: '可选，聚焦的代码（如 600519 / 00700 / AAPL / 110022）' },
       type: { type: 'string', enum: ['stock', 'fund'], description: '资产类型，默认 stock' },

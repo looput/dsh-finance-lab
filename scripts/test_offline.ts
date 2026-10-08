@@ -1645,6 +1645,8 @@ esac
       let navErr = ''
       try { await nav.execute!({ tab: 'not-a-tab' }) } catch (e) { navErr = e instanceof Error ? e.message : String(e) }
       check('联动：非法 tab 拒绝', navErr.includes('must be one of') || navErr.includes('valid'), navErr)
+      const navMarket = await nav.execute!({ tab: 'market' })
+      eq('联动：market 兼容别名仍可导航（等价行情页）', (navMarket as { ok: boolean; tab?: string }).ok, true)
       const st = toolDefs.find((t) => t.name === 'panel_state')
       check('联动：panel_state 已注册', !!st)
       setPanelFocus({ tab: 'home' })

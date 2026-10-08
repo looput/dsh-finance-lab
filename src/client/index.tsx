@@ -1207,6 +1207,7 @@ function QuotesView(props: {
           : h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无指数数据，点右上角刷新重试' }))
         : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))', gap: 6 } },
           data.indices.map((ix) => h(IndexCard, { key: ix.code, ix })))),
+    h(SectorsPanel, null),
     group('自选 · 行情走势', `${watchQuotes.length} 只`,
       watchQuotes.length === 0
         ? h(EmptyState, {
@@ -1570,7 +1571,7 @@ function FundsView(props: { active: boolean; mutate: (a: string, p: Record<strin
     h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源：东财基金排行（对照 AkShare fund_open_fund_rank_em）· 净值日期 T+1 更新'))
 }
 
-// ---- 市场 tab（股票侧：板块涨跌热度 → “今天风险在哪”）----
+// ---- 板块热度（原「市场」tab 已并入「行情」：领涨/领跌与指数总览同屏）----
 /** 板块行：上游字段名有 changePct（WeStock）与 changePercent（东财）两种，这里都兼容。 */
 interface Sector { code: string; name: string; price?: number; changePct?: number | string; changePercent?: number; mainNetInflow?: string; leader?: string }
 const sectorPct = (s: Sector): number | undefined => {
@@ -1578,64 +1579,58 @@ const sectorPct = (s: Sector): number | undefined => {
   const n = typeof raw === 'string' ? Number(raw) : raw
   return typeof n === 'number' && Number.isFinite(n) ? n : undefined
 }
-function MarketView(props: { active: boolean }) {
-  const [d, setD] = useState<{ indices: IndexQuote[]; gainers: Sector[]; losers: Sector[] }>({ indices: [], gainers: [], losers: [] })
+function SectorsPanel() {
+  const [d, setD] = useState<{ gainers: Sector[]; losers: Sector[] }>({ gainers: [], losers: [] })
   const [loading, setLoading] = useState(false)
   const load = useCallback(async () => {
     setLoading(true)
-    try { const r = await apiGet<{ indices: IndexQuote[]; gainers: Sector[]; losers: Sector[] }>('/market'); setD({ indices: r.indices ?? [], gainers: r.gainers ?? [], losers: r.losers ?? [] }) } catch { /* */ } finally { setLoading(false) }
+    try { const r = await apiGet<{ gainers: Sector[]; losers: Sector[] }>('/market'); setD({ gainers: r.gainers ?? [], losers: r.losers ?? [] }) } catch { /* */ } finally { setLoading(false) }
   }, [])
-  useEffect(() => { if (props.active && !d.gainers.length) void load() }, [props.active]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!d.gainers.length && !d.losers.length) void load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
   // 板块用「横向条」而不是纯数字：一眼看出强度排序与量级差。
-  const sectorBar = (s: Sector, maxAbs: number) => {
-    const pct = sectorPct(s) ?? 0
+  const sectorBar = (sc: Sector, maxAbs: number) => {
+    const pct = sectorPct(sc) ?? 0
     const w = Math.max(4, (Math.abs(pct) / (maxAbs || 1)) * 100)
-    const c = typeof sectorPct(s) === 'number' ? colorOf(pct) : V('--dsw-alias-label-tertiary', '#9aa0aa')
-    const inflow = Number(s.mainNetInflow)
+    const c = typeof sectorPct(sc) === 'number' ? colorOf(pct) : V('--dsw-alias-label-tertiary', '#9aa0aa')
+    const inflow = Number(sc.mainNetInflow)
     const inflowText = Number.isFinite(inflow) && inflow !== 0
       ? `主力净${inflow > 0 ? '流入' : '流出'} ${Math.abs(inflow) >= 1e8 ? `${(Math.abs(inflow) / 1e8).toFixed(2)}亿` : `${(Math.abs(inflow) / 1e4).toFixed(0)}万`}`
       : ''
     return h('div', {
-      key: s.code,
+      key: sc.code,
       style: { display: 'flex', alignItems: 'center', gap: 8 },
-      title: [s.name, inflowText, s.leader ? `龙头 ${s.leader}` : ''].filter(Boolean).join(' · '),
+      title: [sc.name, inflowText, sc.leader ? `龙头 ${sc.leader}` : ''].filter(Boolean).join(' · '),
     },
       h('div', {
         style: { flex: '0 0 92px', fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-      }, s.name),
+      }, sc.name),
       h('div', { style: { flex: 1, height: 8, borderRadius: 999, background: `${c}1a`, overflow: 'hidden', minWidth: 0 } },
         h('div', { style: { width: `${w}%`, height: '100%', background: c, borderRadius: 999 } })),
       h('span', {
         style: { flex: '0 0 auto', width: 56, textAlign: 'right', color: c, fontWeight: 600, fontSize: 11, fontVariantNumeric: 'tabular-nums' },
-      }, typeof sectorPct(s) === 'number' ? pctStr(sectorPct(s)) : '—'))
+      }, typeof sectorPct(sc) === 'number' ? pctStr(sectorPct(sc)) : '—'))
   }
-  const panel = (title: string, color: string, list: Sector[], hint: string) => {
-    const maxAbs = Math.max(1, ...list.map((s) => Math.abs(sectorPct(s) ?? 0)))
-    return h('div', { style: S.group },
-      h('div', { style: S.groupHead },
-        h('div', { style: { ...S.title, marginBottom: 0 } }, h('span', { style: { color } }, '● '), title),
-        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, hint)),
-      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 5 } },
+  const col = (title: string, color: string, list: Sector[], hint: string) => {
+    const maxAbs = Math.max(1, ...list.map((sc) => Math.abs(sectorPct(sc) ?? 0)))
+    return h('div', { style: { minWidth: 0 } },
+      h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 5 } },
+        h('span', { style: { color, fontSize: 11.5, fontWeight: 700 } }, '● ', title),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 10 } }, hint)),
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: 5 } },
         list.length === 0
           ? h(EmptyState, { icon: h(IconChart, { size: 18 }), text: loading ? '加载中…' : '暂无板块数据' })
-          : list.slice(0, 12).map((s) => sectorBar(s, maxAbs))))
+          : list.slice(0, 12).map((sc) => sectorBar(sc, maxAbs))))
   }
-  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
-    h('div', { style: S.group },
-      h('div', { style: S.groupHead },
-        h('div', { style: { ...S.title, marginBottom: 0 } }, '市场总览'),
-        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '刷新中…' : `${d.indices.length} 个指数`),
-        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
-      h('div', { style: { padding: 9 } },
-        d.indices.length === 0
-          ? (loading
-            ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
-            : h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无指数数据，点刷新重试' }))
-          : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))', gap: 6 } },
-            d.indices.map((ix) => h(IndexCard, { key: ix.code, ix }))))),
-    panel('领涨板块', UP, d.gainers, '资金在往哪去'),
-    panel('领跌板块 · 今日风险', DOWN, d.losers, '风险集中区'),
-    h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源：东财行业板块（对照 AkShare stock_board_industry_name_em）'))
+  const tight = usePanelWidth() < TIGHT_W
+  return h('div', { style: S.group },
+    h('div', { style: S.groupHead },
+      h('div', { style: { ...S.title, marginBottom: 0 } }, '板块热度 · 资金风向'),
+      h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '刷新中…' : '领涨/领跌 · 当日风险'),
+      h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
+    h('div', { style: { padding: 9, display: 'grid', gridTemplateColumns: tight ? 'minmax(0, 1fr)' : 'minmax(0, 1fr) minmax(0, 1fr)', gap: '4px 14px' } },
+      col('领涨', UP, d.gainers, '资金在往哪去'),
+      col('领跌 · 今日风险', DOWN, d.losers, '风险集中区')),
+    h('div', { style: { ...S.muted, fontSize: 11, padding: '2px 2px 0' } }, '数据源：东财行业板块（对照 AkShare stock_board_industry_name_em）'))
 }
 
 // ---- 快讯 tab（市场电报 + 按持仓/自选的个股新闻）----
@@ -3232,7 +3227,7 @@ const TAB_GROUPS = [
     { id: 'home', label: '首页' }, { id: 'holdings', label: '持仓' }, { id: 'follow', label: '追踪' }, { id: 'research', label: '资料' },
   ] },
   { id: 'market', label: '市场研究', items: [
-    { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'funds', label: '基金' },
+    { id: 'quotes', label: '行情' }, { id: 'funds', label: '基金' },
     { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
     { id: 'dossier', label: '深度' }, { id: 'discover', label: '发现' },
   ] },
@@ -3296,7 +3291,7 @@ function PanelBody(props: {
   const [tab, setTab] = useState<string>(() => {
     try {
       const saved = window.localStorage.getItem(TAB_KEY)
-      if (saved === 'kline') return 'quotes' // K线页已并入「行情」，旧收藏 tab 兼容迁移
+      if (saved === 'kline' || saved === 'market') return 'quotes' // K线/市场页已并入「行情」，旧收藏 tab 兼容迁移
       return TABS.some(t => t.id === saved) ? saved! : 'home'
     } catch { return 'home' }
   })
@@ -3392,9 +3387,9 @@ function PanelBody(props: {
       seenPanelCommands.add(cmd.commandId)
       if (seenPanelCommands.size > 200) seenPanelCommands.clear()
     }
-    if (cmd.tab === 'kline') selectTab('quotes') // 兼容别名：K线工作区已并入「行情」
+    if (cmd.tab === 'kline' || cmd.tab === 'market') selectTab('quotes') // 兼容别名：K线/市场页已并入「行情」
     else if (TABS.some((t) => t.id === cmd.tab)) selectTab(cmd.tab)
-    if ((cmd.tab === 'kline' || cmd.tab === 'quotes') && cmd.code) {
+    if ((cmd.tab === 'kline' || cmd.tab === 'market' || cmd.tab === 'quotes') && cmd.code) {
       setKlineTarget({ code: cmd.code, kind: cmd.kind ?? (cmd.type === 'fund' ? 'fund' : inferKlineKind(cmd.code, cmd.type as AssetType | undefined)), at: Date.now() })
     }
     if (cmd.tab === 'dossier' && cmd.code) {
@@ -3522,7 +3517,6 @@ function PanelBody(props: {
         onSelectKline: (code, type) => setKlineTarget({ code, kind: inferKlineKind(code, type), at: Date.now() }),
         klineTarget,
       }) : null,
-      tab === 'market' ? h(MarketView, { active: tab === 'market' }) : null,
       tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate, onOpen: props.onOpenAnalysis }) : null,
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
