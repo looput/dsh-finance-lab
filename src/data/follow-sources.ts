@@ -9,23 +9,30 @@ import type { FollowPosition, FollowTrade } from '../follow.js'
 const T = { timeoutMs: 15_000 }
 
 /**
- * SEC 公平访问策略：User-Agent 必须声明身份与联系方式，否则 403「未声明的自动化工具」。
- * 默认带仓库地址作联系方式；部署者可用 DSH_SEC_EDGAR_UA 覆盖为含邮箱的 UA
- * （SEC 官方格式：`AppName admin@example.com`）。
+ * SEC EDGAR 要求 User-Agent 标识应用并包含可联系的邮箱。
+ * 默认值仅标识本项目（含仓库地址），不冒充部署者的联系方式；未配置真实联系人时，
+ * 直接阻止请求，避免反复 403 及由此引发的临时 IP 封禁。
  */
 export function secUserAgent(): string {
   return process.env.DSH_SEC_EDGAR_UA?.trim() || 'dsh-finance-lab/0.2 (local research plugin; https://github.com/looput/dsh-finance-lab)'
 }
-const secHeaders = (): Record<string, string> => ({ 'User-Agent': secUserAgent() })
+const SEC_CONTACT_EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+const secHeaders = (): Record<string, string> => {
+  const ua = secUserAgent()
+  if (!SEC_CONTACT_EMAIL.test(ua)) {
+    throw new Error('SEC EDGAR 请求已阻止：User-Agent 必须包含可联系的邮箱。请设置 DSH_SEC_EDGAR_UA（格式：应用名 + 空格 + 维护者邮箱）；默认 UA 只有仓库地址，不是联系方式。未发送请求，以避免 403 和临时封禁。')
+  }
+  return { 'User-Agent': ua }
+}
 
-/** SEC 请求统一出口：403 → 补一条可执行的修复指引（UA 联系方式 / 环境变量）。 */
+/** SEC 请求统一出口：403 → 提示检查邮箱、限速与临时 IP 封禁。 */
 async function secHttp<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run()
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/\b403\b/.test(msg)) {
-      throw new Error(`${msg}；SEC 把请求当作未声明联系方式的自动化工具。默认 UA 已带仓库地址，若仍 403：设置 DSH_SEC_EDGAR_UA（官方格式 "AppName admin@example.com"）后重试`)
+      throw new Error(`${msg}；SEC EDGAR 拒绝请求。请确认 DSH_SEC_EDGAR_UA 含可联系邮箱、遵守请求限速，并确认来源 IP 未处于临时封禁。`)
     }
     throw err
   }

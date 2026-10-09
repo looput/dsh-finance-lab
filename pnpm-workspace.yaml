@@ -1,0 +1,5 @@
+# pnpm 11 reads dependency overrides from this file (not package.json).
+# Keep these security pins aligned with package.json's npm `overrides`.
+overrides:
+  '@modelcontextprotocol/client': 2.2.0
+  fflate: 0.8.3

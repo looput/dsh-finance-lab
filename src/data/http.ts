@@ -15,6 +15,7 @@ export async function httpGetJson<T = unknown>(
   params: Record<string, string | number | undefined>,
   options: HttpGetOptions,
 ): Promise<T> {
+  if (options.signal?.aborted) throw options.signal.reason ?? new Error('aborted')
   const u = new URL(url)
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined) continue
@@ -52,6 +53,7 @@ export async function httpGetText(
   params: Record<string, string | number | undefined>,
   options: HttpGetOptions,
 ): Promise<string> {
+  if (options.signal?.aborted) throw options.signal.reason ?? new Error('aborted')
   const u = new URL(url)
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined) continue

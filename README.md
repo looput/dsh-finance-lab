@@ -347,10 +347,10 @@ npm run westock -- quote sh600519                 # 等价写法
 
 - **默认对象**：首次启动自动预置三个样本——Berkshire Hathaway（13F）、Nancy Pelosi（国会申报）、冯柳（十大流通股东），与提示词示例一致；`seededAt` 一次性标记，**删除后不复活**，已有档案只补标记不注入。
 - **数据源**：
-  - 机构持仓 → SEC EDGAR 官方（免费，带合规 UA）：`submissions/CIK*.json` 找 13F-HR/13D/13G → information table XML 解析（容忍 `ns1:` 前缀与 putCall 期权行）→ `company_tickers.json` 发行人名→代码唯一映射（歧义留空）；13D/13G 从同一 submissions 里发现（举牌信号）。名字→CIK 走 EDGAR company search（atom），多候选时让 Agent 带 CIK 重试——**没有固定名人表**。
+  - 机构持仓 → SEC EDGAR 官方（免费，需配置部署者联系邮箱 UA）：`submissions/CIK*.json` 找 13F-HR/13D/13G → information table XML 解析（容忍 `ns1:` 前缀与 putCall 期权行）→ `company_tickers.json` 发行人名→代码唯一映射（歧义留空）；13D/13G 从同一 submissions 里发现（举牌信号）。名字→CIK 走 EDGAR company search（atom），多候选时让 Agent 带 CIK 重试——**没有固定名人表**。
   - 国会申报 → Bargo 免费档（keyless 30 req/日、100 行/日、滚动 3 个月窗口）为主，失败自动试 Disclosed Capitol 备用源（需 `DISCLOSED_CAPITOL_API_KEY`，未配置则明确报不可用）；金额按申报区间展示，不做精确化。
   - A 股名私募 → `get_shareholder` 十大流通股东扫描 + **受控别名表**（冯柳→邻山1号 等公共子串；人物与产品户名非一一对应，命中需人工确认）。
-- **SEC 访问合规**：EDGAR 的 User-Agent 必须声明身份与联系方式（否则 403「未声明的自动化工具」）。默认 UA 带仓库地址作联系方式，部署者可用 `DSH_SEC_EDGAR_UA` 覆盖为含邮箱的 UA（SEC 官方格式 `AppName admin@example.com`）；403 的报错信息会直接给出这条修复指引。
+- **SEC 访问合规**：EDGAR 的 User-Agent 必须声明应用身份并提供可联系邮箱。默认 UA 仅标识项目与仓库，**不冒充部署者联系方式**；未配置合规联系方式时，插件会在请求发出前阻止 EDGAR 调用，避免反复 403/临时封禁。部署者须设置 `DSH_SEC_EDGAR_UA`（格式为「应用名 + 空格 + 维护者邮箱」）；若仍收到 403，错误信息会提示检查 UA、请求限速与 IP 临时封禁。
 - **新鲜度徽标**（按最近披露日计算）：`fresh` / `normal` / `stale` / `none`；阈值 = 披露周期 + 合理延迟（国会 45 天、13F 与名私募 130 天）。所有工具返回都强制携带延迟与覆盖边界（13F ≈45 天、Stock Act 30–45 天、季报股东 1.5–4 个月），解读必须引用具体数字与披露日期。
 - **新披露发现**：6 小时一次的后台 tick 只查提交列表（克制请求），按「对象+组+披露主键」幂等入队（`jobs`，只读状态卡，click 投递回会话触发解读，不自动刷屏、不自动聊天）；`follow_fetch` 拉到新期才记快照，重复拉取幂等。
 - **纸面复刻**：按最新 13F 市值等比分配本金（≤50 仓），入场价取披露日附近日K（取不到留空不编数），现价一次批量报价；收益只对已定价部分计算并标注缺价行；`stop` 归档。不触达真实账户，不构成投资建议。

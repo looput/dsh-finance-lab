@@ -27,7 +27,7 @@ import { ReminderStore, scanReminders } from '../src/reminders.js'
 import { buildStockDossier, dossierSummary } from '../src/data/dossier.js'
 import { buildFundDossier } from '../src/data/fund-dossier.js'
 import { parseFundNavLsjz, parseFundHoldings, fundRankSc, fundRankRequest } from '../src/data/providers.js'
-import { emSecMarket } from '../src/data/http.js'
+import { emSecMarket, httpGetJson, httpGetText } from '../src/data/http.js'
 import { computeLookthrough, marginalLookthrough, buildLookthrough } from '../src/lookthrough.js'
 import { GROWTH_CURRICULUM, METRIC_CONCEPT_MAP, findLesson, lessonByQuery } from '../src/growth-curriculum.js'
 import { computeGrowth, computeStreak, diagnoseGrowth, evaluateFamilyPlan, gradeQuiz, type GrowthState } from '../src/growth.js'
@@ -113,6 +113,7 @@ function eq<T>(name: string, actual: T, expected: T): void {
 async function main() {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-finance-offline-'))
   const realFetch = globalThis.fetch
+  const originalSecUa = process.env.DSH_SEC_EDGAR_UA
   // ---- 批次21 fixtures：EDGAR（submissions/13F XML/company_tickers/atom）+ Bargo（members/trades，轮换响应测增量） ----
   const FIX_SUBMISSIONS = {
     filings: { recent: {
@@ -135,15 +136,17 @@ async function main() {
   const FIX_ATOM = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><title>BERKSHIRE HATHAWAY INC (CIK 0001067983)</title><content>CIK=0001067983</content></entry></feed>'
   const BARGO_T1 = { id: 'bt1', ticker: 'NVDA', politician_name: 'Nancy Pelosi', transaction_type: 'purchase', amount_range: '$1,001 - $15,000', transaction_date: '2026-09-10', disclosure_date: '2026-09-20', asset_description: 'NVDA call' }
   const BARGO_T2 = { id: 'bt2', ticker: 'TSLA', politician_name: 'Nancy Pelosi', transaction_type: 'sale', amount_range: '$50,001 - $100,000', transaction_date: '2026-09-11', disclosure_date: '2026-09-21' }
-  const followFx = { bargoHits: 0 }
+  const followFx = { bargoHits: 0, secHits: 0 }
   // A truly offline suite: no external requests. Exercise the real HTTP parser
   // and provider fallback with a deterministic JSONP response.
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input))
-    // SEC 公平访问：UA 不带联系方式 → 403（复现真实拦截，验证默认 UA 与修复指引）
+    // SEC EDGAR 要求 User-Agent 含实际联系邮箱；特殊 token 模拟限速/临时封禁后的 403。
     if (url.hostname === 'www.sec.gov' || url.hostname === 'data.sec.gov') {
+      followFx.secHits++
       const ua = String((init?.headers as Record<string, string> | undefined)?.['User-Agent'] ?? '')
-      if (!ua.includes('@') && !ua.includes('github.com')) return new Response('Forbidden', { status: 403, statusText: 'Forbidden' })
+      const hasContact = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(ua)
+      if (!hasContact || /force-403/i.test(ua)) return new Response('Forbidden', { status: 403, statusText: 'Forbidden' })
     }
     if (url.hostname === 'search-api-web.eastmoney.com') return new Response('x(' + JSON.stringify({ result: { cmsArticleWebOld: [{ title: '离线新闻', content: '摘要', url: 'https://example.com/news', date: '2026-09-27 09:00:00', mediaName: '测试来源' }] } }) + ')', { status: 200 })
     if (url.hostname === 'data.sec.gov' && url.pathname === '/submissions/CIK0001067983.json') return Response.json(FIX_SUBMISSIONS)
@@ -164,7 +167,21 @@ async function main() {
     }
     throw new Error(`offline: blocked network ${url.hostname}`)
   }
+  const offlineSecUa = `dsh-finance-offline/1.0 ${['test-contact', 'example.org'].join('@')}`
+  process.env.DSH_SEC_EDGAR_UA = offlineSecUa
   try {
+    // ---- 0. HTTP abort propagation ----
+    console.log('\n== HTTP abort propagation ==')
+    const alreadyAborted = new AbortController()
+    const abortReason = new Error('cancelled before request start')
+    alreadyAborted.abort(abortReason)
+    let jsonAbort: unknown
+    try { await httpGetJson('https://should-not-fetch.invalid', {}, { timeoutMs: 1000, signal: alreadyAborted.signal }) } catch (err) { jsonAbort = err }
+    check('httpGetJson 遵守请求前已触发的 abort', jsonAbort === abortReason, String(jsonAbort))
+    let textAbort: unknown
+    try { await httpGetText('https://should-not-fetch.invalid', {}, { timeoutMs: 1000, signal: alreadyAborted.signal }) } catch (err) { textAbort = err }
+    check('httpGetText 遵守请求前已触发的 abort', textAbort === abortReason, String(textAbort))
+
     // ---- 1. Markdown table parsing ----
     console.log('\n== markdown table parsing ==')
     const tables = parseMarkdownTables([
@@ -1968,21 +1985,28 @@ esac
       check('默认对象：损坏档案拒绝播种', seedErr.includes('损坏'), seedErr)
     }
 
-    // 批次23：SEC UA 合规（默认联系方式 / 环境变量覆盖 / 403 修复指引）
+    // 批次23：SEC UA 联系邮箱必须由部署者提供；缺失时请求前阻断，403 时提示限速/IP 检查。
     // ------------------------------------------------------------
     {
-      check('SEC UA：默认含联系方式（仓库地址）', secUserAgent().includes('github.com/looput/dsh-finance-lab'), secUserAgent())
-      process.env.DSH_SEC_EDGAR_UA = 'Acme Research Bot v9 (https://acme.example/ops)'
-      eq('SEC UA：环境变量覆盖', secUserAgent(), 'Acme Research Bot v9 (https://acme.example/ops)')
       delete process.env.DSH_SEC_EDGAR_UA
-      // 无联系方式的 UA → mock 按 SEC 真实策略 403 → 错误信息必须带可执行指引
-      process.env.DSH_SEC_EDGAR_UA = 'naked-bot/1.0'
+      check('SEC UA：默认仅标识项目、不冒充联系人', secUserAgent().includes('github.com/looput/dsh-finance-lab') && !/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(secUserAgent()), secUserAgent())
+      const hitsBeforeMissingContact = followFx.secHits
+      let missingContactErr = ''
+      try { await fetchEdgarFilings('0001067983') } catch (e) { missingContactErr = e instanceof Error ? e.message : String(e) }
+      check('SEC UA：缺真实邮箱时请求前阻断', missingContactErr.includes('DSH_SEC_EDGAR_UA') && followFx.secHits === hitsBeforeMissingContact, missingContactErr)
+
+      const validOverride = `Acme Research Bot v9 ${['research', 'acme.example'].join('@')}`
+      process.env.DSH_SEC_EDGAR_UA = validOverride
+      eq('SEC UA：环境变量覆盖', secUserAgent(), validOverride)
+
+      process.env.DSH_SEC_EDGAR_UA = `force-403-test ${['contact', 'acme.example'].join('@')}`
       let uaErr = ''
       try { await fetchEdgarFilings('0001067983') } catch (e) { uaErr = e instanceof Error ? e.message : String(e) }
-      delete process.env.DSH_SEC_EDGAR_UA
-      check('SEC UA：403 带修复指引', /\b403\b/.test(uaErr) && uaErr.includes('DSH_SEC_EDGAR_UA'), uaErr)
+      check('SEC UA：403 指向联系方式/限速修复', /\b403\b/.test(uaErr) && uaErr.includes('DSH_SEC_EDGAR_UA') && uaErr.includes('限速'), uaErr)
+
+      process.env.DSH_SEC_EDGAR_UA = offlineSecUa
       const okFilings = await fetchEdgarFilings('0001067983')
-      check('SEC UA：默认 UA 恢复 200', okFilings.length >= 1, `filings=${okFilings.length}`)
+      check('SEC UA：fixture 接受带邮箱 UA', okFilings.length >= 1, `filings=${okFilings.length}`)
     }
 
     console.log(`\n[offline] ${passed} passed, ${failed} failed`)
@@ -1992,6 +2016,8 @@ esac
     }
   } finally {
     globalThis.fetch = realFetch
+    if (originalSecUa === undefined) delete process.env.DSH_SEC_EDGAR_UA
+    else process.env.DSH_SEC_EDGAR_UA = originalSecUa
     await rm(root, { recursive: true, force: true })
   }
 }
