@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { PersonalState, ReviewCard } from '../personal.js'
+import type { DiagnosisFinding, GrowthSummary, PlanHealth } from '../growth.js'
 
 type Home = PersonalState & {
   metrics: { profileCompleted: boolean; consecutiveWeeks: number; reviewed: number; generated: number; reviewRate: number | null; quality: string }
@@ -11,12 +12,36 @@ type Home = PersonalState & {
   reminders: Array<{ id: string; title?: string; detail?: string; read?: boolean }>
   /** 周定义时区（可配置，默认 UTC）。 */
   weekTimeZone?: string
+  /** 成长区（只读）：Agent 诊断出的下一步 + 状态摘要。 */
+  growth?: {
+    summary: GrowthSummary
+    streakWeeks: number
+    health: PlanHealth
+    lessons: { mastered: number; total: number; recentAttempts: Array<{ lessonId: string; score: number; at: string }> }
+    reviews: Array<{ period: string; at: string; vaultId?: string; highlights?: string[] }>
+    nextSteps: DiagnosisFinding[]
+  }
 }
 type View = 'overview' | 'journal' | 'reviews' | 'approvals'
 type ThesisForm = { id: string; code: string; type: string; rationale: string; indicator: string; falsifier: string; changeReason: string }
 const blank: ThesisForm = { id: '', code: '', type: 'stock', rationale: '', indicator: '', falsifier: '', changeReason: '' }
 const emptyProfile = { goal: '', horizonMonths: 36, risk: '', maxDrawdownPct: 10, baseCurrency: 'CNY' }
 const decisions = { keep: '维持原判断', revise: '需修正观点', defer: '资料不足，暂缓' } as const
+/** 成长回执文案：总线推送（Agent 在对话里改了档案）→ 首页即时提示。 */
+const GROWTH_RECEIPT: Record<string, string> = {
+  profile: 'Agent 更新了成长画像',
+  plan: 'Agent 更新了家庭财务规划',
+  quiz: 'Agent 记录了测验判分结果',
+  review: 'Agent 完成了月度成长复盘',
+}
+/** 面板页内锚点白名单（panel_navigate anchor → 首页分区/区块）。 */
+const HOME_ANCHORS = new Set(['overview', 'growth', 'journal', 'reviews', 'approvals'])
+/** 对话投递结果 → 用户能看懂的反馈（投递失败时提示绑定会话）。 */
+function deliveryNote(out: 'sent' | 'copied' | 'failed'): string {
+  return out === 'sent' ? '已发送到对话'
+    : out === 'copied' ? '目标会话暂不可投递，已复制到剪贴板'
+      : '投递失败：请先在面板选择目标会话'
+}
 const ink = 'var(--dsw-alias-label-primary, #1f2937)'
 const muted = 'var(--dsw-alias-label-secondary, #667085)'
 const surface = 'var(--dsw-alias-bg-layer-3, #fff)'
@@ -60,11 +85,17 @@ const css = `
 .finance-home .fh-report td,.finance-home .fh-report th{border:1px solid ${border};padding:5px}
 .finance-home .fh-report a{color:${teal}}.finance-home .fh-quote{border-left:3px solid ${teal};padding:8px 12px;margin:13px 0;background:rgba(20,125,121,.05);overflow-wrap:anywhere}
 .finance-home .fh-alert{border:1px solid ${teal};border-radius:10px;padding:12px;margin:10px 0;color:${teal};background:${surface};overflow-wrap:anywhere}
+.finance-home .fh-toast{position:sticky;top:0;z-index:30;cursor:pointer;box-shadow:0 8px 24px rgba(13,48,58,.14);animation:fh-toast-in .22s cubic-bezier(.2,.9,.3,1)}
+@keyframes fh-toast-in{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+@keyframes fh-dot{0%,100%{opacity:1}50%{opacity:.35}}
+.finance-home .fh-ring{width:62px;height:62px;border-radius:50%;display:grid;place-items:center;flex-shrink:0}
+.finance-home .fh-ring-in{width:48px;height:48px;border-radius:50%;display:grid;place-items:center;font-size:16px;font-weight:750;font-variant-numeric:tabular-nums;background:${surface};border:1px solid ${border}}
+.finance-home .fh-step{border-left:3px solid ${teal}}
 .finance-home .fh-error{border-color:#c25a4a;color:#c25a4a}.finance-home footer{padding:8px 5px 16px}
 @media(prefers-reduced-motion:reduce){.finance-home *{transition:none!important;scroll-behavior:auto!important}}
 `
-function Section({ title, meta, children }: { title: string; meta?: string; children: ReactNode }) {
-  return <section className="fh-card"><div className="fh-head"><h3>{title}</h3>{meta && <span className="fh-muted">{meta}</span>}</div>{children}</section>
+function Section({ title, meta, anchor, children }: { title: string; meta?: string; anchor?: string; children: ReactNode }) {
+  return <section className="fh-card" data-panel-anchor={anchor}><div className="fh-head"><h3>{title}</h3>{meta && <span className="fh-muted">{meta}</span>}</div>{children}</section>
 }
 function Badge({ children, tone = '' }: { children: ReactNode; tone?: string }) {
   return <span className={`fh-badge ${tone}`}>{children}</span>
@@ -80,9 +111,11 @@ async function api<T>(path = '', body?: unknown, signal?: AbortSignal): Promise<
   if (!r.ok || data.ok === false) throw new Error(data.error ?? `请求失败 (${r.status})`)
   return data
 }
-export function PersonalHome({ deliver, navigate, openReminders }: {
+export function PersonalHome({ deliver, navigate, useBus, openReminders }: {
   deliver: (text: string) => Promise<'sent' | 'copied' | 'failed'>
   navigate: (tab: string) => void
+  /** 订阅面板总线（index.tsx 注入）：成长/资料/持仓变更即时刷新，不等轮询。 */
+  useBus: (fn: (e: { kind: string; [k: string]: unknown }) => void) => void
   openReminders?: () => void
 }) {
   const [data, setData] = useState<Home>()
@@ -99,6 +132,8 @@ export function PersonalHome({ deliver, navigate, openReminders }: {
   const request = useRef(0)
   const alive = useRef(false)
   const seeded = useRef(false)
+  const homeRef = useRef<HTMLDivElement | null>(null)
+  const anchorAt = useRef(0)
   const load = useCallback(async (signal?: AbortSignal) => {
     const id = ++request.current
     const next = await api<Home>('', undefined, signal)
@@ -114,6 +149,47 @@ export function PersonalHome({ deliver, navigate, openReminders }: {
     const timer = window.setInterval(refresh, 15000)
     return () => { alive.current = false; controller.abort(); window.clearInterval(timer) }
   }, [load])
+  // 面板总线（Agent → 面板）：成长档案被 Agent 改动时即时刷新 + 回执提示；
+  // 资料/持仓/提醒变化也立即反映，不等 15s 轮询。
+  useBus((e) => {
+    if (e.kind === 'growth') {
+      const action = typeof e.action === 'string' ? e.action : ''
+      setNotice(GROWTH_RECEIPT[action] ?? 'Agent 更新了成长档案')
+      void load().catch(() => { /* 已有轮询兜底 */ })
+      return
+    }
+    if (e.kind === 'research' || e.kind === 'portfolio' || e.kind === 'reminder') {
+      void load().catch(() => { /* 已有轮询兜底 */ })
+    }
+  })
+  // Agent → 面板页内锚点：panel_navigate(anchor=…) → 切分区并滚动到区块。
+  useEffect(() => {
+    const apply = (d: { tab?: string; anchor?: string; at?: number }) => {
+      if (d.tab && d.tab !== 'home') return
+      if (!d.anchor || !HOME_ANCHORS.has(d.anchor)) return
+      if (d.at && anchorAt.current === d.at) return
+      anchorAt.current = d.at ?? Date.now()
+      const viewOf: Record<string, View> = { overview: 'overview', growth: 'overview', journal: 'journal', reviews: 'reviews', approvals: 'approvals' }
+      const v = viewOf[d.anchor]
+      if (v) setView(v)
+      if (d.anchor === 'overview') { homeRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
+      const scroll = (retry: boolean) => {
+        const el = homeRef.current?.querySelector(`[data-panel-anchor="${d.anchor}"]`)
+        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
+        if (retry) window.setTimeout(() => scroll(false), 240) // 视图刚切换、区块未挂载 → 再试一次
+      }
+      window.setTimeout(() => scroll(true), 70)
+    }
+    const onAnchor = (ev: Event) => apply((ev as CustomEvent).detail ?? {})
+    window.addEventListener('dsh:panel-anchor', onAnchor)
+    return () => window.removeEventListener('dsh:panel-anchor', onAnchor)
+  }, [])
+  // 回执提示自动消失（可点击提前关闭）。
+  useEffect(() => {
+    if (!notice) return
+    const t = window.setTimeout(() => setNotice(''), 6000)
+    return () => window.clearTimeout(t)
+  }, [notice])
   async function run(fn: () => Promise<unknown>) {
     if (running.current) return
     running.current = true; setBusy(true); setError(''); setNotice('')
@@ -142,7 +218,7 @@ export function PersonalHome({ deliver, navigate, openReminders }: {
     { id: 'reviews', label: '每周复盘', count: outstanding }, { id: 'approvals', label: '待确认', count: data?.pending.length },
   ]
   const goJournal = () => setView('journal')
-  return <div className="finance-home">
+  return <div className="finance-home" ref={homeRef}>
     <style>{css}</style>
     <header className="fh-hero">
       <span style={{ fontSize: 10, letterSpacing: 2, opacity: .75, fontWeight: 700 }}>FINANCE / MY DESK</span>
@@ -154,13 +230,20 @@ export function PersonalHome({ deliver, navigate, openReminders }: {
       </div>
     </header>
     {error && <div role="alert" className="fh-alert fh-error">{error}</div>}
-    {notice && <div role="status" className="fh-alert">{notice}</div>}
+    {notice && <div role="status" className="fh-alert fh-toast" title="点击关闭" onClick={() => setNotice('')}>{notice}</div>}
     <nav aria-label="个人首页分区" className="fh-nav">{sections.map(t =>
       <button key={t.id} type="button" onClick={() => setView(t.id)} aria-current={view === t.id ? 'page' : undefined}>{t.label}{t.count ? ` ${t.count}` : ''}</button>)}</nav>
     {!data && <div className="fh-card" role="status">{error ? <button className="fh-btn" onClick={() => void run(async () => {})}>重新连接</button> : '正在读取本地档案…'}</div>}
     {data && view === 'overview' && <>
-      <div className="fh-stat-grid">{[[data.profile ? '已完成' : '待完成', '投资建档'], [`${data.theses.length}`, '投资判断'], [`${data.metrics.reviewed}/${data.metrics.generated}`, '已复核 / 卡片']].map(([value, label]) =>
-        <div className="fh-card" key={label}><div className="fh-stat">{value}</div><div className="fh-muted">{label}</div></div>)}</div>
+      <div className="fh-stat-grid" style={data.growth ? { gridTemplateColumns: 'repeat(4,minmax(0,1fr))' } : undefined}>
+        {([
+          [data.profile ? '已完成' : '待完成', '投资建档'],
+          [`${data.theses.length}`, '投资判断'],
+          [`${data.metrics.reviewed}/${data.metrics.generated}`, '已复核 / 卡片'],
+          ...(data.growth ? [[`${data.growth.summary.total ?? '—'}`, '成长综合']] : []),
+        ] as Array<[string, string]>).map(([value, label]) =>
+          <div className="fh-card" key={label}><div className="fh-stat">{value}</div><div className="fh-muted">{label}</div></div>)}
+      </div>
       <Section title="接下来做什么" meta="按重要性排序">
         <p className="fh-muted fh-section-copy">{!data.profile ? '先填写目标、期限与风险承受能力，让后续判断有参照。' : data.pending.length ? `${data.pending.length} 项变更等待你检查前后差异。Agent 不会替你确认。` : !data.theses.length ? '记录投资理由，写清验证指标与证伪条件。' : outstanding ? `有 ${outstanding} 张卡片待生成或待人工复核。` : '没有待处理卡片。可以生成本周复盘，或下周再对照新证据。'}</p>
         <div className="fh-row">
@@ -179,8 +262,9 @@ export function PersonalHome({ deliver, navigate, openReminders }: {
         </div>)}
       </Section>}
       <Section title="我的工作区">
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,minmax(0,1fr))', gap: 8 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 8 }}>
           <button className="fh-btn fh-entry" onClick={() => navigate('holdings')}><strong>持仓 · {data.holdings.length}</strong><span className="fh-muted">{data.holdings.slice(0, 3).map(x => x.name || x.code).join(' · ') || '尚未添加'}</span></button>
+          <button className="fh-btn fh-entry" onClick={() => navigate('follow')}><strong>追踪 · 谁在买什么</strong><span className="fh-muted">13F · 政客申报 · 名私募</span></button>
           <button className="fh-btn fh-entry" onClick={() => navigate('research')}><strong>资料 · {data.research.length} 条近期</strong><span className="fh-muted">{data.research[0]?.title || '尚未归档'}</span></button>
         </div>
         {data.research.slice(0, 2).map(r => <div key={r.id} className="fh-inset"><h4>{r.title}</h4><span className="fh-muted">{r.source} · {r.occurredAt}</span></div>)}
@@ -188,13 +272,84 @@ export function PersonalHome({ deliver, navigate, openReminders }: {
         {data.reminders.filter(r => !r.read).slice(0, 2).map(r => <div key={r.id} className="fh-muted fh-copy">{r.title}</div>)}
         <p className="fh-muted">持仓按原币展示；缺少可靠汇率时，不合并跨币种收益。</p>
       </Section>
+      {data.growth && (() => {
+        const g = data.growth!
+        const total = g.summary.total
+        const pillarColors: Record<keyof GrowthSummary['pillars'], string> = { knowledge: '#6366f1', plan: '#147d79', discipline: '#b45309', assets: '#2b8ac9' }
+        const pillars: Array<[keyof GrowthSummary['pillars'], string]> = [['knowledge', '认知'], ['plan', '规划'], ['discipline', '纪律'], ['assets', '资产']]
+        const kindChip: Record<DiagnosisFinding['kind'], { label: string; color: string }> = {
+          plan: { label: '规划修复', color: '#b45309' },
+          lesson: { label: '补课', color: '#2b8ac9' },
+          discipline: { label: '纪律', color: '#6366f1' },
+          review: { label: '复盘', color: '#0d9488' },
+        }
+        return <Section title="成长" anchor="growth" meta={total !== null ? `综合 ${total} · ${g.summary.level.label}` : g.summary.level.label}>
+          <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div
+              className="fh-ring"
+              title={total !== null ? `综合 ${total} 分` : '数据不足，综合分待生成'}
+              style={{ background: `conic-gradient(${teal} ${((total ?? 0) * 3.6).toFixed(1)}deg, rgba(120,134,155,.16) 0deg)` }}
+            >
+              <div className="fh-ring-in">{total ?? '—'}</div>
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1, minWidth: 200 }}>
+              <Badge tone="good">{g.summary.level.label}</Badge>
+              <Badge>连续 {g.streakWeeks} 周</Badge>
+              <Badge>课程 {g.lessons.mastered}/{g.lessons.total}</Badge>
+              <Badge tone={g.health.score === null ? '' : g.health.score >= 70 ? 'good' : g.health.score < 50 ? 'warn' : 'info'}>健康度 {g.health.score ?? '—'}</Badge>
+            </div>
+          </div>
+          <div className="fh-inset">
+            {pillars.map(([k, label]) => {
+              const v = g.summary.pillars[k]
+              const color = pillarColors[k]
+              return <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '5px 0' }}>
+                <span className="fh-muted" style={{ width: 34 }}>{label}</span>
+                <div style={{ flex: 1, height: 7, background: 'rgba(120,134,155,.14)', borderRadius: 999, overflow: 'hidden' }}>
+                  <div style={{
+                    width: v === null ? '100%' : `${v}%`, height: '100%', borderRadius: 999,
+                    background: v === null ? 'repeating-linear-gradient(45deg, rgba(120,134,155,.22) 0 6px, rgba(120,134,155,.08) 6px 12px)' : color,
+                    transition: 'width .3s',
+                  }} />
+                </div>
+                <span className="fh-muted" style={{ width: 30, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{v === null ? '—' : v}</span>
+              </div>
+            })}
+          </div>
+          {!!g.nextSteps.length && <>
+            <div className="fh-head" style={{ marginTop: 10 }}><h4>下一步（Agent 诊断）</h4><span className="fh-muted">共 {g.nextSteps.length} 条 · 一次只做一件</span></div>
+            {g.nextSteps.slice(0, 4).map((f, i) => {
+              const chip = kindChip[f.kind] ?? { label: f.kind, color: teal }
+              return <div key={`${f.ref ?? f.kind}-${i}`} className="fh-inset fh-step" style={{ borderLeftColor: chip.color }}>
+                <div className="fh-row" style={{ marginBottom: 4, alignItems: 'baseline' }}>
+                  <span className="fh-badge" style={{ background: `${chip.color}1f`, color: chip.color }}>{chip.label}{f.priority <= 2 ? ' · 优先' : ''}</span>
+                  <h4 style={{ flex: 1, minWidth: 0 }}>{f.title}</h4>
+                </div>
+                <span className="fh-muted">{f.evidence}</span>
+                <div className="fh-muted" style={{ marginTop: 3, opacity: .9 }}>→ {f.suggestion}</div>
+                <div className="fh-row" style={{ marginTop: 8 }}>
+                  <button className="fh-btn fh-primary" disabled={busy} onClick={() => void run(async () => {
+                    setNotice(deliveryNote(await deliver(`请按成长诊断执行：${f.suggestion}（依据：${f.evidence}）`)))
+                  })}>交给对话执行</button>
+                </div>
+              </div>
+            })}
+          </>}
+          <div className="fh-row" style={{ marginTop: 10 }}>
+            <button className="fh-btn" disabled={busy} onClick={() => void run(async () => {
+              setNotice(deliveryNote(await deliver('做一次成长复盘：装载成长状态，按四柱（学习/计划/纪律/资产）给出下一步建议')))
+            })}>在对话中复盘</button>
+          </div>
+          <p className="fh-muted" style={{ marginTop: 8 }}>诊断依据来自本地持仓/观点/复盘记录；评分只谈过程，不评价收益、不鼓励交易。家庭财务数据仅保存在本机。</p>
+        </Section>
+      })()}
       <Section title="价值验证">
         <p className="fh-muted">连续复核 {data.metrics.consecutiveWeeks} 周 · 已复核 {data.metrics.reviewed}/{data.metrics.generated} 张。</p>
         <p className="fh-muted fh-copy">质量取决于是否对照原判断、检查指标与反证并解释决定；不以打开次数或交易频率衡量。</p>
       </Section>
     </>}
     {data && view === 'journal' && <>
-      <Section title="01 / 投资档案" meta={data.profile && !editProfile ? '已完成' : '先建立参照'}>
+      <Section title="01 / 投资档案" meta={data.profile && !editProfile ? '已完成' : '先建立参照'} anchor="journal">
         {data.profile && !editProfile ? <>
           <p className="fh-copy" style={{ fontWeight: 600 }}>{data.profile.goal}</p>
           <div className="fh-row"><Badge tone="good">{data.profile.horizonMonths} 个月</Badge><Badge>风险 {({ low: '低', medium: '中', high: '高' } as const)[data.profile.risk]}</Badge><Badge>最大回撤 {data.profile.maxDrawdownPct}%</Badge><Badge>偏好 {data.profile.baseCurrency}</Badge></div>
@@ -221,7 +376,7 @@ export function PersonalHome({ deliver, navigate, openReminders }: {
         </form>
       </Section>}
     </>}
-    {data && view === 'approvals' && <Section title="待确认变更" meta={`${data.pending.length} 项`}>
+    {data && view === 'approvals' && <Section title="待确认变更" meta={`${data.pending.length} 项`} anchor="approvals">
       <p className="fh-muted">请打开并检查前后差异后确认。预览15分钟后过期；数据发生变化时须重新预览。</p>
       {!data.pending.length && <p className="fh-muted fh-copy">目前没有待确认变更。</p>}
       {data.pending.map(p => <article key={p.id} className="fh-inset">
@@ -234,7 +389,7 @@ export function PersonalHome({ deliver, navigate, openReminders }: {
       </article>)}
     </Section>}
     {data && view === 'reviews' && <>
-      <Section title="每周复盘" meta={`以${data.weekTimeZone ?? 'UTC'}周一为周起点`}>
+      <Section title="每周复盘" meta={`以${data.weekTimeZone ?? 'UTC'}周一为周起点`} anchor="reviews">
         <p className="fh-muted fh-section-copy">每条观点每周一张证据快照。主动生成，不自动代你修正观点。同周修正观点后可对新版本「补卡」，原卡不覆盖。</p>
         {data.profile ? action('让 Agent 生成本周复盘', generate, true, !data.theses.length) : <button className="fh-btn fh-primary" onClick={goJournal}>先完成建档</button>}
         {!data.cards.length && <p className="fh-muted fh-copy">暂无复盘卡。建档、记录观点后，可从这里开始。</p>}

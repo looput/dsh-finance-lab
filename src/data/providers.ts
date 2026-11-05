@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import {
   DEFAULT_UA,
+  emSecMarket,
   httpGetJson,
   httpGetText,
   marketCode,
@@ -30,6 +31,7 @@ import {
   normalizeValuation,
 } from './eastmoney-f10.js'
 import { WESTOCK_CAPABILITY_PROVIDERS, WESTOCK_SPECS } from './westock-capabilities.js'
+import { normalizeFundHoldingRows, type NormalizedHolding } from '../fund-analysis.js'
 import type { Capability, KlineBar, ProviderContext, ProviderFn, SearchResult, StockInfo, StockQuote, SymbolMatch } from '../types.js'
 
 const execFileAsync = promisify(execFile)
@@ -176,9 +178,10 @@ async function emQuoteBySecid(secid: string, ctx: ProviderContext, referer?: str
 }
 
 async function emStockGet(args: Record<string, unknown>, ctx: ProviderContext) {
-  const code = normalizeCode(String(args.code ?? '600519'))
-  const referer = `https://quote.eastmoney.com/${code.startsWith('6') ? 'sh' : 'sz'}${code}.html`
-  const quote = await emQuoteBySecid(`${marketCode(code)}.${code}`, ctx, referer)
+  const raw = String(args.code ?? '600519')
+  const code = normalizeCode(raw)
+  const referer = `https://quote.eastmoney.com/${emSecMarket(raw) === 1 ? 'sh' : 'sz'}${code}.html`
+  const quote = await emQuoteBySecid(`${emSecMarket(raw)}.${code}`, ctx, referer)
   return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
 }
 
@@ -220,8 +223,10 @@ async function emKlineBySecid(secid: string, args: Record<string, unknown>, ctx:
 }
 
 async function emKline(args: Record<string, unknown>, ctx: ProviderContext) {
-  const code = normalizeCode(String(args.code ?? '600519'))
-  const bars = await emKlineBySecid(`${marketCode(code)}.${code}`, args, ctx)
+  const raw = String(args.code ?? '600519')
+  const code = normalizeCode(raw)
+  // 指数必须保留 sh 前缀语义：marketCode('000300') 会误判深市，基准 sh000300 依赖 1.000300。
+  const bars = await emKlineBySecid(`${emSecMarket(raw)}.${code}`, args, ctx)
   return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
 }
 
@@ -254,7 +259,10 @@ async function txKlineBySymbol(symbol: string, args: Record<string, unknown>, ct
 }
 
 async function txKline(args: Record<string, unknown>, ctx: ProviderContext) {
-  const bars = await txKlineBySymbol(toTxSymbol(normalizeCode(String(args.code ?? '600519'))), args, ctx)
+  const raw = String(args.code ?? '600519').trim()
+  // 显式 sh/sz/hk 前缀原样保留（toTxSymbol 的首字符启发式会把 sh000300 错判成 sz000300）。
+  const symbol = /^(sh|sz|bj|hk)[0-9]/i.test(raw) ? raw.toLowerCase() : toTxSymbol(normalizeCode(raw))
+  const bars = await txKlineBySymbol(symbol, args, ctx)
   return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
 }
 
@@ -737,7 +745,10 @@ interface FundData {
   navTrend: Array<{ date: string; nav: number }>
   profile: Record<string, unknown>
 }
-const fundCache = new Map<string, { at: number; data: FundData }>()
+// 净值与画像都在 pingzhongdata.js（数百 KB）里：净值日频更新、画像更慢，5 分钟
+// 缓存足够新；同码并发请求合并成一个 promise，避免多基金持仓首屏重复拉同一文件。
+const FUND_DATA_TTL_MS = 5 * 60_000
+const fundCache = new Map<string, { at: number; data: Promise<FundData> }>()
 
 function fundCode(code: string): string {
   return String(code).replace(/\D/g, '').padStart(6, '0').slice(-6)
@@ -754,44 +765,50 @@ function parseFundVariable<T>(text: string, name: string): T | undefined {
 }
 
 // Source: fund.eastmoney.com pingzhongdata (Data_netWorthTrend + fS_name).
-async function emFundData(code: string, ctx: ProviderContext): Promise<FundData> {
+function emFundData(code: string, ctx: ProviderContext): Promise<FundData> {
   const c = fundCode(code)
   const hit = fundCache.get(c)
-  if (hit && Date.now() - hit.at < 60_000) return hit.data
-  const text = await httpGetText(`https://fund.eastmoney.com/pingzhongdata/${c}.js`, {}, opts(ctx, 'https://fund.eastmoney.com/'))
-  const nameM = text.match(/fS_name\s*=\s*"([^"]*)"/)
-  const trendM = text.match(/Data_netWorthTrend\s*=\s*(\[[\s\S]*?\])\s*;/)
-  const navTrend: Array<{ date: string; nav: number }> = []
-  if (trendM) {
-    const arr = JSON.parse(trendM[1]!) as Array<{ x: number; y: number }>
-    for (const p of arr) {
-      const nav = num(p.y)
-      if (nav != null) navTrend.push({ date: new Date(p.x).toISOString().slice(0, 10), nav })
+  if (hit && Date.now() - hit.at < FUND_DATA_TTL_MS) return hit.data
+  const pending = (async (): Promise<FundData> => {
+    const text = await httpGetText(`https://fund.eastmoney.com/pingzhongdata/${c}.js`, {}, opts(ctx, 'https://fund.eastmoney.com/'))
+    const nameM = text.match(/fS_name\s*=\s*"([^"]*)"/)
+    const trendM = text.match(/Data_netWorthTrend\s*=\s*(\[[\s\S]*?\])\s*;/)
+    const navTrend: Array<{ date: string; nav: number }> = []
+    if (trendM) {
+      const arr = JSON.parse(trendM[1]!) as Array<{ x: number; y: number }>
+      for (const p of arr) {
+        const nav = num(p.y)
+        if (nav != null) navTrend.push({ date: new Date(p.x).toISOString().slice(0, 10), nav })
+      }
     }
-  }
-  if (!navTrend.length) throw new Error(`fund ${c}: empty nav trend`)
-  const profile: Record<string, unknown> = {}
-  const profileKeys = [
-    'Data_assetAllocation',
-    'Data_buySedemption',
-    'Data_currentFundManager',
-    'Data_fluctuationScale',
-    'Data_holderStructure',
-    'Data_performanceEvaluation',
-    'Data_rateInSimilarPersent',
-    'Data_rateInSimilarType',
-  ]
-  for (const key of profileKeys) {
-    const value = parseFundVariable<unknown>(text, key)
-    if (value !== undefined) {
-      profile[key.slice('Data_'.length)] = Array.isArray(value) ? value.slice(-180) : value
+    if (!navTrend.length) throw new Error(`fund ${c}: empty nav trend`)
+    const profile: Record<string, unknown> = {}
+    const profileKeys = [
+      'Data_assetAllocation',
+      'Data_buySedemption',
+      'Data_currentFundManager',
+      'Data_fluctuationScale',
+      'Data_holderStructure',
+      'Data_performanceEvaluation',
+      'Data_rateInSimilarPersent',
+      'Data_rateInSimilarType',
+    ]
+    for (const key of profileKeys) {
+      const value = parseFundVariable<unknown>(text, key)
+      if (value !== undefined) {
+        profile[key.slice('Data_'.length)] = Array.isArray(value) ? value.slice(-180) : value
+      }
     }
-  }
-  const grandTotal = parseFundVariable<unknown[]>(text, 'Data_grandTotal')
-  if (grandTotal) profile.grandTotal = grandTotal.slice(-180)
-  const data: FundData = { name: nameM?.[1] || undefined, navTrend, profile }
-  fundCache.set(c, { at: Date.now(), data })
-  return data
+    const grandTotal = parseFundVariable<unknown[]>(text, 'Data_grandTotal')
+    if (grandTotal) profile.grandTotal = grandTotal.slice(-180)
+    return { name: nameM?.[1] || undefined, navTrend, profile }
+  })()
+  fundCache.set(c, { at: Date.now(), data: pending })
+  // 失败不缓存：踢掉后下一个调用方重试（并发中的调用方共享同一错误）。
+  pending.catch(() => {
+    if (fundCache.get(c)?.data === pending) fundCache.delete(c)
+  })
+  return pending
 }
 
 async function emFundQuote(args: Record<string, unknown>, ctx: ProviderContext) {
@@ -805,6 +822,8 @@ async function emFundQuote(args: Record<string, unknown>, ctx: ProviderContext) 
     price: last.nav,
     change: prev ? Number((last.nav - prev.nav).toFixed(4)) : undefined,
     changePercent: prev && prev.nav ? Number((((last.nav - prev.nav) / prev.nav) * 100).toFixed(2)) : undefined,
+    // 净值日期 = 数据时点：面板据此标「T+1 待更新」，避免把昨日净值当实时价。
+    asOf: last.date,
     raw: { navDate: last.date, profile: fd.profile },
   }
   return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
@@ -856,15 +875,41 @@ async function emMacro(args: Record<string, unknown>, ctx: ProviderContext) {
 // ---- 基金排行（东财 rankhandler，akshare fund_open_fund_rank_em 同源）----
 const FUND_RANK_TYPES: Record<string, string> = { all: 'all', stock: 'gp', hybrid: 'hh', bond: 'zq', index: 'zs', qdii: 'qdii', money: 'hb' }
 
-interface FundRankRow { code: string; name: string; date: string; nav?: number; accNav?: number; dayGrowth?: number; w1?: number; m1?: number; m3?: number; m6?: number; y1?: number; ytd?: number }
+/**
+ * 排序键 → 东财 rankhandler `sc` 参数。键名对照 akshare/页面控件的区间列；
+ * `m6`（6yzf，近6月）与货币基金 `1nsyl`（近1年收益）是既有默认口径，
+ * 其余映射未逐个线上核实——非法键一律回落默认，不猜。
+ */
+export const FUND_RANK_SC: Record<string, string> = {
+  m1: '1yzf', m3: '3yzf', m6: '6yzf', y1: '1nzf', y2: '2nzf', y3: '3nzf', ytd: 'jnzf',
+}
+
+/** ft 为已映射的东财类别码（all/gp/hh/zq/zs/qdii/hb）。 */
+export function fundRankSc(ft: string, sortBy?: string): string {
+  if (ft === 'hb') return '1nsyl'
+  return FUND_RANK_SC[String(sortBy ?? '')] ?? FUND_RANK_SC.m6!
+}
+
+/** 构造 rankhandler 查询参数（纯函数，离线可测）。 */
+export function fundRankRequest(fundType: string, size?: number, sortBy?: string, page?: number): Record<string, string> {
+  const ft = FUND_RANK_TYPES[String(fundType ?? 'all')] ?? 'all'
+  const pn = Math.min(Math.max(Math.trunc(Number(size ?? 20)) || 20, 1), 50)
+  const pi = Math.min(Math.max(Math.trunc(Number(page ?? 1)) || 1, 1), 100)
+  return { op: 'ph', dt: 'kf', ft, rs: '', gs: '0', sc: fundRankSc(ft, sortBy), st: 'desc', pi: String(pi), pn: String(pn), dx: '1' }
+}
+
+interface FundRankRow { code: string; name: string; date: string; nav?: number; accNav?: number; dayGrowth?: number; w1?: number; m1?: number; m3?: number; m6?: number; y1?: number; y2?: number; y3?: number; ytd?: number }
 
 async function emFundRank(args: Record<string, unknown>, ctx: ProviderContext) {
-  const ft = FUND_RANK_TYPES[String(args.fundType ?? 'all')] ?? 'all'
-  const pn = Math.min(Math.max(Number(args.size ?? 20), 1), 50)
-  const sc = ft === 'hb' ? '1nsyl' : '6yzf' // 货币基金按近1年收益，其余按近6月涨幅
+  const query = fundRankRequest(
+    String(args.fundType ?? 'all'),
+    Number(args.size ?? 20),
+    args.sortBy === undefined ? undefined : String(args.sortBy),
+    Number(args.page ?? 1),
+  )
   const text = await httpGetText(
     'https://fund.eastmoney.com/data/rankhandler.aspx',
-    { op: 'ph', dt: 'kf', ft, rs: '', gs: '0', sc, st: 'desc', pi: '1', pn: String(pn), dx: '1' },
+    query,
     opts(ctx, 'https://fund.eastmoney.com/data/fundranking.html'),
   )
   const block = text.match(/datas:\[([\s\S]*?)\]\s*,/)?.[1] ?? text.match(/datas:\[([\s\S]*)\]/)?.[1] ?? ''
@@ -872,10 +917,175 @@ async function emFundRank(args: Record<string, unknown>, ctx: ProviderContext) {
   const rows: FundRankRow[] = items.filter((f) => f[0]).map((f) => ({
     code: f[0]!, name: f[1] ?? '', date: f[3] ?? '',
     nav: num(f[4]), accNav: num(f[5]), dayGrowth: num(f[6]),
-    w1: num(f[7]), m1: num(f[8]), m3: num(f[9]), m6: num(f[10]), y1: num(f[11]), ytd: num(f[14]),
+    w1: num(f[7]), m1: num(f[8]), m3: num(f[9]), m6: num(f[10]), y1: num(f[11]), y2: num(f[12]), y3: num(f[13]), ytd: num(f[14]),
   }))
   if (!rows.length) throw new Error('fund rank: empty')
   return { rows, data: rows, sampleKeys: Object.keys(rows[0]!) }
+}
+
+// ---- 基金历史净值回落源（东财 f10 lsjz）----
+// 契约未线上核实：仅按命名字段（FSRQ/DWJZ/JZZZL/SGZT/SHZT）解析，命不中直接抛错回落，
+// 绝不按位置猜字段。主源（pingzhongdata）失败时才走到这里。
+export interface FundNavApiPoint {
+  date: string
+  nav: number
+  accumNav?: number
+  growthPct?: number
+}
+
+export interface FundNavApiResult {
+  /** 新在前（降序）。 */
+  series: FundNavApiPoint[]
+  subscribeStatus?: string
+  redeemStatus?: string
+}
+
+function pickField(obj: Record<string, unknown>, names: string[]): unknown {
+  for (const n of names) {
+    if (n in obj) return obj[n]
+    const hit = Object.keys(obj).find((k) => k.toLowerCase() === n.toLowerCase())
+    if (hit) return obj[hit]
+  }
+  return undefined
+}
+
+function strNum(v: unknown): number | undefined {
+  if (typeof v === 'string') v = v.replace(/[%％,\s]/g, '')
+  const n = Number(v)
+  return Number.isFinite(n) ? n : undefined
+}
+
+/** 从 lsjz JSON 提取净值序列；没有 FSRQ/DWJZ 这样的命名字段就拒绝解析。 */
+export function parseFundNavLsjz(json: unknown): FundNavApiResult {
+  const root = json && typeof json === 'object' ? json as Record<string, unknown> : undefined
+  const data = root ? (root.Data ?? root.data) as Record<string, unknown> | undefined : undefined
+  const listRaw = data ? (data.lsjzList ?? data.rows ?? data.list) : undefined
+  const list = Array.isArray(listRaw) ? listRaw : undefined
+  if (!list?.length) throw new Error('fund nav api: 响应缺少 Data.lsjzList（契约未线上核实）')
+  const series: FundNavApiPoint[] = []
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    const obj = item as Record<string, unknown>
+    const dateRaw = String(pickField(obj, ['FSRQ', 'date', '净值日期']) ?? '')
+    const nav = strNum(pickField(obj, ['DWJZ', 'nav', '单位净值']))
+    const date = dateRaw.match(/^(\d{4}-\d{2}-\d{2})/)?.[1]
+    if (!date || nav === undefined || nav <= 0 || nav > 10000) continue
+    const point: FundNavApiPoint = { date, nav }
+    const accum = strNum(pickField(obj, ['LJJZ', 'accumNav', '累计净值']))
+    if (accum !== undefined && accum > 0) point.accumNav = accum
+    const growth = strNum(pickField(obj, ['JZZZL', 'JZZDF', 'growthPct', '日增长率']))
+    if (growth !== undefined) point.growthPct = growth
+    series.push(point)
+  }
+  if (!series.length) throw new Error('fund nav api: 解析不到有效净值行（契约未线上核实）')
+  series.sort((a, b) => b.date.localeCompare(a.date))
+  const first = list.find((x) => x && typeof x === 'object') as Record<string, unknown> | undefined
+  const result: FundNavApiResult = { series }
+  if (first) {
+    const sub = typeof pickField(first, ['SGZT', '申购状态']) === 'string' ? String(pickField(first, ['SGZT', '申购状态'])) : undefined
+    const red = typeof pickField(first, ['SHZT', '赎回状态']) === 'string' ? String(pickField(first, ['SHZT', '赎回状态'])) : undefined
+    if (sub) result.subscribeStatus = sub
+    if (red) result.redeemStatus = red
+  }
+  return result
+}
+
+async function emFetchLsjz(code: string, pageSize: number, ctx: ProviderContext): Promise<FundNavApiResult> {
+  const c = fundCode(code)
+  const json = await httpGetJson(
+    'https://api.fund.eastmoney.com/f10/lsjz',
+    { fundCode: c, pageIndex: 1, pageSize },
+    opts(ctx, 'https://fundf10.eastmoney.com/'),
+  )
+  return parseFundNavLsjz(json)
+}
+
+async function emNavQuote(args: Record<string, unknown>, ctx: ProviderContext) {
+  const c = fundCode(String(args.code ?? ''))
+  const res = await emFetchLsjz(c, 20, ctx)
+  const last = res.series[0]!
+  const prev = res.series[1]
+  const quote: StockQuote = {
+    code: c,
+    price: last.nav,
+    change: prev ? Number((last.nav - prev.nav).toFixed(4)) : undefined,
+    changePercent: prev && prev.nav ? Number((((last.nav - prev.nav) / prev.nav) * 100).toFixed(2)) : undefined,
+    asOf: last.date,
+    raw: {
+      navDate: last.date,
+      accumNav: last.accumNav,
+      subscribeStatus: res.subscribeStatus,
+      redeemStatus: res.redeemStatus,
+      source: 'em_fund_nav',
+    },
+  }
+  return { rows: [quote], data: quote, sampleKeys: Object.keys(quote) }
+}
+
+async function emNavKline(args: Record<string, unknown>, ctx: ProviderContext) {
+  const c = fundCode(String(args.code ?? ''))
+  // lsjz 单页上限未知：按请求天数折算并封顶 500 行（近 1 年分析足够；全量历史由主源提供）。
+  const days = Math.max(Number(args.days ?? 120) || 120, 30)
+  const pageSize = Math.min(Math.max(Math.ceil(days * 1.6) + 30, 50), 500)
+  const res = await emFetchLsjz(c, pageSize, ctx)
+  const bars: KlineBar[] = [...res.series]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((p) => ({ date: p.date, open: p.nav, high: p.nav, low: p.nav, close: p.nav, volume: 0, volumeMissing: true }))
+  return { rows: bars, sampleKeys: bars[0] ? Object.keys(bars[0]) : [] }
+}
+
+// ---- 基金重仓持仓（东财 f10 JJCC，穿透/重叠分析用）----
+// 契约未线上核实：年份键优先 + 防御式行识别（normalizeFundHoldingRows ≥60% 认出代码才收），
+// 识别不出就抛错，让档案/工具显式标缺失，不产出猜测数据。
+export function parseFundHoldings(json: unknown): NormalizedHolding[] {
+  const collectArrays = (v: unknown, depth = 0): unknown[][] => {
+    if (depth > 6) return []
+    if (Array.isArray(v)) {
+      const out: unknown[][] = [v]
+      for (const item of v.slice(0, 30)) out.push(...collectArrays(item, depth + 1))
+      return out
+    }
+    if (v && typeof v === 'object') return Object.values(v as Record<string, unknown>).flatMap((x) => collectArrays(x, depth + 1))
+    return []
+  }
+  const candidates: unknown[][] = []
+  const root = json && typeof json === 'object' ? json as Record<string, unknown> : undefined
+  const data = root ? (root.Data ?? root.data) as Record<string, unknown> | undefined : undefined
+  // 1) Data: { "2025": [ ... ], "2024": [...] } → 取最新年份。
+  for (const scope of [data, root]) {
+    if (!scope || typeof scope !== 'object') continue
+    const years = Object.keys(scope).filter((k) => /^\d{4}$/.test(k)).sort()
+    const latest = years.at(-1)
+    if (latest && Array.isArray((scope as Record<string, unknown>)[latest])) {
+      candidates.push((scope as Record<string, unknown>)[latest] as unknown[])
+      break
+    }
+  }
+  // 2) 兜底：递归收集数组候选。
+  candidates.push(...collectArrays(json))
+  let best: NormalizedHolding[] = []
+  for (const arr of candidates) {
+    if (!Array.isArray(arr) || arr.length === 0 || arr.length > 100) continue
+    if (!arr.every((x) => x && typeof x === 'object' && !Array.isArray(x))) continue
+    try {
+      const rows = normalizeFundHoldingRows(arr)
+      if (rows.length > best.length) best = rows
+    } catch { /* 候选不认，换下一个 */ }
+  }
+  if (!best.length) throw new Error('fund holdings: 无法从响应识别持仓结构（契约未线上核实，拒绝猜测）')
+  return best
+}
+
+async function emFundHoldings(args: Record<string, unknown>, ctx: ProviderContext) {
+  const c = fundCode(String(args.code ?? ''))
+  const topN = Math.min(Math.max(Math.trunc(Number(args.topN ?? 10)) || 10, 1), 50)
+  const json = await httpGetJson(
+    'https://api.fund.eastmoney.com/f10/JJCC',
+    { fundcode: c, topline: String(topN), year: '', month: '', rt: String(Math.random()) },
+    opts(ctx, 'https://fundf10.eastmoney.com/'),
+  )
+  const rows = parseFundHoldings(json).slice(0, topN)
+  return { rows, data: rows, sampleKeys: rows[0] ? Object.keys(rows[0]) : [] }
 }
 
 // ---- 快讯 / 新闻（东财，akshare stock_info_global_em / stock_news_em 同源）----
@@ -1119,11 +1329,33 @@ export const PROVIDERS: ProviderMeta[] = [
     call: emFundQuote,
   },
   {
+    // 回落源：主源（pingzhongdata）失败时用 f10 lsjz 命名字段解析；契约未线上核实。
+    id: 'em_fund_nav_quote',
+    capability: 'fund_quote',
+    endpointRef: 'api.fund.eastmoney.com f10/lsjz（命名字段解析，契约未线上核实）',
+    sampleArgs: { code: '110022' },
+    call: emNavQuote,
+  },
+  {
     id: 'em_fund_kline',
     capability: 'fund_kline',
     endpointRef: 'fund.eastmoney.com pingzhongdata (净值走势序列)',
     sampleArgs: { code: '110022' },
     call: emFundKline,
+  },
+  {
+    id: 'em_fund_nav_kline',
+    capability: 'fund_kline',
+    endpointRef: 'api.fund.eastmoney.com f10/lsjz 近段净值（回落源，契约未线上核实）',
+    sampleArgs: { code: '110022', days: 120 },
+    call: emNavKline,
+  },
+  {
+    id: 'em_fund_holdings',
+    capability: 'fund_holdings',
+    endpointRef: 'api.fund.eastmoney.com f10/JJCC 重仓持仓（契约未线上核实，防御式解析）',
+    sampleArgs: { code: '110022' },
+    call: emFundHoldings,
   },
   {
     id: 'em_news_flash',

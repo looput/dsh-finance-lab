@@ -28,14 +28,18 @@ export function registerReminderTools(
     name: 'check_reminders',
     description: '立即扫描一次提醒：持仓/自选的行情异动，以及资料库里观点需要复核的标的。返回本次新增的提醒。',
     parameters: {
-      movePct: { type: 'number', description: '当日异动阈值（%），默认 5' },
-      opinionPct: { type: 'number', description: '观点复核阈值（%），默认 8' },
+      movePct: { type: 'number', description: '当日异动阈值（%），默认 5（股票）' },
+      opinionPct: { type: 'number', description: '观点复核阈值（%），默认 8（股票）' },
+      fundMovePct: { type: 'number', description: '基金当日净值异动阈值（%），默认 2' },
+      fundOpinionPct: { type: 'number', description: '基金观点复核阈值（%），默认 5' },
     },
     output: jsonOut,
-    async execute(args: { movePct?: number; opinionPct?: number }) {
+    async execute(args: { movePct?: number; opinionPct?: number; fundMovePct?: number; fundOpinionPct?: number }) {
       const options: ReminderOptions = {}
       if (typeof args.movePct === 'number') options.movePct = args.movePct
       if (typeof args.opinionPct === 'number') options.opinionPct = args.opinionPct
+      if (typeof args.fundMovePct === 'number') options.fundMovePct = args.fundMovePct
+      if (typeof args.fundOpinionPct === 'number') options.fundOpinionPct = args.fundOpinionPct
       const result = await scan(options)
       if (result.added.length) bus.publish({ kind: 'reminder', count: result.added.length, at: result.at })
       return asJson({

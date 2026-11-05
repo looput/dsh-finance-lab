@@ -7,6 +7,8 @@
  *  - 评估输出供 Agent 与用户参考，不代替人工判断。
  */
 
+import { latestProfileNumber, type FundRiskMetrics } from './fund-analysis.js'
+
 export type IndicatorComparator = '>=' | '>' | '<=' | '<' | '==' | '!=' | 'between'
 
 export interface ThesisIndicator {
@@ -126,6 +128,8 @@ export const KNOWN_METRICS = [
   'eps', 'roe', 'revenue_yoy', 'net_profit_yoy', 'gross_margin', 'net_margin', 'debt_ratio',
   'holder_count',
   'volume', 'amount', 'turnover_rate', 'market_cap', 'dividend_yield',
+  // 基金（type=fund；净值序列/基金画像派生，见 METRIC_SOURCES）
+  'nav_ytd', 'max_drawdown_1y', 'volatility_annual', 'sharpe', 'fund_size', 'similar_rank_pct',
 ] as const
 
 /**
@@ -133,8 +137,8 @@ export const KNOWN_METRICS = [
  * 映射只描述取数口径，不代表上游契约已线上核实。
  */
 export const METRIC_SOURCES: Record<(typeof KNOWN_METRICS)[number], string> = {
-  price: '行情快照 price（最新价，带行情时间）',
-  change_percent: '行情快照 changePercent（当日涨跌幅 %）',
+  price: '行情快照 price（最新价/最新净值，带行情时间）',
+  change_percent: '行情快照 changePercent（当日涨跌幅 %；基金为最新两期净值差）',
   pe_ttm: '行情快照 PE_TTM 或 F10 估值表 peTtm（滚动市盈率）',
   pe_dynamic: 'F10 估值表 peDynamic（动态市盈率）',
   pe_static: 'F10 估值表 peStatic（静态市盈率）',
@@ -153,6 +157,12 @@ export const METRIC_SOURCES: Record<(typeof KNOWN_METRICS)[number], string> = {
   turnover_rate: '行情快照 turnoverRate（换手率 %）',
   market_cap: '行情快照 totalMarketCap/marketCap（总市值/流通市值，币种同标的）',
   dividend_yield: '行情快照 dividendYield（股息率 %，口径随源）',
+  nav_ytd: '基金净值序列本地计算·今年来涨幅 %（截至最新净值日；净值口径不含分红）',
+  max_drawdown_1y: '基金净值序列本地计算·近1年最大回撤绝对值 %（15=15%；历史不足1年缺数据）',
+  volatility_annual: '基金净值序列本地计算·近1年年化波动 %（日收益×√252；历史不足1年缺数据）',
+  sharpe: '基金净值序列本地计算·近1年夏普（年化收益/年化波动，无风险利率=0 简化口径）',
+  fund_size: '基金画像·最新基金规模（Data_fluctuationScale 末值，单位亿元）',
+  similar_rank_pct: '基金画像·同类排名百分比（Data_rateInSimilarPersent 末值，越小越靠前）',
 }
 
 /** 指标键的取数口径说明；未知键返回提示走人工查证。 */
@@ -177,6 +187,56 @@ export function factsFromQuote(data: Record<string, unknown> | undefined, source
   add('turnover_rate', data.turnoverRate ?? raw.TURNOVER_RATE ?? raw.turnover_rate, data.time ?? data.date)
   add('market_cap', data.totalMarketCap ?? data.marketCap ?? raw.TOTAL_MARKET_CAP ?? raw.market_cap, data.time ?? data.date)
   add('dividend_yield', data.dividendYield ?? raw.DIVIDEND_YIELD ?? raw.dividend_yield, data.time ?? data.date)
+  return facts
+}
+
+/**
+ * 基金画像事实（type=fund 专用）：规模与同类排名百分比从 quote.raw.profile 防御式取数。
+ * 取不到或越界就缺（评估时显示 missing），绝不近似；时点用净值日期。
+ */
+export function factsFromFundProfile(
+  data: Record<string, unknown> | undefined,
+  source = '基金画像（东财 pingzhongdata）',
+): Record<string, FactValue> {
+  const facts: Record<string, FactValue> = {}
+  if (!data || typeof data !== 'object') return facts
+  const raw = (data.raw ?? {}) as Record<string, unknown>
+  const profile = (raw.profile ?? {}) as Record<string, unknown>
+  const asOf = dateStr(raw.navDate ?? data.asOf)
+  const add = (key: string, value: number | undefined, label: string) => {
+    if (value !== undefined && Number.isFinite(value)) {
+      facts[key] = { value, asOf, source: `${source}·${label}（截至 ${asOf ?? '未知时点'}）` }
+    }
+  }
+  // 越界即视为不可识别（把时间戳/序号当数值是最常见的上游形状差异）。
+  const size = latestProfileNumber(profile.fluctuationScale)
+  if (size !== undefined && size > 0 && size < 100_000) {
+    add('fund_size', size, '规模走势末值 Data_fluctuationScale（单位亿元）')
+  }
+  const rankPct = latestProfileNumber(profile.rateInSimilarPersent)
+  if (rankPct !== undefined && rankPct >= 0 && rankPct <= 100) {
+    add('similar_rank_pct', rankPct, '同类排名百分比 Data_rateInSimilarPersent（越小越靠前）')
+  }
+  return facts
+}
+
+/** 基金风险事实：本地净值序列计算结果 → 事实表（样本不足的字段自然缺失）。 */
+export function factsFromFundRisk(
+  risk: FundRiskMetrics,
+  source = '基金净值序列（本地计算）',
+): Record<string, FactValue> {
+  const facts: Record<string, FactValue> = {}
+  const add = (key: string, value: number | null | undefined) => {
+    if (value !== null && value !== undefined && Number.isFinite(value)) {
+      facts[key] = { value, asOf: risk.asOf || undefined, source }
+    }
+  }
+  add('nav_ytd', risk.stages.ytd)
+  if (risk.y1) {
+    add('max_drawdown_1y', risk.y1.maxDrawdownPct)
+    add('volatility_annual', risk.y1.annualizedVolPct)
+    add('sharpe', risk.y1.sharpe)
+  }
   return facts
 }
 

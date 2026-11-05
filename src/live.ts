@@ -112,6 +112,7 @@ async function buildQuotes(
       changePercent,
       spark: sparkBy.get(`${it.type}:${it.code}`),
       provider: batched ? batch?.provider : undefined,
+      asOf: batched?.asOf ?? single?.quote?.asOf,
       error: hasPrice ? undefined : (single?.error ?? '暂无行情'),
     }
   })

@@ -105,7 +105,11 @@ const DATA_INTERFACES: Array<{ group: string; items: InterfaceItem[] }> = [
   ] },
   { group: '基金', items: [
     { cap: 'fund_quote', label: '基金净值', tool: 'get_fund_quote', source: '东财' },
+    { cap: 'fund_kline', label: '基金净值走势', tool: 'get_fund_kline', source: '东财' },
     { cap: 'fund_rank', label: '基金排行', tool: 'get_fund_rank', source: '东财' },
+    { cap: 'fund_holdings', label: '基金重仓持仓', tool: 'get_fund_holdings', source: '东财 F10' },
+    { cap: 'etf_overview', label: 'ETF 概览/折溢价', tool: 'get_etf_overview', source: 'WeStock' },
+    { cap: 'etf_holdings', label: 'ETF 重仓持仓', tool: 'get_etf_holdings', source: 'WeStock' },
   ] },
   { group: '快讯 / 新闻', items: [
     { cap: 'news_flash', label: '市场电报', tool: 'get_market_news', source: '东财全球快讯' },
@@ -293,6 +297,14 @@ const SOURCE_META: Array<{ prefix: string; label: string; color: string }> = [
 function sourceOf(provider?: string): { label: string; color: string } | undefined {
   if (!provider) return undefined
   return SOURCE_META.find((s) => provider.startsWith(s.prefix))
+}
+
+/** 基金净值是 T+1 更新：asOf 距今超过 4 天（容忍周末/节假日）标记延迟。 */
+const isStaleAsOf = (asOf?: string): boolean => {
+  if (!asOf) return false
+  const t = Date.parse(asOf.length > 10 ? asOf : `${asOf}T00:00:00+08:00`)
+  if (!Number.isFinite(t)) return false
+  return (Date.now() - t) / 86400000 > 4
 }
 
 /** 注入一次骨架屏动画（面板没有全局样式表，避免为此引入构建期 CSS）。 */
@@ -486,6 +498,11 @@ function QuoteRow(props: { q: LiveQuote; loading?: boolean; onRemove?: () => voi
       // minWidth:0 + wrap：否则「市场标签 + 代码 + 来源」的 min-content 会把窄面板撑破。
       h('div', { style: { ...S.muted, display: 'flex', gap: 6, alignItems: 'center', fontSize: 11, minWidth: 0, flexWrap: 'wrap', overflow: 'hidden' } },
         h('span', { style: S.tag }, q.market || (q.type === 'fund' ? '基金' : '股票')), q.code,
+        // 基金净值有明确的数据时点（T+1）：把净值日期展示出来，避免当成实时价。
+        q.type === 'fund' && q.asOf ? h('span', { style: { fontSize: 10 } }, `净值 ${q.asOf.slice(0, 10)}`) : null,
+        q.type === 'fund' && q.asOf && isStaleAsOf(q.asOf)
+          ? h('span', { style: { fontSize: 10, color: '#c98a1a', border: '1px solid #c98a1a55', borderRadius: 4, padding: '0 4px' } }, '延迟')
+          : null,
         src ? h('span', { style: { color: src.color, fontSize: 10, border: `1px solid ${src.color}55`, borderRadius: 4, padding: '0 4px' } }, src.label) : null)),
     // 窄面板：迷你 K 线挪到第二行与价格同行，主行只留名称 + 涨跌幅 + 移除。
     tight ? null : h(Sparkline, { data: q.spark, color: sparkColor, w: 64 }),
@@ -691,8 +708,20 @@ function ensureBusSource(): void {
 // （输入面板）。做法是找到当前会话的作用域，取其输入面板 setDraft + submit，
 // 等价于用户在输入框里粘贴后回车；拿不到服务时退回复制到剪贴板。
 type SessionInputFace = { setDraft: (text: string) => void; submit: () => void; state?: { getSnapshot: () => { draft: string; phase: string; attachmentIds: readonly string[] } } }
+/** 宿主会话列表行（dsh-api-session-controller 投影：标题/时间/状态全在 byId 里）。 */
+type SessionRow = {
+  id: string
+  displayTitle?: string
+  title?: string
+  running?: boolean
+  blank?: boolean
+  /** epoch ms（宿主 relativeTime 同口径）。 */
+  updatedAt?: number
+  origin?: string
+  cwd?: string
+}
 type SessionsFace = {
-  list: { getSnapshot: () => { ids?: string[] } }
+  list: { getSnapshot: () => { ids?: string[]; byId?: Record<string, SessionRow>; phase?: string } }
   scope: (id: string) => unknown | undefined
 }
 type ConversationFace = {
@@ -709,22 +738,214 @@ let selectedPanelSession = ''
 function currentSessionId(sessions: SessionsFace): string | undefined {
   return selectedPanelSession && sessions.scope(selectedPanelSession) ? selectedPanelSession : undefined
 }
+
+// ---- 任务会话元数据（绑定持久化 + 投递记录，只存本机 localStorage，不出机器） ----
+const SESSION_TARGET_KEY = 'dsh-finance.session-target'
+const SESSION_DELIVERY_KEY = 'dsh-finance.session-delivery'
+/** 分组折叠状态（组名 → 是否折叠），仅本机 localStorage。 */
+const SESSION_GROUPS_KEY = 'dsh-finance.session-groups'
+type DeliveryMeta = Record<string, { lastAt: number; count: number }>
+function readLocalJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch { return fallback }
+}
+function writeLocalJson(key: string, value: unknown): void {
+  try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* 隐私模式等：静默降级 */ }
+}
+/** 成功投递后记一笔（会话行展示「已投递 N 次 · 上次时间」，帮助区分同名会话）。 */
+function noteSessionDelivery(id: string): void {
+  if (!id) return
+  const meta = readLocalJson<DeliveryMeta>(SESSION_DELIVERY_KEY, {})
+  meta[id] = { lastAt: Date.now(), count: (meta[id]?.count ?? 0) + 1 }
+  writeLocalJson(SESSION_DELIVERY_KEY, meta)
+}
+function sessionRelTime(ms?: number): string {
+  if (!ms || ms <= 0) return ''
+  const d = Date.now() - ms
+  if (d < 60_000) return '刚刚'
+  if (d < 3_600_000) return `${Math.floor(d / 60_000)} 分钟前`
+  if (d < 86_400_000) return `${Math.floor(d / 3_600_000)} 小时前`
+  if (d < 30 * 86_400_000) return `${Math.floor(d / 86_400_000)} 天前`
+  return new Date(ms).toLocaleDateString()
+}
+/** 按本地日历日归类：今天 / 昨天 / 近 7 天 / 更早（无时间戳归「更早」）。 */
+function sessionBucket(ms?: number): 'today' | 'yesterday' | 'week' | 'old' {
+  if (!ms || ms <= 0) return 'old'
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  const t0 = start.getTime()
+  if (ms >= t0) return 'today'
+  if (ms >= t0 - 86_400_000) return 'yesterday'
+  if (ms >= t0 - 7 * 86_400_000) return 'week'
+  return 'old'
+}
+function shortSessionId(id: string): string {
+  return id.length > 12 ? `…${id.slice(-8)}` : id
+}
+function sessionBaseName(p?: string): string {
+  if (!p) return ''
+  const parts = p.split(/[\\/]/).filter(Boolean)
+  return parts[parts.length - 1] ?? ''
+}
+
+/**
+ * 任务会话选择器（重设计）：裸 id 下拉在多会话后完全不可区分 —— 改为
+ * 标题化行（宿主 displayTitle）+ 按时间归类分组 + 搜索 + 运行状态点 +
+ * 本机投递记录徽标；绑定选择跨刷新持久化。子代理单列在末组（辅助会话）。
+ */
 function SessionPicker() {
-  const [selected, setSelected] = useState(selectedPanelSession)
-  const [ids, setIds] = useState<string[]>([])
+  const [selected, setSelected] = useState(() => {
+    try {
+      const saved = localStorage.getItem(SESSION_TARGET_KEY)
+      if (saved) { selectedPanelSession = saved; return saved }
+    } catch { /* */ }
+    return selectedPanelSession
+  })
+  const [rows, setRows] = useState<SessionRow[]>([])
+  const [pending, setPending] = useState(true)
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+  const [meta, setMeta] = useState<DeliveryMeta>(() => readLocalJson<DeliveryMeta>(SESSION_DELIVERY_KEY, {}))
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => readLocalJson<Record<string, boolean>>(SESSION_GROUPS_KEY, {}))
+  const rootRef = useRef<HTMLDivElement | null>(null)
+
+  // 2s 轮询宿主快照；内容没变不 setState（避免无谓重渲染）。
   useEffect(() => {
+    let prevKey = ''
+    let prevMetaKey = ''
     const refresh = () => {
-      const ids = panelCtx?.sessions?.list.getSnapshot().ids ?? []
-      setIds(ids)
-      if (selectedPanelSession && !ids.includes(selectedPanelSession)) { selectedPanelSession = ''; setSelected('') }
+      const snap = panelCtx?.sessions?.list.getSnapshot()
+      const ids = snap?.ids ?? []
+      const byId = snap?.byId ?? {}
+      const next: SessionRow[] = ids.map((id) => {
+        const r = byId[id]
+        return r
+          ? { id, displayTitle: r.displayTitle, title: r.title, running: r.running, blank: r.blank, updatedAt: r.updatedAt, origin: r.origin, cwd: r.cwd }
+          : { id }
+      })
+      const key = next.map((r) => `${r.id}|${r.displayTitle ?? ''}|${r.updatedAt ?? 0}|${r.running ? 1 : 0}`).join(';')
+      if (key !== prevKey) { prevKey = key; setRows(next); setPending(snap?.phase === 'pending') }
+      // 列表就绪后才校验绑定（pending 空列表不能误清持久化的选择）
+      if (selectedPanelSession && ids.length > 0 && !ids.includes(selectedPanelSession)) {
+        selectedPanelSession = ''
+        setSelected('')
+        try { localStorage.removeItem(SESSION_TARGET_KEY) } catch { /* */ }
+      }
+      const m = readLocalJson<DeliveryMeta>(SESSION_DELIVERY_KEY, {})
+      const mk = JSON.stringify(m)
+      if (mk !== prevMetaKey) { prevMetaKey = mk; setMeta(m) }
     }
-    refresh(); const timer = window.setInterval(refresh, 2000); return () => window.clearInterval(timer)
+    refresh()
+    const timer = window.setInterval(refresh, 2000)
+    return () => window.clearInterval(timer)
   }, [])
-  return h('label', { style: { display: 'flex', alignItems: 'center', gap: 9, padding: '8px 14px', fontSize: 11, color: V('--dsw-alias-label-secondary', '#667085'), background: R.canvas, borderBottom: `1px solid ${R.line}` } },
+
+  // 弹层：点外部 / Esc 关闭。
+  useEffect(() => {
+    if (!open) return
+    const onDown = (ev: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(ev.target as Node)) setOpen(false)
+    }
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
+  }, [open])
+
+  const query = q.trim().toLowerCase()
+  const filtered = rows.filter((r) => {
+    if (!query) return true
+    return [r.displayTitle, r.title, r.id, r.cwd].filter(Boolean).join(' ').toLowerCase().includes(query)
+  })
+  const byTimeDesc = (a: SessionRow, b: SessionRow) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || a.id.localeCompare(b.id)
+  const mains = filtered.filter((r) => r.origin !== 'subagent')
+  const subagents = filtered.filter((r) => r.origin === 'subagent').sort(byTimeDesc)
+  const groups: Array<{ label: string; items: SessionRow[] }> = []
+  for (const [label, bucket] of [['今天', 'today'], ['昨天', 'yesterday'], ['近 7 天', 'week'], ['更早', 'old']] as const) {
+    const items = mains.filter((r) => sessionBucket(r.updatedAt) === bucket).sort(byTimeDesc)
+    if (items.length) groups.push({ label, items })
+  }
+  if (subagents.length) groups.push({ label: '子代理（辅助会话）', items: subagents })
+  // 归类收纳：搜索命中时全部展开；用户折叠记录优先；首访默认仅展开最近一组（长列表折成目录头）。
+  const isCollapsed = (g: { label: string; items: SessionRow[] }): boolean => {
+    if (query) return false
+    const saved = collapsed[g.label]
+    if (saved !== undefined) return saved
+    return groups.length > 1 && g !== groups[0]
+  }
+  const toggleGroup = (g: { label: string; items: SessionRow[] }): void => {
+    const next = { ...collapsed, [g.label]: !isCollapsed(g) }
+    setCollapsed(next)
+    writeLocalJson(SESSION_GROUPS_KEY, next)
+  }
+
+  const selectedRow = rows.find((r) => r.id === selected)
+  const selectedLabel = selected ? (selectedRow?.displayTitle || selectedRow?.title || shortSessionId(selected)) : '选择目标会话'
+  const dot = (on: boolean) => h('span', { style: { width: 7, height: 7, borderRadius: 999, flex: 'none', background: on ? '#16a34a' : 'transparent', border: on ? 'none' : '1px solid #98a2b3' } })
+  const rowStyle: CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '6px 8px',
+    border: 'none', background: 'transparent', borderRadius: 6, cursor: 'pointer', fontSize: 12, color: 'inherit',
+  }
+  const bind = (id: string) => {
+    selectedPanelSession = id
+    setSelected(id)
+    if (id) writeLocalJson(SESSION_TARGET_KEY, id)
+    else { try { localStorage.removeItem(SESSION_TARGET_KEY) } catch { /* */ } }
+    setOpen(false)
+    setQ('')
+  }
+
+  return h('div', { ref: rootRef, style: { display: 'flex', alignItems: 'center', gap: 9, padding: '8px 14px', position: 'relative', fontSize: 11, color: V('--dsw-alias-label-secondary', '#667085'), background: R.canvas, borderBottom: `1px solid ${R.line}` } },
     h('span', { style: { whiteSpace: 'nowrap', fontWeight: 700 } }, '↗ 任务会话'),
-    h('select', { style: { ...S.input, flex: 1, minWidth: 0, maxWidth: 280 }, value: selected, onChange: (e: any) => { selectedPanelSession = e.target.value; setSelected(e.target.value) } },
-      h('option', { value: '' }, '请选择目标会话'), ...ids.map(id => h('option', { key: id, value: id }, id))),
-    h('span', { style: { whiteSpace: 'nowrap' } }, selected ? '投递前请核对' : '未绑定'))
+    h('button', {
+      type: 'button', 'aria-expanded': open, title: selected ? `投递目标：${selectedLabel}` : '选择投递目标会话',
+      onClick: () => { setQ(''); setOpen((o) => !o) },
+      style: { display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0, maxWidth: 320, ...S.input, cursor: 'pointer', textAlign: 'left' },
+    },
+      dot(!!selectedRow?.running),
+      h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+        selectedLabel + (selected && !selectedRow ? '（待同步）' : '')),
+      selectedRow ? h('span', { style: { fontSize: 10, color: '#98a2b3', flex: 'none', whiteSpace: 'nowrap' } }, sessionRelTime(selectedRow.updatedAt)) : null,
+      h('span', { style: { fontSize: 9, flex: 'none', color: '#98a2b3' } }, open ? '▲' : '▼')),
+    h('span', { style: { whiteSpace: 'nowrap' } }, selected ? '投递前请核对' : '未绑定'),
+    open ? h('div', { style: { position: 'absolute', top: '100%', left: 14, right: 14, zIndex: 70, marginTop: 2, background: R.canvas, border: `1px solid ${R.line}`, borderRadius: 10, boxShadow: '0 12px 32px rgba(16,24,40,.14)', overflow: 'hidden', color: V('--dsw-alias-text', '#344054') } },
+      h('input', {
+        value: q, onChange: (e: any) => setQ(e.target.value), placeholder: '按标题 / ID / 目录搜索…', autoFocus: true,
+        style: { ...S.input, margin: 8, width: 'calc(100% - 16px)', boxSizing: 'border-box' },
+      }),
+      h('div', { style: { maxHeight: 300, overflowY: 'auto', padding: '0 6px 6px' } },
+        pending && !rows.length ? h('div', { style: { padding: 10, fontSize: 11, color: '#98a2b3' } }, '会话列表加载中…') : null,
+        !pending && !filtered.length ? h('div', { style: { padding: 10, fontSize: 11, color: '#98a2b3' } }, rows.length ? '没有匹配的会话' : '暂无会话') : null,
+        rows.length ? h('button', { type: 'button', onClick: () => bind(''), style: rowStyle },
+          dot(false),
+          h('span', { style: { flex: 1, textAlign: 'left', color: '#667085' } }, '不绑定（投递时复制到剪贴板）')) : null,
+        groups.map((g) => h('div', { key: g.label },
+          h('button', {
+            type: 'button', onClick: () => toggleGroup(g),
+            title: isCollapsed(g) ? `展开「${g.label}」` : `折叠「${g.label}」`,
+            style: { display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '7px 8px 3px', border: 'none', background: R.canvas, cursor: 'pointer', fontSize: 10, fontWeight: 700, color: '#98a2b3', letterSpacing: 0.4, textAlign: 'left', position: 'sticky', top: 0, zIndex: 1 },
+          },
+            h('span', { style: { fontSize: 9, flex: 'none' } }, isCollapsed(g) ? '▸' : '▾'),
+            h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${g.label} · ${g.items.length}${isCollapsed(g) ? '（已折叠，点击展开）' : ''}`),
+            g.items.some((r) => r.running) ? dot(true) : null),
+          isCollapsed(g) ? null : g.items.map((r) => h('button', {
+            key: r.id, type: 'button', title: r.id,
+            onClick: () => bind(r.id),
+            style: { ...rowStyle, background: r.id === selected ? BRAND_SOFT : undefined, fontWeight: r.id === selected ? 700 : 400 },
+          },
+            dot(!!r.running),
+            h('span', { style: { flex: 1, minWidth: 0 } },
+              h('span', { style: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 } },
+                r.displayTitle || r.title || shortSessionId(r.id)),
+              h('span', { style: { display: 'block', fontSize: 10, color: '#98a2b3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                [shortSessionId(r.id), r.cwd ? sessionBaseName(r.cwd) : '', r.blank ? '空白' : '', meta[r.id] ? `已投递 ${meta[r.id]!.count} 次` : ''].filter(Boolean).join(' · '))),
+            h('span', { style: { fontSize: 10, color: '#98a2b3', flex: 'none', whiteSpace: 'nowrap' } }, sessionRelTime(r.updatedAt)))))),
+      ),
+      h('div', { style: { fontSize: 10, color: '#98a2b3', padding: '6px 10px', borderTop: `1px solid ${R.line}` } },
+        `共 ${rows.length} 个会话 · 分组可折叠 · 子代理单列在末尾 · 绑定与投递记录只存本机`))
+      : null)
 }
 
 /** 把一段 prompt 送进当前对话；返回实际投递方式，供 UI 提示。 */
@@ -741,6 +962,7 @@ async function deliverToChat(text: string): Promise<'sent' | 'copied' | 'failed'
       input.setDraft(text)
       input.submit()
       chatDeliveryError = ''
+      if (id) noteSessionDelivery(id)
       return 'sent'
     }
     if (!id) chatDeliveryError = '请先在金融面板明确选择目标会话；该会话必须处于打开状态'
@@ -754,6 +976,44 @@ async function deliverToChat(text: string): Promise<'sent' | 'copied' | 'failed'
     chatDeliveryError = `${chatDeliveryError || '-'} · copy:${err instanceof Error ? err.message : String(err)}`
     return 'failed'
   }
+}
+
+/** 上报面板焦点（tab + 聚焦代码）→ POST /panel-focus；同样内容去重，失败静默。 */
+let lastFocusSent = ''
+function reportPanelFocus(payload: { tab: string; code?: string; type?: string }): void {
+  const clean = { tab: payload.tab, ...(payload.code ? { code: payload.code, type: payload.type ?? 'stock' } : {}) }
+  const key = JSON.stringify(clean)
+  if (key === lastFocusSent) return
+  lastFocusSent = key
+  void apiPost<{ ok?: boolean }>('/panel-focus', clean).catch(() => { /* 焦点上报 best-effort */ })
+}
+
+/** Agent 活动 → 面板顶部胶囊的友好文案（未知工具回退原名）。 */
+const AGENT_TOOL_LABEL: Record<string, string> = {
+  get_realtime_quote: '查行情', get_stock_kline: '拉K线', get_fund_kline: '拉净值走势',
+  stock_dossier: '拉个股档案', fund_dossier: '拉基金档案', analyze_portfolio: '分析组合',
+  portfolio_lookthrough: '组合穿透', check_new_position: '买入前检查', simulate_rebalance: '再平衡推演',
+  save_research: '写入资料库', collect_research: '收集研报', save_position_analysis: '保存解读报告',
+  get_weekly_reviews: '生成周复盘', save_weekly_review: '写回复盘卡',
+  growth_state: '装载成长状态', growth_diagnose: '成长诊断', lesson_get: '取微课教材',
+  lesson_complete: '测验判分', family_plan_get: '读家庭规划', family_plan_update: '更新家庭规划',
+  growth_review_mark: '记录成长复盘', panel_navigate: '切换面板', panel_state: '读取面板焦点',
+  get_fund_rank: '基金排行', search_stock: '搜标的', web_search: '网页搜索',
+  follow_list: '装载追踪记忆', follow_add: '添加追踪对象', follow_remove: '移除追踪对象',
+  follow_fetch: '拉取最新披露', follow_diff: '两期持仓对比', follow_vs_holdings: '与我的持仓对比',
+  follow_replicate: '纸面复刻', follow_note: '写追踪简报',
+}
+function agentToolLabel(name: string): string {
+  return AGENT_TOOL_LABEL[name] ?? name
+}
+
+/** 面板页内锚点：切视图后滚动到区块（立即 + 120ms 兜底，覆盖视图刚挂载的场景）。 */
+function emitPanelAnchor(tab: string, anchor: string): void {
+  const detail = { tab, anchor, at: Date.now() }
+  try { window.dispatchEvent(new CustomEvent('dsh:panel-anchor', { detail })) } catch { /* */ }
+  window.setTimeout(() => {
+    try { window.dispatchEvent(new CustomEvent('dsh:panel-anchor', { detail })) } catch { /* */ }
+  }, 120)
 }
 
 /** Subscribe to pushed server events; the shared EventSource starts on first use. */
@@ -947,6 +1207,7 @@ function QuotesView(props: {
           : h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无指数数据，点右上角刷新重试' }))
         : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))', gap: 6 } },
           data.indices.map((ix) => h(IndexCard, { key: ix.code, ix })))),
+    h(SectorsPanel, null),
     group('自选 · 行情走势', `${watchQuotes.length} 只`,
       watchQuotes.length === 0
         ? h(EmptyState, {
@@ -976,6 +1237,32 @@ function QuotesView(props: {
 }
 
 // ---- 持仓 tab ----
+// ---- 穿透体检（P2）：/lookthrough 载荷（服务端 buildLookthrough 的精简镜像）----
+interface LookthroughStockRow {
+  code: string
+  name?: string
+  weightPct: number
+  directPct: number
+  indirectPct: number
+  via: Array<{ fund: string; fundName?: string; viaPct: number }>
+  repeated: boolean
+}
+interface LookthroughPayload {
+  ok: boolean
+  error?: string
+  weightsSource?: 'market' | 'cost'
+  topN?: number
+  totals?: {
+    stockPct: number; hhi: number; effectiveStocks: number; top1Pct: number; top5Pct: number; top10Pct: number
+    directPct: number; fundPct: number; fundCoveredPct: number; repeatedCount: number
+  }
+  funds?: Array<{ code: string; name?: string; weightPct: number; holdingsCount: number; topWeightPct?: number; error?: string }>
+  stocks?: LookthroughStockRow[]
+  repeatedTop?: LookthroughStockRow[]
+  warnings?: string[]
+  notes?: string[]
+}
+
 function HoldingsView(props: {
   data: LiveData
   quoteBy: Map<string, LiveQuote>
@@ -987,6 +1274,36 @@ function HoldingsView(props: {
   const [hQty, setHQty] = useState('100')
   const [hCost, setHCost] = useState('0')
   const [hType, setHType] = useState<AssetType>('stock')
+  // ---- P2 穿透体检：直投 + 基金重仓 → 真实股票暴露（服务端拉基金重仓，按需加载）----
+  const [look, setLook] = useState<LookthroughPayload | undefined>()
+  const [lookLoading, setLookLoading] = useState(false)
+  const [lookErr, setLookErr] = useState('')
+  const loadLook = useCallback(async () => {
+    setLookLoading(true)
+    setLookErr('')
+    try {
+      const r = await apiGet<LookthroughPayload>('/lookthrough')
+      if (r.ok && r.totals) setLook(r)
+      else setLookErr(r.error ?? '穿透失败（持仓为空或权重不可计算）')
+    } catch (e) { setLookErr(errText(e)) } finally { setLookLoading(false) }
+  }, [])
+  // 只在含基金持仓时自动穿透（纯股组合的「穿透」= 自身权重，无增量信息）；持仓数变化后重跑。
+  const fundCount = data.holdings.filter((hd) => hd.type === 'fund').length
+  useEffect(() => { if (fundCount > 0) void loadLook() }, [fundCount]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Agent → 面板锚点：panel_navigate(anchor=lookthrough) 滚动到穿透体检。
+  const ltRef = useRef<HTMLDivElement | null>(null)
+  const ltAnchorAt = useRef(0)
+  useEffect(() => {
+    const onAnchor = (ev: Event) => {
+      const d = (ev as CustomEvent).detail as { tab?: string; anchor?: string; at?: number } | undefined
+      if (!d || d.anchor !== 'lookthrough') return
+      if (d.at && ltAnchorAt.current === d.at) return
+      ltAnchorAt.current = d.at ?? Date.now()
+      ltRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+    window.addEventListener('dsh:panel-anchor', onAnchor)
+    return () => window.removeEventListener('dsh:panel-anchor', onAnchor)
+  }, [])
   const totalCost = data.holdings.reduce((s, hd) => s + hd.avgCost * hd.quantity, 0)
   const totalValue = data.holdings.reduce((s, hd) => {
     const p = quoteBy.get(keyOf(hd.code, hd.type))?.price
@@ -1079,6 +1396,41 @@ function HoldingsView(props: {
             h('span', { style: { ...S.muted, width: 42, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, `${w.w.toFixed(1)}%`)))),
         h('div', { style: { ...S.muted, fontSize: 11 } },
           top1 > 40 ? `集中度偏高：${weights[0]?.name ?? '—'} 占 ${top1.toFixed(0)}%，注意单一标的风险。` : `最大 ${top1.toFixed(0)}%（${weights[0]?.name ?? '—'}）· 前三 ${top3.toFixed(0)}%`))) : null,
+    // 穿透体检（P2）：多只基金是否「真分散」——把基金重仓展开后看真实个股暴露与重复持仓。
+    data.holdings.length && (fundCount > 0 || look) ? h('div', { style: S.group, ref: ltRef, 'data-panel-anchor': 'lookthrough' },
+      h('div', { style: S.groupHead },
+        h('div', { style: { ...S.title, marginBottom: 0 } }, '穿透体检 · 伪分散检测'),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } },
+          lookLoading ? '穿透中…（拉取基金重仓）'
+            : look?.totals ? `有效个股 ${look.totals.effectiveStocks} · 重复暴露 ${look.totals.repeatedCount} 只`
+              : lookErr || '点刷新加载'),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void loadLook(), disabled: lookLoading }, lookLoading ? '…' : '刷新')),
+      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 7 } },
+        lookErr ? h('div', { style: { fontSize: 11, color: UP } }, lookErr) : null,
+        lookLoading && !look ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          h(Skeleton, { w: '100%', h: 34 }), h(Skeleton, { w: '60%', h: 34 })) : null,
+        look?.totals ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 7 } },
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
+            [
+              `HHI ${look.totals.hhi.toFixed(3)}`,
+              `有效个股 ${look.totals.effectiveStocks}`,
+              `穿透覆盖 ${look.totals.fundCoveredPct}%/${look.totals.fundPct}%`,
+              `第一大 ${look.totals.top1Pct}%`,
+              `Top5 ${look.totals.top5Pct}%`,
+            ].map((t) => h('span', { key: t, style: { ...S.tag, fontSize: 10 } }, t))),
+          ...(look.warnings ?? []).slice(0, 3).map((w, i) =>
+            h('div', { key: `lw-${i}`, style: { fontSize: 11, color: UP } }, `⚠ ${w}`)),
+          (look.repeatedTop ?? []).length
+            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+              h('div', { style: { ...S.muted, fontSize: 11, fontWeight: 600 } }, '重复暴露 Top（多来源 = 同一个赌注）'),
+              (look.repeatedTop ?? []).slice(0, 6).map((s) => h('div', { key: `rep-${s.code}`, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 } },
+                h('span', { style: { minWidth: 0, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, s.name || s.code),
+                h('span', { style: { ...S.muted, fontSize: 10, flex: '0 0 auto' } },
+                  `${s.via.map((v) => v.fund).join('+')}${s.directPct > 0 ? '+直投' : ''}`),
+                h('span', { style: { fontWeight: 600, fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' } }, `${s.weightPct.toFixed(1)}%`))))
+            : h('div', { style: { ...S.muted, fontSize: 11 } }, '未发现重复暴露：基金间前 N 大重仓无交集（好迹象）。'),
+          h('div', { style: { ...S.muted, fontSize: 10 } }, look.notes?.[0] ?? '前 N 大重仓穿透为上界近似，真实暴露 ≤ 此值。'))
+        : null)) : null,
     h('div', { style: S.group },
       h('div', { style: S.groupHead }, h('div', { style: { ...S.title, marginBottom: 0 } }, '添加持仓')),
       h('div', { style: { padding: 9, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
@@ -1144,40 +1496,49 @@ function MacroView(props: { active: boolean }) {
 }
 
 // ---- 基金 tab ----
-interface FundRankRow { code: string; name: string; date: string; nav?: number; m1?: number; m3?: number; m6?: number; y1?: number; ytd?: number }
+interface FundRankRow { code: string; name: string; date: string; nav?: number; m1?: number; m3?: number; m6?: number; y1?: number; y2?: number; y3?: number; ytd?: number }
 const FUND_TYPES: Array<{ v: string; label: string }> = [
   { v: 'all', label: '全部' }, { v: 'stock', label: '股票' }, { v: 'hybrid', label: '混合' },
   { v: 'bond', label: '债券' }, { v: 'index', label: '指数' }, { v: 'qdii', label: 'QDII' },
 ]
+/** 排序周期 pills：与 get_fund_rank 的 sortBy 枚举一一对应。 */
+const FUND_SORTS: Array<{ v: string; label: string }> = [
+  { v: 'm1', label: '近1月' }, { v: 'm3', label: '近3月' }, { v: 'm6', label: '近6月' },
+  { v: 'y1', label: '近1年' }, { v: 'y3', label: '近3年' }, { v: 'ytd', label: '今年来' },
+]
+const fundPillStyle = (on: boolean): CSSProperties => ({
+  ...S.btn, padding: '3px 9px', borderRadius: 999, border: `1px solid ${on ? BRAND : R.line}`,
+  background: on ? BRAND_SOFT : S.btn.background,
+  color: on ? BRAND : S.btn.color,
+  fontWeight: on ? 600 : 400,
+})
 function FundsView(props: { active: boolean; mutate: (a: string, p: Record<string, unknown>) => void }) {
   const [type, setType] = useState('all')
+  const [sort, setSort] = useState('m6')
   const [rows, setRows] = useState<FundRankRow[]>([])
   const [loading, setLoading] = useState(false)
   const [added, setAdded] = useState<Record<string, boolean>>({})
-  const load = useCallback(async (t: string) => {
+  const load = useCallback(async (t: string, s: string) => {
     setLoading(true)
-    try { const r = await apiGet<{ ok: boolean; rows: FundRankRow[] }>(`/fundrank?type=${t}&size=20`); setRows(r.ok ? r.rows : []) } catch { setRows([]) } finally { setLoading(false) }
+    try { const r = await apiGet<{ ok: boolean; rows: FundRankRow[] }>(`/fundrank?type=${t}&size=20&sort=${s}`); setRows(r.ok ? r.rows : []) } catch { setRows([]) } finally { setLoading(false) }
   }, [])
-  useEffect(() => { if (props.active) void load(type) }, [props.active, type]) // eslint-disable-line react-hooks/exhaustive-deps
-  const maxAbs = Math.max(1, ...rows.map((r) => Math.abs(r.m6 ?? 0)))
+  useEffect(() => { if (props.active) void load(type, sort) }, [props.active, type, sort]) // eslint-disable-line react-hooks/exhaustive-deps
+  const sortLabel = FUND_SORTS.find((s) => s.v === sort)?.label ?? '近6月'
+  const valOf = (r: FundRankRow): number | undefined => (r as unknown as Record<string, number | undefined>)[sort]
+  const maxAbs = Math.max(1, ...rows.map((r) => Math.abs(valOf(r) ?? 0)))
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
     h('div', { style: S.group },
       h('div', { style: S.groupHead },
-        h('div', { style: { ...S.title, marginBottom: 0 } }, '开放式基金排行 · 近6月'),
+        h('div', { style: { ...S.title, marginBottom: 0 } }, `开放式基金排行 · ${sortLabel}`),
         h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '加载中…' : `${rows.length} 只`),
-        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(type), disabled: loading }, loading ? '…' : '刷新')),
+        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(type, sort), disabled: loading }, loading ? '…' : '刷新')),
       h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 8 } },
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
-          FUND_TYPES.map((t) => h('button', {
-            key: t.v,
-            onClick: () => setType(t.v),
-            style: {
-              ...S.btn, padding: '3px 9px', borderRadius: 999, border: `1px solid ${type === t.v ? BRAND : R.line}`,
-              background: type === t.v ? BRAND_SOFT : S.btn.background,
-              color: type === t.v ? BRAND : S.btn.color,
-              fontWeight: type === t.v ? 600 : 400,
-            },
-          }, t.label))),
+          FUND_TYPES.map((t) => h('button', { key: t.v, onClick: () => setType(t.v), style: fundPillStyle(type === t.v) }, t.label))),
+        // 排序周期：切周期即重新请求排行榜（服务端按东财 sc 参数排序）。
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
+          h('span', { style: { ...S.muted, fontSize: 11, alignSelf: 'center', marginRight: 2 } }, '周期'),
+          FUND_SORTS.map((s) => h('button', { key: s.v, onClick: () => setSort(s.v), style: fundPillStyle(sort === s.v) }, s.label))),
         loading
           ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
             h(Skeleton, { w: '100%', h: 34 }), h(Skeleton, { w: '100%', h: 34 }), h(Skeleton, { w: '100%', h: 34 }))
@@ -1185,29 +1546,32 @@ function FundsView(props: { active: boolean; mutate: (a: string, p: Record<strin
             ? h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无基金排行数据，点刷新重试。' })
             : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 5 } },
               rows.map((r, i) => {
-                const c = colorOf(r.m6)
+                const v = valOf(r)
+                const c = colorOf(v)
                 return h('div', { key: r.code, className: 'dsn-row', style: { ...S.card, gap: 4, padding: '7px 10px' } },
                   h('div', { style: { display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 } },
                     h('span', { style: { ...S.muted, width: 16, fontSize: 11, fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' } }, String(i + 1)),
                     h('div', { style: { flex: 1, minWidth: 0 } },
                       h('div', { style: { fontWeight: 600, fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, r.name),
-                      h('div', { style: { ...S.muted, fontSize: 10.5 } }, `${r.code} · 净值 ${fmt(r.nav, 4)}`)),
+                      h('div', { style: { ...S.muted, fontSize: 10.5 } }, `${r.code} · 净值 ${fmt(r.nav, 4)}${r.date ? ` · ${r.date}` : ''}`)),
                     h('div', { style: { textAlign: 'right', flex: '0 0 auto' } },
-                      h('div', { style: { color: c, fontWeight: 600, fontSize: 12, fontVariantNumeric: 'tabular-nums' } }, pctStr(r.m6)),
-                      h('div', { style: { ...S.muted, fontSize: 10 } }, `近1年 ${pctStr(r.y1)}`)),
+                      h('div', { style: { color: c, fontWeight: 600, fontSize: 12, fontVariantNumeric: 'tabular-nums' } }, pctStr(v)),
+                      // 次要行：近1年固定显示，另有近2年/近3年字段（东财 f[12]/f[13]）就一起给。
+                      h('div', { style: { ...S.muted, fontSize: 10 } },
+                        `近1年 ${pctStr(r.y1)}${r.y3 !== undefined ? ` · 近3年 ${pctStr(r.y3)}` : r.y2 !== undefined ? ` · 近2年 ${pctStr(r.y2)}` : ''}`)),
                     h('button', {
                       style: { ...S.btn, padding: '1px 7px', flex: '0 0 auto', color: added[r.code] ? DOWN : S.btn.color },
                       title: '加入自选（基金）',
                       onClick: () => { props.mutate('addWatch', { code: r.code, type: 'fund', name: r.name }); setAdded((a) => ({ ...a, [r.code]: true })) },
                     }, added[r.code] ? '✓' : '＋')),
-                  // 近6月涨跌条：排序之外再看量级
+                  // 周期涨跌条：排序之外再看量级
                   h('div', { style: { display: 'flex', height: 4, borderRadius: 999, background: `${c}18`, overflow: 'hidden' } },
-                    h('div', { style: { width: `${Math.max(3, (Math.abs(r.m6 ?? 0) / maxAbs) * 100)}%`, background: c } })))
+                    h('div', { style: { width: `${Math.max(3, (Math.abs(v ?? 0) / maxAbs) * 100)}%`, background: c } })))
               })))),
-    h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源：东财基金排行（对照 AkShare fund_open_fund_rank_em）'))
+    h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源：东财基金排行（对照 AkShare fund_open_fund_rank_em）· 净值日期 T+1 更新'))
 }
 
-// ---- 市场 tab（股票侧：板块涨跌热度 → “今天风险在哪”）----
+// ---- 板块热度（原「市场」tab 已并入「行情」：领涨/领跌与指数总览同屏）----
 /** 板块行：上游字段名有 changePct（WeStock）与 changePercent（东财）两种，这里都兼容。 */
 interface Sector { code: string; name: string; price?: number; changePct?: number | string; changePercent?: number; mainNetInflow?: string; leader?: string }
 const sectorPct = (s: Sector): number | undefined => {
@@ -1215,64 +1579,58 @@ const sectorPct = (s: Sector): number | undefined => {
   const n = typeof raw === 'string' ? Number(raw) : raw
   return typeof n === 'number' && Number.isFinite(n) ? n : undefined
 }
-function MarketView(props: { active: boolean }) {
-  const [d, setD] = useState<{ indices: IndexQuote[]; gainers: Sector[]; losers: Sector[] }>({ indices: [], gainers: [], losers: [] })
+function SectorsPanel() {
+  const [d, setD] = useState<{ gainers: Sector[]; losers: Sector[] }>({ gainers: [], losers: [] })
   const [loading, setLoading] = useState(false)
   const load = useCallback(async () => {
     setLoading(true)
-    try { const r = await apiGet<{ indices: IndexQuote[]; gainers: Sector[]; losers: Sector[] }>('/market'); setD({ indices: r.indices ?? [], gainers: r.gainers ?? [], losers: r.losers ?? [] }) } catch { /* */ } finally { setLoading(false) }
+    try { const r = await apiGet<{ gainers: Sector[]; losers: Sector[] }>('/market'); setD({ gainers: r.gainers ?? [], losers: r.losers ?? [] }) } catch { /* */ } finally { setLoading(false) }
   }, [])
-  useEffect(() => { if (props.active && !d.gainers.length) void load() }, [props.active]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!d.gainers.length && !d.losers.length) void load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
   // 板块用「横向条」而不是纯数字：一眼看出强度排序与量级差。
-  const sectorBar = (s: Sector, maxAbs: number) => {
-    const pct = sectorPct(s) ?? 0
+  const sectorBar = (sc: Sector, maxAbs: number) => {
+    const pct = sectorPct(sc) ?? 0
     const w = Math.max(4, (Math.abs(pct) / (maxAbs || 1)) * 100)
-    const c = typeof sectorPct(s) === 'number' ? colorOf(pct) : V('--dsw-alias-label-tertiary', '#9aa0aa')
-    const inflow = Number(s.mainNetInflow)
+    const c = typeof sectorPct(sc) === 'number' ? colorOf(pct) : V('--dsw-alias-label-tertiary', '#9aa0aa')
+    const inflow = Number(sc.mainNetInflow)
     const inflowText = Number.isFinite(inflow) && inflow !== 0
       ? `主力净${inflow > 0 ? '流入' : '流出'} ${Math.abs(inflow) >= 1e8 ? `${(Math.abs(inflow) / 1e8).toFixed(2)}亿` : `${(Math.abs(inflow) / 1e4).toFixed(0)}万`}`
       : ''
     return h('div', {
-      key: s.code,
+      key: sc.code,
       style: { display: 'flex', alignItems: 'center', gap: 8 },
-      title: [s.name, inflowText, s.leader ? `龙头 ${s.leader}` : ''].filter(Boolean).join(' · '),
+      title: [sc.name, inflowText, sc.leader ? `龙头 ${sc.leader}` : ''].filter(Boolean).join(' · '),
     },
       h('div', {
         style: { flex: '0 0 92px', fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-      }, s.name),
+      }, sc.name),
       h('div', { style: { flex: 1, height: 8, borderRadius: 999, background: `${c}1a`, overflow: 'hidden', minWidth: 0 } },
         h('div', { style: { width: `${w}%`, height: '100%', background: c, borderRadius: 999 } })),
       h('span', {
         style: { flex: '0 0 auto', width: 56, textAlign: 'right', color: c, fontWeight: 600, fontSize: 11, fontVariantNumeric: 'tabular-nums' },
-      }, typeof sectorPct(s) === 'number' ? pctStr(sectorPct(s)) : '—'))
+      }, typeof sectorPct(sc) === 'number' ? pctStr(sectorPct(sc)) : '—'))
   }
-  const panel = (title: string, color: string, list: Sector[], hint: string) => {
-    const maxAbs = Math.max(1, ...list.map((s) => Math.abs(sectorPct(s) ?? 0)))
-    return h('div', { style: S.group },
-      h('div', { style: S.groupHead },
-        h('div', { style: { ...S.title, marginBottom: 0 } }, h('span', { style: { color } }, '● '), title),
-        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, hint)),
-      h('div', { style: { padding: 9, display: 'flex', flexDirection: 'column', gap: 5 } },
+  const col = (title: string, color: string, list: Sector[], hint: string) => {
+    const maxAbs = Math.max(1, ...list.map((sc) => Math.abs(sectorPct(sc) ?? 0)))
+    return h('div', { style: { minWidth: 0 } },
+      h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 5 } },
+        h('span', { style: { color, fontSize: 11.5, fontWeight: 700 } }, '● ', title),
+        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 10 } }, hint)),
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: 5 } },
         list.length === 0
           ? h(EmptyState, { icon: h(IconChart, { size: 18 }), text: loading ? '加载中…' : '暂无板块数据' })
-          : list.slice(0, 12).map((s) => sectorBar(s, maxAbs))))
+          : list.slice(0, 12).map((sc) => sectorBar(sc, maxAbs))))
   }
-  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
-    h('div', { style: S.group },
-      h('div', { style: S.groupHead },
-        h('div', { style: { ...S.title, marginBottom: 0 } }, '市场总览'),
-        h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '刷新中…' : `${d.indices.length} 个指数`),
-        h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
-      h('div', { style: { padding: 9 } },
-        d.indices.length === 0
-          ? (loading
-            ? h('div', { style: { display: 'flex', gap: 6 } }, h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }), h(Skeleton, { w: 104, h: 46 }))
-            : h(EmptyState, { icon: h(IconChart, { size: 20 }), text: '暂无指数数据，点刷新重试' }))
-          : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))', gap: 6 } },
-            d.indices.map((ix) => h(IndexCard, { key: ix.code, ix }))))),
-    panel('领涨板块', UP, d.gainers, '资金在往哪去'),
-    panel('领跌板块 · 今日风险', DOWN, d.losers, '风险集中区'),
-    h('div', { style: { ...S.muted, fontSize: 11, padding: '0 2px' } }, '数据源：东财行业板块（对照 AkShare stock_board_industry_name_em）'))
+  const tight = usePanelWidth() < TIGHT_W
+  return h('div', { style: S.group },
+    h('div', { style: S.groupHead },
+      h('div', { style: { ...S.title, marginBottom: 0 } }, '板块热度 · 资金风向'),
+      h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } }, loading ? '刷新中…' : '领涨/领跌 · 当日风险'),
+      h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => void load(), disabled: loading }, loading ? '…' : '刷新')),
+    h('div', { style: { padding: 9, display: 'grid', gridTemplateColumns: tight ? 'minmax(0, 1fr)' : 'minmax(0, 1fr) minmax(0, 1fr)', gap: '4px 14px' } },
+      col('领涨', UP, d.gainers, '资金在往哪去'),
+      col('领跌 · 今日风险', DOWN, d.losers, '风险集中区')),
+    h('div', { style: { ...S.muted, fontSize: 11, padding: '2px 2px 0' } }, '数据源：东财行业板块（对照 AkShare stock_board_industry_name_em）'))
 }
 
 // ---- 快讯 tab（市场电报 + 按持仓/自选的个股新闻）----
@@ -1613,7 +1971,8 @@ function SkillsView() {
 const CAP_LABEL: Record<string, string> = {
   stock_list: 'A股列表', quote: 'A股行情', quotes_batch: '批量行情', kline: 'A股K线', indices: '指数概览', financials: '财务指标', sectors: '行业板块',
   hk_quote: '港股行情', hk_kline: '港股K线', hk_list: '港股列表', us_quote: '美股行情', us_kline: '美股K线',
-  fund_quote: '基金净值', fund_kline: '基金走势', fund_rank: '基金排行', macro: '宏观', news_flash: '市场快讯',
+  fund_quote: '基金净值', fund_kline: '基金走势', fund_rank: '基金排行', fund_holdings: '基金重仓',
+  etf_overview: 'ETF概览', etf_nav: 'ETF净值', etf_holdings: 'ETF重仓', macro: '宏观', news_flash: '市场快讯',
   stock_news: '个股新闻', research_report: '券商研报', symbol_search: '代码解析', stock_info: '个股档案', web_search: '网页搜索',
 }
 interface CapProvider { id: string; source: string; endpointRef: string; ok?: boolean; selected: boolean }
@@ -2062,70 +2421,89 @@ function DataTable(props: { rows: Array<Record<string, string>>; maxRows?: numbe
         cols.map((c) => h('td', { key: c, style: cell, title: String(r[c] ?? '') }, String(r[c] ?? '—'))))))))
 }
 
-function DossierView(props: { initial?: string; requested?: { code: string; at: number }; onOpen?: (item: AnalysisItem) => void }) {
+function DossierView(props: { initial?: string; requested?: { code: string; type?: 'stock' | 'fund'; at: number }; onOpen?: (item: AnalysisItem) => void }) {
   const [code, setCode] = useState(props.initial ?? '')
+  // 个股档案走 WeStock 18 维；基金档案走东财画像/持仓/风险/基准（个股维度对基金大多不适用）。
+  const [kind, setKind] = useState<'stock' | 'fund'>('stock')
   const [data, setData] = useState<DossierPayload>()
   const [kline, setKline] = useState<{ bars: HistBar[]; events: HistEvent[] }>({ bars: [], events: [] })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [openKey, setOpenKey] = useState('')
 
-  const load = useCallback(async (c: string) => {
+  const load = useCallback(async (c: string, k: 'stock' | 'fund') => {
     const q = c.trim()
     if (!q) return
     setBusy(true)
     setError('')
     try {
-      const r = await apiGet<DossierPayload>(`/dossier?code=${encodeURIComponent(q)}`)
+      const r = await apiGet<DossierPayload>(`/dossier?code=${encodeURIComponent(q)}&type=${k}`)
       setData(r)
     } catch (err) {
       setError(errText(err))
       setData(undefined)
     } finally { setBusy(false) }
-    // 档案嵌入行情图（T6）：本地历史缺失不算失败，只是不渲染。
+    // 档案嵌入行情图（T6）：本地历史缺失不算失败，只是不渲染。基金暂无本地 K 线存储。
+    if (k === 'fund') { setKline({ bars: [], events: [] }); return }
     try {
       const kh = await apiGet<{ ok: boolean; kline?: HistBar[]; events?: HistEvent[] }>(`/history?code=${encodeURIComponent(q)}`)
       setKline({ bars: kh.kline ?? [], events: kh.events ?? [] })
     } catch { setKline({ bars: [], events: [] }) }
   }, [])
 
-  useEffect(() => { if (props.initial) void load(props.initial) }, [props.initial, load])
+  useEffect(() => { if (props.initial) void load(props.initial, kind) }, [props.initial]) // eslint-disable-line react-hooks/exhaustive-deps
   // panel_navigate command: refocus on a code even when the view is already open.
   useEffect(() => {
     const req = props.requested
     if (!req) return
+    const k = req.type === 'fund' ? 'fund' : 'stock'
     setCode(req.code)
-    void load(req.code)
-  }, [props.requested?.at])
+    setKind(k)
+    void load(req.code, k)
+  }, [props.requested?.at]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const groups = [...new Set((data?.sections ?? []).map((s) => s.group))]
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
     h('div', { style: S.group },
       h('div', { style: S.groupHead },
-        h('div', { style: { ...S.title, marginBottom: 0 } }, '个股深度档案'),
+        h('div', { style: { ...S.title, marginBottom: 0 } }, kind === 'fund' ? '基金深度档案' : '个股深度档案'),
         h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 11 } },
-          data ? `${data.ready}/${data.total} 维度有数据 · ${data.elapsedMs}ms` : 'WeStock 全维度')),
+          data ? `${data.ready}/${data.total} 维度有数据 · ${data.elapsedMs}ms` : kind === 'fund' ? '东财基金画像 + 本地风险指标' : 'WeStock 全维度')),
       h('div', { style: { padding: 9, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+        h('div', { style: { display: 'flex', gap: 4 } },
+          (['stock', 'fund'] as const).map((k) => h('button', {
+            key: k,
+            title: k === 'fund' ? '基金经理/规模/重仓/风险/基准对比' : '一致预期/ESG/股东/风险事件/产业链',
+            onClick: () => { setKind(k); if (code.trim()) void load(code, k) },
+            style: {
+              ...S.btn, padding: '3px 10px', borderRadius: 999, border: `1px solid ${kind === k ? BRAND : R.line}`,
+              background: kind === k ? BRAND_SOFT : S.btn.background,
+              color: kind === k ? BRAND : S.btn.color,
+              fontWeight: kind === k ? 600 : 400,
+            },
+          }, k === 'fund' ? '基金' : '个股'))),
         h('input', {
           style: { ...S.input, flex: '1 1 140px' },
-          placeholder: '代码，如 600519 / 00700 / AAPL',
+          placeholder: kind === 'fund' ? '基金代码，如 110022 / 510300' : '代码，如 600519 / 00700 / AAPL',
           value: code,
           onChange: (e: any) => setCode(String(e.target.value ?? '')),
-          onKeyDown: onEnterCommit(() => void load(code)),
+          onKeyDown: onEnterCommit(() => void load(code, kind)),
         }),
-        h('button', { style: S.btnPrimary, disabled: busy || !code.trim(), onClick: () => void load(code) }, busy ? '取数中…' : '拉取档案'),
-        // 档案是"数据"，解读是"结论"：看完 18 个维度后一键让模型给结论。
+        h('button', { style: S.btnPrimary, disabled: busy || !code.trim(), onClick: () => void load(code, kind) }, busy ? '取数中…' : '拉取档案'),
+        // 档案是"数据"，解读是"结论"：看完维度后一键让模型给结论。
         data && props.onOpen ? h('button', {
           style: S.btn,
           title: '基于这份档案生成 AI 解读',
-          onClick: () => props.onOpen!({ code: code.trim(), type: 'stock' }),
+          onClick: () => props.onOpen!({ code: code.trim(), type: kind }),
         }, 'AI 解读') : null),
       error ? h('div', { style: { padding: '0 9px 9px', fontSize: 11, color: UP } }, error) : null),
 
     !data && !busy && !error
       ? h(EmptyState, {
         icon: h(IconChart, { size: 20 }),
-        text: '输入代码，一次性拉取该标的在 WeStock 上的全部维度：一致预期、评分、ESG、资金流向、股东、分红回购、风险事件、公告、产业链。',
+        text: kind === 'fund'
+          ? '输入基金代码，一次取回基金档案：基金经理、资产配置、规模与申购状态、同类排名、重仓持仓、本地风险指标、基准对比。'
+          : '输入代码，一次性拉取该标的在 WeStock 上的全部维度：一致预期、评分、ESG、资金流向、股东、分红回购、风险事件、公告、产业链。',
       })
       : null,
     busy && !data ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
@@ -2139,7 +2517,10 @@ function DossierView(props: { initial?: string; requested?: { code: string; at: 
         h(KlineChart, { bars: kline.bars, markers: kline.events, title: `${data.code} K线`, height: 260 })))
       : data ? h('div', { style: S.group },
         h('div', { style: S.groupHead }, h('div', { style: { ...S.title, marginBottom: 0 } }, '行情走势')),
-        h('div', { style: { ...S.muted, padding: '0 9px 10px', fontSize: 11 } }, '本地暂无K线：先在「行情」页同步历史数据，或在「浏览」页附加图片解析后展示。')) : null,
+        h('div', { style: { ...S.muted, padding: '0 9px 10px', fontSize: 11 } },
+          kind === 'fund'
+            ? '基金暂无本地K线：净值走势请用 get_fund_kline / calculate_fund_metrics（分析侧提供）。'
+            : '本地暂无K线：先在「行情」页同步历史数据，或在「浏览」页附加图片解析后展示。')) : null,
 
     data ? groups.map((g) => h('div', { key: g, style: S.group },
       h('div', { style: S.groupHead },
@@ -2351,14 +2732,15 @@ interface VaultDetail {
   watching?: boolean
 }
 
-const KIND_LABEL: Record<string, string> = { report: '研报', filing: '财报', note: '观点', news: '资讯', other: '其他' }
+const KIND_LABEL: Record<string, string> = { report: '研报', filing: '财报', note: '观点', news: '资讯', decision: '决策日记', learn: '学习笔记', review: '复盘', other: '其他' }
 const STATUS_LABEL: Record<string, string> = { inbox: '待整理', active: '在用', archived: '已归档' }
-const KIND_COLOR: Record<string, string> = { report: BRAND, filing: '#8a63d2', note: '#c98a1a', news: '#2b8ac9', other: '#8a8f99' }
+const KIND_COLOR: Record<string, string> = { report: BRAND, filing: '#8a63d2', note: '#c98a1a', news: '#2b8ac9', decision: '#0d9488', learn: '#6366f1', review: '#b45309', other: '#8a8f99' }
 const ORIGIN_LABEL: Record<string, string> = { chat: '对话', panel: '面板', file: '文件' }
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
 const KIND_FILTERS: Array<{ id: string; label: string }> = [
   { id: '', label: '全部' }, { id: 'report', label: '研报' }, { id: 'filing', label: '财报' },
   { id: 'note', label: '观点' }, { id: 'news', label: '资讯' },
+  { id: 'decision', label: '决策日记' }, { id: 'learn', label: '学习笔记' }, { id: 'review', label: '复盘' },
 ]
 const STATUS_FILTERS: Array<{ id: string; label: string }> = [
   { id: '', label: '全部' }, { id: 'inbox', label: '待整理' }, { id: 'active', label: '在用' }, { id: 'archived', label: '已归档' },
@@ -2842,10 +3224,10 @@ function ResearchView() {
 /** Task-oriented navigation: everyday work first; exploration and configuration remain one click away. */
 const TAB_GROUPS = [
   { id: 'workspace', label: '我的工作台', items: [
-    { id: 'home', label: '首页' }, { id: 'holdings', label: '持仓' }, { id: 'research', label: '资料' },
+    { id: 'home', label: '首页' }, { id: 'holdings', label: '持仓' }, { id: 'follow', label: '追踪' }, { id: 'research', label: '资料' },
   ] },
   { id: 'market', label: '市场研究', items: [
-    { id: 'quotes', label: '行情' }, { id: 'market', label: '市场' }, { id: 'funds', label: '基金' },
+    { id: 'quotes', label: '行情' }, { id: 'funds', label: '基金' },
     { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
     { id: 'dossier', label: '深度' }, { id: 'discover', label: '发现' },
   ] },
@@ -2909,20 +3291,37 @@ function PanelBody(props: {
   const [tab, setTab] = useState<string>(() => {
     try {
       const saved = window.localStorage.getItem(TAB_KEY)
-      if (saved === 'kline') return 'quotes' // K线页已并入「行情」，旧收藏 tab 兼容迁移
+      if (saved === 'kline' || saved === 'market') return 'quotes' // K线/市场页已并入「行情」，旧收藏 tab 兼容迁移
       return TABS.some(t => t.id === saved) ? saved! : 'home'
     } catch { return 'home' }
   })
   const selectTab = (id: string) => { setTab(id); try { window.localStorage.setItem(TAB_KEY, id) } catch { /* */ } }
   const [klineTarget, setKlineTarget] = useState<{ code: string; kind: string; at: number } | undefined>()
-  const [dossierTarget, setDossierTarget] = useState<{ code: string; at: number } | undefined>()
-  // 对话侧落库的即时回执：Agent 存了资料时在任何 tab 都能看到，并可一键跳到资料页。
-  const [agentSaved, setAgentSaved] = useState<{ text: string; at: number } | undefined>()
+  const [dossierTarget, setDossierTarget] = useState<{ code: string; type?: 'stock' | 'fund'; at: number } | undefined>()
+  // 对话侧落库的即时回执：Agent 存了资料/写了成长档案/说明导航意图时在任何 tab 都能看到。
+  const [agentSaved, setAgentSaved] = useState<{ text: string; at: number; tab?: string } | undefined>()
   useEffect(() => {
     if (!agentSaved) return
     const t = window.setTimeout(() => setAgentSaved(undefined), 15_000)
     return () => window.clearTimeout(t)
   }, [agentSaved])
+  // Agent 活动指示：tools/execute 推送 → 顶部胶囊「Agent · 正在做什么」。
+  const [agentAct, setAgentAct] = useState<{ tool: string; phase: string } | undefined>()
+  useEffect(() => {
+    if (!agentAct) return
+    const t = window.setTimeout(() => setAgentAct(undefined), agentAct.phase === 'done' ? 1_500 : 5_000)
+    return () => window.clearTimeout(t)
+  }, [agentAct])
+  // 面板 → Agent：焦点上报（用户当前所看），panel_state 工具读取。
+  useEffect(() => {
+    const focusCode = (tab === 'quotes' || tab === 'kline') && klineTarget ? klineTarget.code
+      : tab === 'dossier' ? (dossierTarget?.code ?? klineTarget?.code)
+        : undefined
+    const type = (tab === 'quotes' || tab === 'kline') && klineTarget ? (klineTarget.kind === 'fund' ? 'fund' : 'stock')
+      : tab === 'dossier' && dossierTarget ? dossierTarget.type ?? 'stock'
+        : undefined
+    reportPanelFocus({ tab, ...(focusCode ? { code: focusCode, type } : {}) })
+  }, [tab, klineTarget, dossierTarget])
 
   // ---- 观点触发式提醒：铃铛 + 下拉列表 ----
   const [reminders, setReminders] = useState<ReminderItem[]>([])
@@ -2945,6 +3344,25 @@ function PanelBody(props: {
       void loadLive()
       return
     }
+    if (e.kind === 'agent') {
+      const a = e as BusMsg & { phase?: string; tool?: string }
+      if (a.tool) setAgentAct({ tool: a.tool, phase: a.phase === 'done' ? 'done' : 'start' })
+      return
+    }
+    // 成长回执在首页由 PersonalHome 就地提示；用户在其他 tab 时由全局回执承接。
+    if (e.kind === 'growth' && tab !== 'home') {
+      const action = String((e as BusMsg & { action?: string }).action ?? '')
+      const label = ({ profile: '成长画像', plan: '家庭财务规划', quiz: '测验判分', review: '月度成长复盘' } as Record<string, string>)[action] ?? '成长档案'
+      setAgentSaved({ text: `Agent 更新了${label}`, at: Date.now(), tab: 'home' })
+      return
+    }
+    // 追踪回执：档案/快照/任务/简报/复刻变化 → 顶部提示可跳到追踪页（追踪页自身也会重拉）。
+    if (e.kind === 'follow') {
+      const action = String((e as BusMsg & { action?: string }).action ?? '')
+      const label = ({ target: '追踪对象', snapshot: '披露快照', job: '新披露任务', brief: '追踪简报', shadow: '纸面复刻' } as Record<string, string>)[action] ?? '追踪档案'
+      setAgentSaved({ text: `Agent 更新了${label}`, at: Date.now(), tab: 'follow' })
+      return
+    }
     if (e.kind === 'research') {
       const r = e as BusMsg & { action?: string; title?: string; count?: number; origin?: string }
       // 只提示「对话侧落库」；面板自己的操作已有本地反馈，不重复打扰。
@@ -2954,12 +3372,13 @@ function PanelBody(props: {
             ? `Agent 收集并存入资料库：${r.title ?? `${r.count ?? 0} 条`}`
             : `Agent 存入资料：${r.title ?? ''}`,
           at: Date.now(),
+          tab: 'research',
         })
       }
       return
     }
     if (e.kind !== 'panel') return
-    const cmd = (e as BusMsg & { command?: { action?: string; tab?: string; code?: string; type?: string; kind?: string; openAnalysis?: boolean; commandId?: string; expiresAt?: string } }).command
+    const cmd = (e as BusMsg & { command?: { action?: string; tab?: string; code?: string; type?: string; kind?: string; openAnalysis?: boolean; note?: string; anchor?: string; commandId?: string; expiresAt?: string } }).command
     if (!cmd || cmd.action !== 'navigate' || !cmd.tab) return
     // Commands are one-shot and time-boxed: an expired replay (reconnect catch-up,
     // server restart) must not steal the user's current view.
@@ -2968,17 +3387,20 @@ function PanelBody(props: {
       seenPanelCommands.add(cmd.commandId)
       if (seenPanelCommands.size > 200) seenPanelCommands.clear()
     }
-    if (cmd.tab === 'kline') selectTab('quotes') // 兼容别名：K线工作区已并入「行情」
+    if (cmd.tab === 'kline' || cmd.tab === 'market') selectTab('quotes') // 兼容别名：K线/市场页已并入「行情」
     else if (TABS.some((t) => t.id === cmd.tab)) selectTab(cmd.tab)
-    if ((cmd.tab === 'kline' || cmd.tab === 'quotes') && cmd.code) {
+    if ((cmd.tab === 'kline' || cmd.tab === 'market' || cmd.tab === 'quotes') && cmd.code) {
       setKlineTarget({ code: cmd.code, kind: cmd.kind ?? (cmd.type === 'fund' ? 'fund' : inferKlineKind(cmd.code, cmd.type as AssetType | undefined)), at: Date.now() })
     }
     if (cmd.tab === 'dossier' && cmd.code) {
-      setDossierTarget({ code: cmd.code, at: Date.now() })
+      setDossierTarget({ code: cmd.code, type: cmd.type === 'fund' ? 'fund' : 'stock', at: Date.now() })
     }
     if (cmd.openAnalysis && cmd.code) {
       props.onOpenAnalysis({ code: cmd.code, type: cmd.type === 'fund' ? 'fund' : 'stock' })
     }
+    // Agent → 面板：一句话解释（用户知道为什么被引导过来）+ 页内锚点滚动。
+    if (cmd.note) setAgentSaved({ text: cmd.note, at: Date.now(), tab: TABS.some((t) => t.id === cmd.tab) ? cmd.tab : undefined })
+    if (cmd.anchor) emitPanelAnchor(cmd.tab, cmd.anchor)
   })
 
   const quoteBy = new Map<string, LiveQuote>()
@@ -2995,6 +3417,18 @@ function PanelBody(props: {
         // 会让钩子数随数据变化，直接触发 React #310 崩溃。
         h('div', { style: { ...S.muted, fontSize: 10.5 } },
           loading ? '刷新中…' : (data.at ? `更新于 ${agoText}` : '实时行情'))),
+      // Agent 活动指示（Agent → 面板）：工具开始即亮，结束或超时后收起。
+      agentAct ? h('div', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: 6, padding: '3px 9px', borderRadius: 999,
+          fontSize: 11, whiteSpace: 'nowrap', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis',
+          background: BRAND_SOFT, color: BRAND, border: `1px solid ${BRAND}33`,
+        },
+        title: `Agent 正在调用 ${agentAct.tool}`,
+      },
+        h('span', { style: { width: 6, height: 6, borderRadius: '50%', background: agentAct.phase === 'done' ? '#22a06b' : BRAND, flexShrink: 0 } }),
+        h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis' } },
+          agentAct.phase === 'done' ? `Agent 完成 · ${agentToolLabel(agentAct.tool)}` : `Agent · ${agentToolLabel(agentAct.tool)}…`)) : null,
       h('button', {
         style: { ...S.btn, padding: '4px 8px', color: unread ? BRAND : undefined },
         onClick: () => { setBellOpen(!bellOpen); void loadReminders() },
@@ -3073,17 +3507,16 @@ function PanelBody(props: {
       },
     },
       h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, agentSaved.text),
-      h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => { selectTab('research'); setAgentSaved(undefined) } }, '查看'),
+      agentSaved.tab ? h('button', { style: { ...S.btn, padding: '2px 8px' }, onClick: () => { selectTab(agentSaved.tab!); setAgentSaved(undefined) } }, '查看') : null,
       h('button', { style: { ...S.btn, padding: '2px 6px' }, onClick: () => setAgentSaved(undefined) }, '×')) : null,
     h(SessionPicker, null),
     h('div', { style: S.body },
-      tab === 'home' ? h(PersonalHome, { deliver: deliverToChat, navigate: selectTab, openReminders: () => { setBellOpen(true); void loadReminders() } }) : null,
+      tab === 'home' ? h(PersonalHome, { deliver: deliverToChat, navigate: selectTab, useBus, openReminders: () => { setBellOpen(true); void loadReminders() } }) : null,
       tab === 'quotes' ? h(QuotesView, {
         data, quoteBy, loading, mutate, onOpen: props.onOpenAnalysis, onRefresh: () => void loadLive(),
         onSelectKline: (code, type) => setKlineTarget({ code, kind: inferKlineKind(code, type), at: Date.now() }),
         klineTarget,
       }) : null,
-      tab === 'market' ? h(MarketView, { active: tab === 'market' }) : null,
       tab === 'holdings' ? h(HoldingsView, { data, quoteBy, mutate, onOpen: props.onOpenAnalysis }) : null,
       tab === 'funds' ? h(FundsView, { active: tab === 'funds', mutate }) : null,
       tab === 'macro' ? h(MacroView, { active: tab === 'macro' }) : null,
@@ -3091,9 +3524,213 @@ function PanelBody(props: {
       tab === 'research' ? h(ResearchView, null) : null,
       tab === 'dossier' ? h(DossierView, { initial: klineTarget?.code, requested: dossierTarget, onOpen: props.onOpenAnalysis }) : null,
       tab === 'discover' ? h(DiscoverView, null) : null,
+      tab === 'follow' ? h(FollowView, null) : null,
       tab === 'sources' ? h(SourcesView, null) : null,
       tab === 'skills' ? h(SkillsView, null) : null,
       tab === 'health' ? h(HealthView, { health: data.health }) : null))
+}
+
+// ---- 追踪页（tab=follow）：只读档案 + 待解读任务投递（解读回会话，遵循一次一条纪律） ----
+type FollowStale = 'none' | 'fresh' | 'normal' | 'stale'
+interface FollowDiffRow { dir: string; issuer: string; ticker?: string; delta: number | null }
+interface FollowTargetRow {
+  id: string; kind: string; kindLabel: string; name: string; ticker?: string; note?: string; enabled: boolean
+  lastCheckedAt?: string; lastFilingAt?: string; period?: string; stale: FollowStale; ageDays: number | null
+  baseline?: boolean
+  diff?: { mode: string; added: number; removed: number; increased: number; decreased: number; newTrades?: number; top?: FollowDiffRow[] } | null
+  briefCount: number; lastBrief?: { at: string; title: string }
+  shadow?: { capital: number; openedAt: string; positions: number; entryFilingKey: string; totals: { pricedValue: number | null; pricedAlloc: number | null; pnlPct: number | null; pricedCount: number; missingCount: number } }
+  caveats?: string[]
+}
+interface FollowJobRow { id: string; targetId: string; targetName: string; group: string; filingKey: string; title: string; state: string; at: string }
+interface FollowBriefRow { id: string; targetId: string; targetName: string; title: string; points: string[]; filingKey?: string; vaultId?: string; at: string }
+interface FollowData {
+  ok: boolean; error?: string; targets: FollowTargetRow[]; jobs: FollowJobRow[]; briefs: FollowBriefRow[]
+  counts?: { targets: number; readyJobs: number; snapshots: number }
+}
+const FOLLOW_STALE: Record<string, { label: string; bg: string; fg: string }> = {
+  fresh: { label: '新鲜', bg: 'rgba(22,163,74,.12)', fg: '#16a34a' },
+  normal: { label: '正常', bg: 'rgba(37,99,235,.10)', fg: '#2563eb' },
+  stale: { label: '滞后', bg: 'rgba(220,38,38,.10)', fg: '#dc2626' },
+  none: { label: '未拉取', bg: 'rgba(107,114,128,.10)', fg: '#9ca3af' },
+}
+const FOLLOW_DIR_LABEL: Record<string, string> = { add: '新进', remove: '清仓', up: '加仓', down: '减仓' }
+
+function FollowView() {
+  const [data, setData] = useState<FollowData | null>(null)
+  const [err, setErr] = useState('')
+  const [hint, setHint] = useState<string>('')
+  const load = useCallback(async () => {
+    try {
+      const r = await apiGet<FollowData>('/follow')
+      setData(r)
+      setErr(r.ok === false ? (r.error || '加载失败') : '')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+  useEffect(() => { void load() }, [load])
+  useBus((e) => { if (e.kind === 'follow' || e.kind === '__resync') void load() })
+  // Agent → 面板锚点：panel_navigate(tab=follow, anchor=targets|jobs|briefs|shadow)
+  const seenAnchor = useRef(0)
+  useEffect(() => {
+    const go = (anchor: string) => {
+      const el = document.querySelector(`[data-panel-anchor="${anchor}"]`) as HTMLElement | null
+      el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+    const on = (ev: Event) => {
+      const d = (ev as CustomEvent).detail as { tab?: string; anchor?: string; at?: number } | undefined
+      if (!d || d.tab !== 'follow' || !d.anchor) return
+      if (d.at && seenAnchor.current === d.at) return
+      seenAnchor.current = d.at ?? Date.now()
+      go(d.anchor)
+      const a = d.anchor
+      window.setTimeout(() => go(a), 300) // 视图刚挂载时首屏可能未渲染，重试一次
+    }
+    window.addEventListener('dsh:panel-anchor', on)
+    return () => window.removeEventListener('dsh:panel-anchor', on)
+  }, [])
+  const deliver = (text: string) => {
+    void deliverToChat(text).then((outcome) => {
+      setHint(outcome === 'sent' ? '已发送到对话'
+        : outcome === 'copied' ? '目标会话暂不可投递，已复制到剪贴板'
+        : '投递失败：请先在面板选择目标会话')
+      window.setTimeout(() => setHint(''), 4000)
+    })
+  }
+  const cardStyle: React.CSSProperties = { border: `1px solid ${V('--dsw-alias-border-l2', '#e8e8e8')}`, borderRadius: 10, padding: '10px 12px', background: V('--dsw-alias-bg', '#fff') }
+  const chip: React.CSSProperties = { fontSize: 11, padding: '1px 7px', borderRadius: 999, background: 'rgba(107,114,128,.10)', color: '#6b7280', whiteSpace: 'nowrap' }
+  const muted: React.CSSProperties = { fontSize: 12, color: '#6b7280' }
+  const jobs = [...(data?.jobs ?? [])].sort((a, b) => (a.state === b.state ? 0 : a.state === 'ready' ? -1 : 1))
+  return (
+    <div style={{ padding: 12, display: 'grid', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <strong style={{ fontSize: 14 }}>追踪档案</strong>
+        <span style={muted}>
+          {data ? `${data.counts?.targets ?? data.targets.length} 个对象 · ${data.counts?.readyJobs ?? jobs.filter(j => j.state === 'ready').length} 条待解读` : '加载中…'}
+        </span>
+        <span style={{ flex: 1 }} />
+        <button style={{ ...S.btn, fontSize: 12, padding: '3px 10px' }} onClick={() => { void load() }}>刷新</button>
+      </div>
+      <div style={{ ...muted, lineHeight: 1.6 }}>
+        披露延迟：13F ≈ 45 天 · 国会申报 30–45 天 · A股十大流通股东 1.5–4 个月。全部为纸面研究用途，不构成投资建议。
+        {hint ? <strong style={{ color: BRAND, marginLeft: 8 }}>{hint}</strong> : null}
+      </div>
+      {err ? <div style={{ ...cardStyle, color: '#dc2626' }}>加载失败：{err}</div> : null}
+
+      <div data-panel-anchor="targets" style={cardStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+          <strong>追踪对象</strong>
+          <span style={muted}>新鲜度按「最近披露」计算</span>
+        </div>
+        {!data?.targets.length && <div style={muted}>还没有追踪对象。在对话里说「跟踪 巴菲特 / Nancy Pelosi / 冯柳」，Agent 会用 follow_add 建档并拉取基线。</div>}
+        {data?.targets.map((t) => {
+          const st = FOLLOW_STALE[t.stale] ?? FOLLOW_STALE.none
+          const diffChips: string[] = []
+          if (t.diff?.mode === '13f') diffChips.push(`新进 ${t.diff.added} · 清仓 ${t.diff.removed} · 加仓 ${t.diff.increased} · 减仓 ${t.diff.decreased}`)
+          if (t.diff?.mode === 'congress' && (t.diff.newTrades ?? 0) > 0) diffChips.push(`新增申报 ${t.diff.newTrades} 笔`)
+          if (t.diff?.mode === 'baseline') diffChips.push('基线快照（尚无上期可比）')
+          return (
+            <div key={t.id} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '8px 0', borderTop: `1px solid ${V('--dsw-alias-border-l2', '#eee')}` }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <strong>{t.name}</strong>
+                  <span style={chip}>{t.kindLabel}</span>
+                  {t.ticker ? <span style={chip}>{t.ticker}</span> : null}
+                  <span style={{ ...chip, background: st.bg, color: st.fg }}>{st.label}{t.ageDays != null && t.ageDays >= 0 ? ` · ${t.ageDays} 天前披露` : ''}</span>
+                  {t.shadow ? <span style={{ ...chip, background: 'rgba(37,99,235,.10)', color: '#2563eb' }}>复刻中</span> : null}
+                </div>
+                <div style={{ ...muted, marginTop: 3 }}>
+                  最近披露 {t.lastFilingAt ?? '—'}{t.period ? ` · 期 ${t.period}` : ''} · 上次检查 {t.lastCheckedAt ? t.lastCheckedAt.slice(0, 16).replace('T', ' ') : '—'}
+                </div>
+                {diffChips.length ? <div style={{ ...muted, marginTop: 3, color: '#374151' }}>{diffChips.join(' · ')}</div> : null}
+                {t.diff?.top?.length ? (
+                  <div style={{ ...muted, marginTop: 2 }}>
+                    {t.diff.top.slice(0, 3).map((r, i) => `${FOLLOW_DIR_LABEL[r.dir] ?? r.dir} ${r.issuer}${r.ticker ? `(${r.ticker})` : ''}${typeof r.delta === 'number' ? `${r.delta > 0 ? '+' : ''}${r.delta}` : ''}`).join(' · ')}
+                  </div>
+                ) : null}
+                {t.note ? <div style={{ ...muted, marginTop: 2 }}>备注：{t.note}</div> : null}
+                {t.caveats?.[0] ? <div style={{ ...muted, marginTop: 2, fontSize: 11 }}>{t.caveats[0]}</div> : null}
+                {t.lastBrief ? <div style={{ ...muted, marginTop: 2 }}>最近简报：{t.lastBrief.title}（{t.lastBrief.at.slice(0, 10)}）</div> : null}
+              </div>
+              <button
+                style={{ ...chip, border: 'none', cursor: 'pointer', background: BRAND_SOFT, color: BRAND }}
+                onClick={() => deliver(`请跟踪「${t.name}」（对象 id ${t.id}，类型 ${t.kind}）的最新披露：先 follow_fetch 拉取，再 follow_diff 解读（引用具体数字与披露日期），完成后 follow_note 落一条简报。一次只做这一件事。`)}
+              >请 Agent 解读</button>
+            </div>
+          )
+        })}
+      </div>
+
+      <div data-panel-anchor="jobs" style={cardStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+          <strong>待解读任务</strong>
+          <span style={muted}>由 6 小时一次的披露检查自动入队（按披露主键去重）</span>
+        </div>
+        {!jobs.length && <div style={muted}>暂无新披露。对象加好后先在对话里 follow_fetch 建立基线。</div>}
+        {jobs.map((j) => (
+          <div key={j.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '7px 0', borderTop: `1px solid ${V('--dsw-alias-border-l2', '#eee')}` }}>
+            <span style={{ ...chip, background: j.state === 'ready' ? 'rgba(217,119,6,.14)' : 'rgba(107,114,128,.10)', color: j.state === 'ready' ? '#d97706' : '#9ca3af' }}>
+              {j.state === 'ready' ? '待解读' : j.state === 'done' ? '已完成' : '已取消'}
+            </span>
+            <span style={{ ...chip }}>{j.group}</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={j.title}>{j.title}</span>
+            <span style={{ ...muted, whiteSpace: 'nowrap' }}>{j.at.slice(5, 16).replace('T', ' ')}</span>
+            {j.state === 'ready' ? (
+              <button
+                style={{ ...chip, border: 'none', cursor: 'pointer', background: BRAND_SOFT, color: BRAND }}
+                onClick={() => deliver(`有新披露待解读：「${j.title}」（对象 ${j.targetName}，id ${j.targetId}，披露主键 ${j.filingKey}）。请先 follow_fetch 拉取入库，再 follow_diff 对比解读，完成后 follow_note。一次只做这一件事。`)}
+              >投递给对话</button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+
+      <div data-panel-anchor="briefs" style={cardStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+          <strong>追踪简报</strong>
+          <span style={muted}>Agent 解读后的结论沉淀（同步资料库 kind=note）</span>
+        </div>
+        {!data?.briefs.length && <div style={muted}>暂无简报。完成一次 follow_fetch + follow_diff 解读后由 follow_note 生成。</div>}
+        {data?.briefs.map((b) => (
+          <div key={b.id} style={{ padding: '7px 0', borderTop: `1px solid ${V('--dsw-alias-border-l2', '#eee')}` }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' }}>
+              <strong style={{ fontSize: 13 }}>{b.title}</strong>
+              <span style={chip}>{b.targetName}</span>
+              <span style={{ ...muted, fontSize: 11 }}>{b.at.slice(0, 16).replace('T', ' ')}{b.vaultId ? ' · 已入资料库' : ''}</span>
+            </div>
+            <ul style={{ margin: '4px 0 0', paddingLeft: 18, fontSize: 12, color: '#4b5563', lineHeight: 1.7 }}>
+              {b.points.slice(0, 6).map((p, i) => <li key={i}>{p}</li>)}
+            </ul>
+          </div>
+        ))}
+      </div>
+
+      <div data-panel-anchor="shadow" style={cardStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+          <strong>纸面复刻</strong>
+          <span style={muted}>纯模拟持仓，不触达真实账户；由会话里的 follow_replicate 驱动</span>
+        </div>
+        {!data?.targets.some(t => t.shadow) && <div style={muted}>暂无进行中的复刻。在对话里说「复刻他的组合」，Agent 会按最新 13F 建纸面组合。</div>}
+        {data?.targets.filter(t => t.shadow).map((t) => {
+          const s = t.shadow!
+          const pnl = s.totals.pnlPct
+          return (
+            <div key={t.id} style={{ padding: '7px 0', borderTop: `1px solid ${V('--dsw-alias-border-l2', '#eee')}`, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'baseline' }}>
+              <strong style={{ fontSize: 13 }}>{t.name}</strong>
+              <span style={muted}>本金 ${s.capital.toLocaleString()} · {s.positions} 仓 · 开始 {s.openedAt.slice(0, 10)}</span>
+              <span style={{ ...muted, color: pnl == null ? '#9ca3af' : pnl >= 0 ? '#16a34a' : '#dc2626' }}>
+                {pnl == null ? '收益 —（尚无定价）' : `收益 ${pnl > 0 ? '+' : ''}${pnl}%`}
+                {` · 已定价 ${s.totals.pricedCount}/${s.positions}`}
+                {s.totals.missingCount > 0 ? `（缺价 ${s.totals.missingCount} 行）` : ''}
+              </span>
+              <span style={muted}>入场披露 {s.entryFilingKey}</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 /** 面板外壳：承载宽度状态与拖动把手，浮动/停靠两种形态共用。 */

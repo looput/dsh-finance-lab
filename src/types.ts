@@ -19,6 +19,8 @@ export type Capability =
   | 'fund_quote'
   | 'fund_kline'
   | 'fund_rank'
+  /** 基金重仓持仓（穿透分析用）。 */
+  | 'fund_holdings'
   // 宏观
   | 'macro'
   // 快讯 / 新闻
@@ -125,6 +127,7 @@ export const CAPABILITIES: Capability[] = [
   'fund_quote',
   'fund_kline',
   'fund_rank',
+  'fund_holdings',
   'macro',
   'news_flash',
   'stock_news',
@@ -214,9 +217,11 @@ export const DEFAULT_PROVIDER_ORDER: Record<Capability, string[]> = {
   hk_list: ['em_hk_clist'],
   us_quote: ['ws_us_quote', 'yahoo_quote', 'em_us_quote'],
   us_kline: ['ws_us_kline', 'yahoo_kline', 'em_us_kline'],
-  fund_quote: ['em_fund_quote'],
-  fund_kline: ['em_fund_kline'],
+  fund_quote: ['em_fund_quote', 'em_fund_nav_quote'],
+  fund_kline: ['em_fund_kline', 'em_fund_nav_kline'],
   fund_rank: ['em_fund_rank'],
+  // 基金重仓（穿透/重叠分析）：东财 f10 JJCC，契约未线上核实，防御式解析。
+  fund_holdings: ['em_fund_holdings'],
   macro: ['em_macro'],
   news_flash: ['em_news_flash'],
   stock_news: ['em_stock_news', 'ws_news'],
@@ -348,6 +353,8 @@ export interface StockQuote {
   price?: number
   change?: number
   changePercent?: number
+  /** 数据时点（源侧时间，如基金净值日期），不是抓取时间。 */
+  asOf?: string
   raw?: Record<string, unknown>
 }
 
@@ -386,6 +393,8 @@ export interface LiveQuote {
   type?: AssetType
   price?: number
   changePercent?: number
+  /** 数据时点（如基金净值日期），面板展示与陈旧标记用。 */
+  asOf?: string
   /** Recent closing prices for the mini K-line sparkline (oldest→newest). */
   spark?: number[]
   /** Provider that answered, so the panel can show where the number came from. */
