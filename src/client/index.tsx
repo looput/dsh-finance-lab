@@ -809,7 +809,8 @@ function SessionPicker() {
   const [q, setQ] = useState('')
   const [meta, setMeta] = useState<DeliveryMeta>(() => readLocalJson<DeliveryMeta>(SESSION_DELIVERY_KEY, {}))
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => readLocalJson<Record<string, boolean>>(SESSION_GROUPS_KEY, {}))
-  const rootRef = useRef<HTMLDivElement | null>(null)
+  const rootRef = useRef<HTMLDetailsElement | null>(null)
+  const summaryRef = useRef<HTMLElement | null>(null)
 
   // 2s 轮询宿主快照；内容没变不 setState（避免无谓重渲染）。
   useEffect(() => {
@@ -845,10 +846,16 @@ function SessionPicker() {
   // 弹层：点外部 / Esc 关闭。
   useEffect(() => {
     if (!open) return
-    const onDown = (ev: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(ev.target as Node)) setOpen(false)
+    const closePicker = () => {
+      setOpen(false)
+      if (rootRef.current) rootRef.current.open = false
     }
-    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') setOpen(false) }
+    const onDown = (ev: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(ev.target as Node)) closePicker()
+    }
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') { closePicker(); summaryRef.current?.focus() }
+    }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
@@ -895,10 +902,29 @@ function SessionPicker() {
     else { try { localStorage.removeItem(SESSION_TARGET_KEY) } catch { /* */ } }
     setOpen(false)
     setQ('')
+    if (rootRef.current) rootRef.current.open = false
+    summaryRef.current?.focus()
   }
 
-  return h('div', { ref: rootRef, style: { display: 'flex', alignItems: 'center', gap: 9, padding: '8px 14px', position: 'relative', fontSize: 11, color: V('--dsw-alias-label-secondary', '#667085'), background: R.canvas, borderBottom: `1px solid ${R.line}` } },
-    h('span', { style: { whiteSpace: 'nowrap', fontWeight: 700 } }, '↗ 任务会话'),
+  return h('details', {
+    ref: rootRef,
+    // Keep the native disclosure and the session list in sync: the first click on
+    // the summary opens the picker, rather than revealing an empty extra step.
+    onToggle: (e: any) => setOpen(Boolean(e.currentTarget.open)),
+    style: { position: 'relative', padding: '3px 12px', fontSize: 11, color: V('--dsw-alias-label-secondary', '#667085'), background: R.canvas, borderBottom: `1px solid ${R.line}` },
+  },
+    h('summary', {
+      ref: summaryRef,
+      style: { display: 'flex', alignItems: 'center', gap: 6, minHeight: 24, cursor: 'pointer', listStyle: 'none', userSelect: 'none' },
+      title: '只在把面板任务发送给 Agent 时需要选择目标会话',
+    },
+      dot(!!selectedRow?.running),
+      h('span', { style: { fontWeight: 650 } }, 'Agent 投递目标'),
+      h('span', { style: { color: selected ? V('--dsw-alias-label-primary', '#344054') : '#98a2b3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+        selected ? selectedLabel + (selected && !selectedRow ? '（待同步）' : '') : '未绑定 · 点击选择（也可稍后再选）'),
+      selectedRow ? h('span', { style: { marginLeft: 'auto', fontSize: 10, color: '#98a2b3', whiteSpace: 'nowrap' } }, sessionRelTime(selectedRow.updatedAt)) : null),
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 9, padding: '5px 2px 6px', position: 'relative', fontSize: 11 } },
+    h('span', { style: { whiteSpace: 'nowrap', fontWeight: 700 } }, '任务会话'),
     h('button', {
       type: 'button', 'aria-expanded': open, title: selected ? `投递目标：${selectedLabel}` : '选择投递目标会话',
       onClick: () => { setQ(''); setOpen((o) => !o) },
@@ -945,7 +971,7 @@ function SessionPicker() {
       ),
       h('div', { style: { fontSize: 10, color: '#98a2b3', padding: '6px 10px', borderTop: `1px solid ${R.line}` } },
         `共 ${rows.length} 个会话 · 分组可折叠 · 子代理单列在末尾 · 绑定与投递记录只存本机`))
-      : null)
+      : null))
 }
 
 /** 把一段 prompt 送进当前对话；返回实际投递方式，供 UI 提示。 */
@@ -3221,18 +3247,23 @@ function ResearchView() {
           h('button', { style: S.btn, onClick: () => setPendingPrompt('') }, '关闭')))) : null)
 }
 
-/** Task-oriented navigation: everyday work first; exploration and configuration remain one click away. */
+/** One task-oriented primary level; only areas with multiple destinations get contextual sub-tabs. */
 const TAB_GROUPS = [
-  { id: 'workspace', label: '我的工作台', items: [
-    { id: 'home', label: '首页' }, { id: 'holdings', label: '持仓' }, { id: 'follow', label: '追踪' }, { id: 'research', label: '资料' },
+  { id: 'overview', label: '总览', items: [
+    { id: 'home', label: '首页' },
   ] },
-  { id: 'market', label: '市场研究', items: [
-    { id: 'quotes', label: '行情' }, { id: 'funds', label: '基金' },
-    { id: 'macro', label: '宏观' }, { id: 'news', label: '快讯' },
-    { id: 'dossier', label: '深度' }, { id: 'discover', label: '发现' },
+  { id: 'assets', label: '持仓', items: [
+    { id: 'holdings', label: '持仓' },
   ] },
-  { id: 'settings', label: '数据与设置', items: [
-    { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口' },
+  { id: 'research-hub', label: '研究', items: [
+    { id: 'quotes', label: '行情' }, { id: 'funds', label: '基金' }, { id: 'dossier', label: '档案' },
+    { id: 'news', label: '资讯' }, { id: 'macro', label: '宏观' }, { id: 'discover', label: '发现' }, { id: 'research', label: '资料库' },
+  ] },
+  { id: 'follow-hub', label: '追踪', items: [
+    { id: 'follow', label: '追踪' },
+  ] },
+  { id: 'settings', label: '设置', items: [
+    { id: 'sources', label: '数据源' }, { id: 'skills', label: '技能' }, { id: 'health', label: '接口状态' },
   ] },
 ] as const
 const TABS: Array<{ id: string; label: string }> = TAB_GROUPS.flatMap(g => [...g.items])
@@ -3296,6 +3327,7 @@ function PanelBody(props: {
     } catch { return 'home' }
   })
   const selectTab = (id: string) => { setTab(id); try { window.localStorage.setItem(TAB_KEY, id) } catch { /* */ } }
+  const activeTabGroup = TAB_GROUPS.find(g => g.items.some(t => t.id === tab)) ?? TAB_GROUPS[0]
   const [klineTarget, setKlineTarget] = useState<{ code: string; kind: string; at: number } | undefined>()
   const [dossierTarget, setDossierTarget] = useState<{ code: string; type?: 'stock' | 'fund'; at: number } | undefined>()
   // 对话侧落库的即时回执：Agent 存了资料/写了成长档案/说明导航意图时在任何 tab 都能看到。
@@ -3490,16 +3522,20 @@ function PanelBody(props: {
               h('span', { style: { ...S.muted, marginLeft: 'auto', fontSize: 10 } }, r.at.slice(5, 16).replace('T', ' '))),
             h('div', { style: { ...S.muted, fontSize: 11, lineHeight: 1.5 } }, r.detail))))) : null,
     h('nav', { 'aria-label': '金融面板导航' },
-      h('div', { style: { ...S.tabs, gap: 4 } }, TAB_GROUPS.map(group => h('button', {
-        key: group.id, type: 'button', style: { ...S.tab(group.items.some(t => t.id === tab)), flex: 1 },
-        'aria-current': group.items.some(t => t.id === tab) ? 'true' : undefined,
-        onClick: () => selectTab(group.items[0].id),
-      }, group.label))),
-      h('div', { className: 'dsn-tabs', style: { ...S.tabs, gap: 4, padding: '5px 12px' } },
-        (TAB_GROUPS.find(g => g.items.some(t => t.id === tab)) ?? TAB_GROUPS[0]).items.map(t => h('button', {
-          key: t.id, type: 'button', 'aria-current': tab === t.id ? 'page' : undefined,
-          style: S.tab(tab === t.id), onClick: () => selectTab(t.id),
-        }, t.label)))),
+      h('div', { className: 'dsn-primary-tabs', style: { ...S.tabs, gap: 4, padding: '7px 12px' } },
+        TAB_GROUPS.map(group => h('button', {
+          key: group.id, type: 'button', style: { ...S.tab(activeTabGroup.id === group.id), flex: 1, justifyContent: 'center' },
+          'aria-current': activeTabGroup.id === group.id ? 'page' : undefined,
+          onClick: () => selectTab(group.items[0].id),
+        }, group.label))),
+      activeTabGroup.items.length > 1 ? h('div', {
+        className: 'dsn-tabs',
+        'aria-label': `${activeTabGroup.label}页面`,
+        style: { ...S.tabs, gap: 4, padding: '4px 12px', background: R.canvas },
+      }, activeTabGroup.items.map(t => h('button', {
+        key: t.id, type: 'button', 'aria-current': tab === t.id ? 'page' : undefined,
+        style: S.tab(tab === t.id), onClick: () => selectTab(t.id),
+      }, t.label))) : null),
     agentSaved ? h('div', {
       style: {
         display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: 12,
@@ -3814,7 +3850,7 @@ function FootAction(props: { scope: FinanceScope; wide?: boolean }) {
 function SettingsCard() {
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 8, fontSize: 13 } },
     h('h3', { style: { margin: 0 } }, 'DSH Finance'),
-    h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '面板分为「我的工作台」「市场研究」「数据与设置」。首页集中建档、观点、每周复盘及待确认变更；投递前请明确选择会话。'),
+    h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '面板按总览、持仓、研究、追踪和设置组织；研究与设置内按需显示二级页面。首页集中建档、观点、每周复盘及待确认变更；投递前请明确选择会话。'),
     h('p', { style: { margin: 0, opacity: 0.7, fontSize: 12 } }, '持仓与自选保存在本地 JSON 文件中；可上传持仓截图让 Agent 解析，预览并确认后写入，面板实时刷新。'))
 }
 

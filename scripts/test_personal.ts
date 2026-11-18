@@ -12,6 +12,8 @@ import { accessError } from '../src/api-security.js'
 const dir = await mkdtemp(path.join(os.tmpdir(), 'finance-personal-'))
 try {
   assert.throws(() => validateProfile({ goal: '退休', horizonMonths: 0 }))
+  assert.deepEqual(Object.keys(validateProfile({ goal: '先攒首付', horizonMonths: 60 })).sort(), ['goal', 'horizonMonths', 'updatedAt'])
+  assert.throws(() => validateProfile({ goal: '目标', horizonMonths: 60, risk: 'unknown' }))
   assert.equal(weekKey(new Date('2026-09-27T23:59:59Z')), '2026-09-21')
   assert.equal(weekKey(new Date('2026-09-28T00:00:00Z')), '2026-09-28')
   const profile = { goal: '退休资金', horizonMonths: 120, risk: 'medium', maxDrawdownPct: 15, baseCurrency: 'CNY' }
