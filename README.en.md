@@ -126,7 +126,7 @@ If you need the development overlay with absolute paths (host half only, no pane
 npx @deepseek-ai/dsh@0.2.0-rc.2 web --patch ./cordis.dev.yml
 ```
 
-After registration, open **📈 Finance Panel** in the lower-left corner of Harness. The model tools are loaded automatically.
+After registration, open **📈 Finance Panel** in the lower-left corner of Harness. Finance tools are retrieved on demand: the agent starts with `finance_find_tools` plus panel navigation/focus, searches for the requested task, and loads only a small relevant subset (including external MCP tools). The home page's quick setup asks only for a goal and an approximate horizon; risk tolerance, drawdown, and currency are optional.
 
 ## Configuration and data
 

@@ -7,6 +7,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
 import type { McpSource } from '../config.js'
+import type { LazyToolCatalog } from '../tools/lazy.js'
 
 const run = promisify(execFile)
 const MCP_TIMEOUT_MS = 120_000
@@ -40,8 +41,8 @@ async function resolveToken(source: McpSource, secretsPath: string): Promise<str
   return source.apiKey?.trim() || undefined
 }
 
-/** Connect enabled sources, bridge their tools onto ctx.tools, and support hot reload. */
-export function registerMcpSources(ctx: Context, sources: McpSource[], dataDir: string): McpManager {
+/** Connect enabled sources, catalogue their tools without exposing them, and support hot reload. */
+export function registerMcpSources(ctx: Context, sources: McpSource[], dataDir: string, catalog: LazyToolCatalog): McpManager {
   const secretsPath = path.join(dataDir, 'mcp-secrets.json')
   const statuses = new Map<string, SourceStatus>()
   let handles: Disposable[] = []
@@ -55,21 +56,22 @@ export function registerMcpSources(ctx: Context, sources: McpSource[], dataDir: 
     const token = await resolveToken(source, secretsPath)
     base.tokenPresent = !!token
     const noTokenNote = `未配置 token（env ${source.apiKeyEnv ?? ''} 或 data/mcp-secrets.json）`
+    const sourceCtx = catalog.captureContext(ctx, `mcp:${source.name}`, true)
     try {
       if (source.kind === 'mcp-http') {
         if (!source.url) throw new Error('缺少 url')
         if (source.headerName && !token) { base.state = 'no-token'; base.detail = noTokenNote; return }
         const headers = source.headerName && token ? { [source.headerName]: token } : {}
-        const fiber = ctx.plugin(mcpClient, { transport: 'streamable-http', serverName: source.name, url: source.url, headers, toolCallTimeoutMs: MCP_TIMEOUT_MS, failOnStartupError: false })
+        const fiber = sourceCtx.plugin(mcpClient, { transport: 'streamable-http', serverName: source.name, url: source.url, headers, toolCallTimeoutMs: MCP_TIMEOUT_MS, failOnStartupError: false })
         handles.push({ dispose: () => fiber.dispose() })
         base.state = 'ready'
       } else if (source.kind === 'mcp-stdio') {
         if (!source.command) throw new Error('缺少 command')
-        const fiber = ctx.plugin(mcpClient, { transport: 'stdio', serverName: source.name, command: source.command, args: source.args ?? [], env: {}, cwd: '', toolCallTimeoutMs: MCP_TIMEOUT_MS, failOnStartupError: false })
+        const fiber = sourceCtx.plugin(mcpClient, { transport: 'stdio', serverName: source.name, command: source.command, args: source.args ?? [], env: {}, cwd: '', toolCallTimeoutMs: MCP_TIMEOUT_MS, failOnStartupError: false })
         handles.push({ dispose: () => fiber.dispose() })
         base.state = 'ready'
       } else {
-        const disposers = await registerCliSource(ctx, source, token)
+        const disposers = await registerCliSource(sourceCtx, source, token)
         handles.push({ dispose: () => disposers.forEach((d) => d()) })
         base.state = token ? 'ready' : 'no-token'
         if (!token) base.detail = noTokenNote
@@ -100,13 +102,11 @@ export function registerMcpSources(ctx: Context, sources: McpSource[], dataDir: 
   void load()
 
   return {
-    status: () => {
-      const schemas = ctx.tools.schemas()
-      return [...statuses.values()].map((s) => {
-        const prefix = s.kind === 'cli' ? `${s.name}_` : `mcp__${s.name}__`
-        return { ...s, toolCount: schemas.filter((t) => t.name.startsWith(prefix)).length }
-      })
-    },
+    status: () => [...statuses.values()].map((s) => ({
+      ...s,
+      // Catalogued tools count even while they remain unloaded from model context.
+      toolCount: catalog.count(`mcp:${s.name}`),
+    })),
     reload,
     async setToken(name, token) {
       let map: Record<string, string> = {}

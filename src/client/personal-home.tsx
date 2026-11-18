@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { PersonalState, ReviewCard } from '../personal.js'
+import type { InvestorProfile, PersonalState, ReviewCard } from '../personal.js'
 import type { DiagnosisFinding, GrowthSummary, PlanHealth } from '../growth.js'
 
 type Home = PersonalState & {
@@ -25,7 +25,11 @@ type Home = PersonalState & {
 type View = 'overview' | 'journal' | 'reviews' | 'approvals'
 type ThesisForm = { id: string; code: string; type: string; rationale: string; indicator: string; falsifier: string; changeReason: string }
 const blank: ThesisForm = { id: '', code: '', type: 'stock', rationale: '', indicator: '', falsifier: '', changeReason: '' }
-const emptyProfile = { goal: '', horizonMonths: 36, risk: '', maxDrawdownPct: 10, baseCurrency: 'CNY' }
+type ProfileForm = { goal: string; horizonMonths: number | ''; risk: string; maxDrawdownPct: number | ''; baseCurrency: string }
+const emptyProfile: ProfileForm = { goal: '', horizonMonths: '', risk: '', maxDrawdownPct: '', baseCurrency: '' }
+function toProfileForm(profile?: InvestorProfile): ProfileForm {
+  return profile ? { ...emptyProfile, ...profile } : { ...emptyProfile }
+}
 const decisions = { keep: '维持原判断', revise: '需修正观点', defer: '资料不足，暂缓' } as const
 /** 成长回执文案：总线推送（Agent 在对话里改了档案）→ 首页即时提示。 */
 const GROWTH_RECEIPT: Record<string, string> = {
@@ -77,6 +81,9 @@ const css = `
 .finance-home .fh-badge.good{background:rgba(28,156,115,.12);color:${teal}}.finance-home .fh-badge.warn{background:rgba(219,154,26,.13);color:var(--finance-warn,#946217)}.finance-home .fh-badge.info{background:rgba(45,108,166,.13);color:var(--finance-info,#2d6ca6)}
 .finance-home .fh-form{background:rgba(120,134,155,.06);border-radius:11px;padding:13px;margin-top:12px}
 .finance-home .fh-form label{display:block;margin-top:10px}
+.finance-home .fh-optional{margin:12px 0 16px;padding-top:8px;border-top:1px solid ${border}}
+.finance-home .fh-optional summary{font-weight:650}
+.finance-home .fh-optional p{margin:6px 0}
 .finance-home .fh-section-copy{margin:10px 0 14px}
 .finance-home .fh-diff{display:flex;align-items:stretch;gap:10px;flex-wrap:wrap;margin-top:10px}.finance-home .fh-diff>div{flex:1 1 180px;min-width:0}
 .finance-home pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;padding:10px;background:rgba(120,134,155,.08);border-radius:8px;max-height:260px;overflow-y:auto}
@@ -85,7 +92,7 @@ const css = `
 .finance-home .fh-report td,.finance-home .fh-report th{border:1px solid ${border};padding:5px}
 .finance-home .fh-report a{color:${teal}}.finance-home .fh-quote{border-left:3px solid ${teal};padding:8px 12px;margin:13px 0;background:rgba(20,125,121,.05);overflow-wrap:anywhere}
 .finance-home .fh-alert{border:1px solid ${teal};border-radius:10px;padding:12px;margin:10px 0;color:${teal};background:${surface};overflow-wrap:anywhere}
-.finance-home .fh-toast{position:sticky;top:0;z-index:30;cursor:pointer;box-shadow:0 8px 24px rgba(13,48,58,.14);animation:fh-toast-in .22s cubic-bezier(.2,.9,.3,1)}
+.finance-home .fh-toast{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:8px;box-shadow:0 8px 24px rgba(13,48,58,.14);animation:fh-toast-in .22s cubic-bezier(.2,.9,.3,1)}
 @keyframes fh-toast-in{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
 @keyframes fh-dot{0%,100%{opacity:1}50%{opacity:.35}}
 .finance-home .fh-ring{width:62px;height:62px;border-radius:50%;display:grid;place-items:center;flex-shrink:0}
@@ -125,7 +132,7 @@ export function PersonalHome({ deliver, navigate, useBus, openReminders }: {
   const [busy, setBusy] = useState(false)
   const running = useRef(false)
   const [editProfile, setEditProfile] = useState(false)
-  const [profile, setProfile] = useState(emptyProfile)
+  const [profile, setProfile] = useState<ProfileForm>({ ...emptyProfile })
   const [thesis, setThesis] = useState(blank)
   const [seen, setSeen] = useState<Set<string>>(new Set())
   const [reviewLimit, setReviewLimit] = useState(10)
@@ -139,7 +146,7 @@ export function PersonalHome({ deliver, navigate, useBus, openReminders }: {
     const next = await api<Home>('', undefined, signal)
     if (!alive.current || id !== request.current) return
     setData(next)
-    if (!seeded.current) { setProfile(next.profile ?? emptyProfile); seeded.current = true }
+    if (!seeded.current) { setProfile(toProfileForm(next.profile)); seeded.current = true }
   }, [])
   useEffect(() => {
     alive.current = true
@@ -212,7 +219,30 @@ export function PersonalHome({ deliver, navigate, useBus, openReminders }: {
   }
   const action = (label: string, fn: () => Promise<unknown>, primary = false, disabled = false) =>
     <button type="button" className={`fh-btn ${primary ? 'fh-primary' : ''}`} disabled={busy || disabled} onClick={() => void run(fn)}>{label}</button>
+  const profileEditor = () => <form onSubmit={e => {
+    e.preventDefault()
+    void run(async () => { await api('/profile', profile); setEditProfile(false); setNotice('投资档案已保存') })
+  }}>
+    <label>这笔钱主要为了什么？<textarea required className="fh-input" rows={2} maxLength={10000} value={profile.goal} placeholder="例如：为五年后的住房首付做准备" onChange={e => setProfile({ ...profile, goal: e.target.value })} /></label>
+    <label>大约多久后会用到？<select required className="fh-input" value={profile.horizonMonths} onChange={e => setProfile({ ...profile, horizonMonths: e.target.value ? Number(e.target.value) : '' })}>
+      <option value="">选择一个大致期限</option>{[[12, '约 1 年'], [36, '约 3 年'], [60, '约 5 年'], [120, '约 10 年'], [240, '约 20 年'], [360, '30 年或更久']].map(([months, label]) => <option key={months} value={months}>{label}</option>)}
+      {profile.horizonMonths !== '' && ![12, 36, 60, 120, 240, 360].includes(profile.horizonMonths) && <option value={profile.horizonMonths}>当前期限 · {profile.horizonMonths} 个月</option>}
+    </select></label>
+    <details className="fh-optional">
+      <summary>补充风险偏好、币种等（可稍后填写）</summary>
+      <p className="fh-muted">不确定可以留空；不影响先开始使用。风险偏好是自评，不是适当性认证。</p>
+      <label>风险承受能力（可选）<select className="fh-input" value={profile.risk} onChange={e => setProfile({ ...profile, risk: e.target.value })}>
+        <option value="">暂不填写</option><option value="low">低 · 保全本金优先</option><option value="medium">中 · 接受一定波动</option><option value="high">高 · 接受较大波动</option>
+      </select></label>
+      <label>可承受最大回撤（可选，%）<input className="fh-input" type="number" min={0} max={100} value={profile.maxDrawdownPct} placeholder="可留空" onChange={e => setProfile({ ...profile, maxDrawdownPct: e.target.value === '' ? '' : Number(e.target.value) })} /></label>
+      <label>基准币种偏好（可选）<select className="fh-input" value={profile.baseCurrency} onChange={e => setProfile({ ...profile, baseCurrency: e.target.value })}>
+        <option value="">暂不设置</option>{['CNY', 'HKD', 'USD'].map(c => <option key={c}>{c}</option>)}
+      </select></label>
+    </details>
+    <div className="fh-row"><button type="submit" className="fh-btn fh-primary" disabled={busy || !profile.goal.trim() || !profile.horizonMonths}>保存并继续</button>{data?.profile && <button type="button" className="fh-btn" onClick={() => setEditProfile(false)}>取消</button>}</div>
+  </form>
   const outstanding = data?.cards.filter(c => !c.decision).length ?? 0
+  const agentPending = data?.cards.filter(c => !c.agent && !c.decision).length ?? 0
   const sections: Array<{ id: View; label: string; count?: number }> = [
     { id: 'overview', label: '概览' }, { id: 'journal', label: '档案与判断' },
     { id: 'reviews', label: '每周复盘', count: outstanding }, { id: 'approvals', label: '待确认', count: data?.pending.length },
@@ -230,28 +260,36 @@ export function PersonalHome({ deliver, navigate, useBus, openReminders }: {
       </div>
     </header>
     {error && <div role="alert" className="fh-alert fh-error">{error}</div>}
-    {notice && <div role="status" className="fh-alert fh-toast" title="点击关闭" onClick={() => setNotice('')}>{notice}</div>}
+    {notice && <div role="status" className="fh-alert fh-toast">
+      <span style={{ flex: 1, minWidth: 0 }}>{notice}</span>
+      <button type="button" className="fh-btn" aria-label="关闭提示" onClick={() => setNotice('')}>关闭</button>
+    </div>}
     <nav aria-label="个人首页分区" className="fh-nav">{sections.map(t =>
       <button key={t.id} type="button" onClick={() => setView(t.id)} aria-current={view === t.id ? 'page' : undefined}>{t.label}{t.count ? ` ${t.count}` : ''}</button>)}</nav>
     {!data && <div className="fh-card" role="status">{error ? <button className="fh-btn" onClick={() => void run(async () => {})}>重新连接</button> : '正在读取本地档案…'}</div>}
     {data && view === 'overview' && <>
-      <div className="fh-stat-grid" style={data.growth ? { gridTemplateColumns: 'repeat(4,minmax(0,1fr))' } : undefined}>
-        {([
-          [data.profile ? '已完成' : '待完成', '投资建档'],
-          [`${data.theses.length}`, '投资判断'],
-          [`${data.metrics.reviewed}/${data.metrics.generated}`, '已复核 / 卡片'],
-          ...(data.growth ? [[`${data.growth.summary.total ?? '—'}`, '成长综合']] : []),
-        ] as Array<[string, string]>).map(([value, label]) =>
-          <div className="fh-card" key={label}><div className="fh-stat">{value}</div><div className="fh-muted">{label}</div></div>)}
-      </div>
-      <Section title="接下来做什么" meta="按重要性排序">
-        <p className="fh-muted fh-section-copy">{!data.profile ? '先填写目标、期限与风险承受能力，让后续判断有参照。' : data.pending.length ? `${data.pending.length} 项变更等待你检查前后差异。Agent 不会替你确认。` : !data.theses.length ? '记录投资理由，写清验证指标与证伪条件。' : outstanding ? `有 ${outstanding} 张卡片待生成或待人工复核。` : '没有待处理卡片。可以生成本周复盘，或下周再对照新证据。'}</p>
-        <div className="fh-row">
-          <button className="fh-btn fh-primary" onClick={() => setView(!data.profile ? 'journal' : data.pending.length ? 'approvals' : !data.theses.length ? 'journal' : 'reviews')}>
-            {!data.profile ? '开始建档 →' : data.pending.length ? '查看待确认 →' : !data.theses.length ? '记录判断 →' : '查看复盘 →'}</button>
-          {data.profile && data.theses.length > 0 && action('生成本周复盘', generate)}
+      {!data.profile && <Section title="先从一个目标开始" meta="快速开始 · 约 30 秒" anchor="journal">
+        <p className="fh-muted fh-section-copy">先写下目标和大致使用时间即可。风险偏好、回撤和币种都可以稍后补充；不确定的地方留空，不会替你猜。</p>
+        {profileEditor()}
+      </Section>}
+      {data.profile && <>
+        <div className="fh-stat-grid" style={data.growth ? { gridTemplateColumns: 'repeat(4,minmax(0,1fr))' } : undefined}>
+          {([
+            [`${data.theses.length}`, '投资判断'],
+            [`${data.metrics.reviewed}/${data.metrics.generated}`, '已复核 / 卡片'],
+            ...(data.growth ? [[`${data.growth.summary.total ?? '—'}`, '成长综合']] : []),
+          ] as Array<[string, string]>).map(([value, label]) =>
+            <div className="fh-card" key={label}><div className="fh-stat">{value}</div><div className="fh-muted">{label}</div></div>)}
         </div>
-      </Section>
+        <Section title="接下来做什么" meta="先处理最重要的一步">
+          <p className="fh-muted fh-section-copy">{data.pending.length ? `${data.pending.length} 项变更等待你检查前后差异；确认前不会写入。` : !data.theses.length ? '先记录一条投资判断，写下理由和未来想观察的证据。' : outstanding ? `${outstanding} 张复盘卡尚未完成。先查看证据，再决定维持、修正或暂缓。` : '当前没有待确认的复盘卡。可以查看历史记录，或准备本周复盘。'}</p>
+          <div className="fh-row">
+            <button className="fh-btn fh-primary" onClick={() => setView(data.pending.length ? 'approvals' : !data.theses.length ? 'journal' : 'reviews')}>
+              {data.pending.length ? '核对待确认变更 →' : !data.theses.length ? '记录投资判断 →' : outstanding ? '继续复核 →' : '查看复盘记录 →'}</button>
+            {!data.pending.length && data.theses.length > 0 && (agentPending > 0 || outstanding === 0) && action(agentPending ? '请求 Agent 解读待处理卡片' : '准备本周复盘', generate)}
+          </div>
+        </Section>
+      </>}
       {!!data.jobs?.length && <Section title="周任务" meta={`${data.jobs.filter(j => j.state === 'failed').length} 个失败`}>
         <p className="fh-muted">证据采集自动执行（每卡每周幂等）；Agent 解读需你在会话中触发。失败任务可重试；历史缺口不补造伪证据。</p>
         {data.jobs.slice(-8).map(j => <div key={j.key} className="fh-inset fh-row">
@@ -352,17 +390,18 @@ export function PersonalHome({ deliver, navigate, useBus, openReminders }: {
       <Section title="01 / 投资档案" meta={data.profile && !editProfile ? '已完成' : '先建立参照'} anchor="journal">
         {data.profile && !editProfile ? <>
           <p className="fh-copy" style={{ fontWeight: 600 }}>{data.profile.goal}</p>
-          <div className="fh-row"><Badge tone="good">{data.profile.horizonMonths} 个月</Badge><Badge>风险 {({ low: '低', medium: '中', high: '高' } as const)[data.profile.risk]}</Badge><Badge>最大回撤 {data.profile.maxDrawdownPct}%</Badge><Badge>偏好 {data.profile.baseCurrency}</Badge></div>
-          <p className="fh-muted fh-copy">风险能力为自评，不是适当性认证；基准币种不触发隐式折算。</p>
-          <button className="fh-btn" onClick={() => { setProfile(data.profile!); setEditProfile(true) }}>修改档案</button>
-        </> : <form onSubmit={e => { e.preventDefault(); void run(async () => { await api('/profile', profile); setEditProfile(false); setNotice('投资档案已保存') }) }}>
-          <label>投资目标<textarea required className="fh-input" rows={2} maxLength={10000} value={profile.goal} placeholder="例如：为五年后的住房首付积累资金" onChange={e => setProfile({ ...profile, goal: e.target.value })} /></label>
-          <label>投资期限（月）<input required className="fh-input" type="number" min={1} max={1200} step={1} value={profile.horizonMonths} onChange={e => setProfile({ ...profile, horizonMonths: Number(e.target.value) })} /></label>
-          <label>风险承受能力<select required className="fh-input" value={profile.risk} onChange={e => setProfile({ ...profile, risk: e.target.value })}>{[['', '请选择'], ['low', '低 · 保全本金优先'], ['medium', '中 · 接受一定波动'], ['high', '高 · 接受较大波动']].map(([v, label]) => <option key={v} value={v}>{label}</option>)}</select></label>
-          <label>可承受最大回撤（%）<input required className="fh-input" type="number" min={0} max={100} value={profile.maxDrawdownPct} onChange={e => setProfile({ ...profile, maxDrawdownPct: Number(e.target.value) })} /></label>
-          <label>基准币种偏好<select className="fh-input" value={profile.baseCurrency} onChange={e => setProfile({ ...profile, baseCurrency: e.target.value })}>{['CNY', 'HKD', 'USD'].map(c => <option key={c}>{c}</option>)}</select></label>
-          <div className="fh-row"><button type="submit" className="fh-btn fh-primary" disabled={busy}>保存档案</button>{data.profile && <button type="button" className="fh-btn" onClick={() => setEditProfile(false)}>取消</button>}</div>
-        </form>}
+          <div className="fh-row">
+            <Badge tone="good">约 {data.profile.horizonMonths >= 12 ? `${Math.round(data.profile.horizonMonths / 12)} 年` : `${data.profile.horizonMonths} 个月`}</Badge>
+            <Badge>风险 {({ low: '低', medium: '中', high: '高' } as Record<string, string>)[data.profile.risk ?? ''] ?? '未填写'}</Badge>
+            <Badge>最大回撤 {data.profile.maxDrawdownPct === undefined ? '未填写' : `${data.profile.maxDrawdownPct}%`}</Badge>
+            <Badge>币种 {data.profile.baseCurrency ?? '未设置'}</Badge>
+          </div>
+          <p className="fh-muted fh-copy">风险偏好为自评；未填写项不会被推断，也不会触发隐式汇率折算。</p>
+          <button className="fh-btn" onClick={() => { setProfile(toProfileForm(data.profile)); setEditProfile(true) }}>修改档案</button>
+        </> : <>
+          {data.profile && <p className="fh-muted fh-section-copy">只需填写目标与大致期限；其余项目可在“补充信息”里选择填写。</p>}
+          {profileEditor()}
+        </>}
       </Section>
       {data.profile && <Section title="02 / 投资判断" meta={`${data.theses.length} 条记录`}>
         <p className="fh-muted">修改先预览后确认。证伪条件写成可观察的事实，而不是涨跌猜测。</p>

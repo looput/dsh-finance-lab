@@ -10,7 +10,15 @@ import { computeFundRiskMetrics } from './fund-analysis.js'
 
 export type { ThesisIndicator, IndicatorCheck } from './personal-eval.js'
 
-export interface InvestorProfile { goal: string; horizonMonths: number; risk: 'low' | 'medium' | 'high'; maxDrawdownPct: number; baseCurrency: 'CNY' | 'HKD' | 'USD'; updatedAt: string }
+export interface InvestorProfile {
+  goal: string
+  horizonMonths: number
+  /** Optional self-assessment; omitted during quick setup rather than guessed. */
+  risk?: 'low' | 'medium' | 'high'
+  maxDrawdownPct?: number
+  baseCurrency?: 'CNY' | 'HKD' | 'USD'
+  updatedAt: string
+}
 export interface Thesis {
   id: string
   code: string
@@ -111,10 +119,20 @@ function required(v: unknown, name: string) { if (typeof v !== 'string' || !v.tr
 
 export function validateProfile(v: Record<string, unknown>): InvestorProfile {
   if (!Number.isInteger(v.horizonMonths) || Number(v.horizonMonths) < 1 || Number(v.horizonMonths) > 1200) throw new Error('投资期限须为1–1200个月')
-  if (!['low', 'medium', 'high'].includes(String(v.risk))) throw new Error('请选择风险承受能力')
-  if (typeof v.maxDrawdownPct !== 'number' || !Number.isFinite(v.maxDrawdownPct) || v.maxDrawdownPct < 0 || v.maxDrawdownPct > 100) throw new Error('可承受回撤须为0–100%')
-  if (!['CNY', 'HKD', 'USD'].includes(String(v.baseCurrency))) throw new Error('请选择基准币种')
-  return { goal: required(v.goal, '目标'), horizonMonths: Number(v.horizonMonths), risk: v.risk as InvestorProfile['risk'], maxDrawdownPct: v.maxDrawdownPct, baseCurrency: v.baseCurrency as InvestorProfile['baseCurrency'], updatedAt: new Date().toISOString() }
+  const risk = v.risk === undefined || v.risk === '' ? undefined : v.risk
+  if (risk !== undefined && !['low', 'medium', 'high'].includes(String(risk))) throw new Error('风险承受能力值无效')
+  const maxDrawdownPct = v.maxDrawdownPct === undefined || v.maxDrawdownPct === '' ? undefined : v.maxDrawdownPct
+  if (maxDrawdownPct !== undefined && (typeof maxDrawdownPct !== 'number' || !Number.isFinite(maxDrawdownPct) || maxDrawdownPct < 0 || maxDrawdownPct > 100)) throw new Error('可承受回撤须为0–100%')
+  const baseCurrency = v.baseCurrency === undefined || v.baseCurrency === '' ? undefined : v.baseCurrency
+  if (baseCurrency !== undefined && !['CNY', 'HKD', 'USD'].includes(String(baseCurrency))) throw new Error('基准币种值无效')
+  return {
+    goal: required(v.goal, '目标'),
+    horizonMonths: Number(v.horizonMonths),
+    ...(risk !== undefined ? { risk: risk as InvestorProfile['risk'] } : {}),
+    ...(maxDrawdownPct !== undefined ? { maxDrawdownPct: maxDrawdownPct as number } : {}),
+    ...(baseCurrency !== undefined ? { baseCurrency: baseCurrency as InvestorProfile['baseCurrency'] } : {}),
+    updatedAt: new Date().toISOString(),
+  }
 }
 
 export class PersonalStore {
